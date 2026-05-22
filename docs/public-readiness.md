@@ -41,6 +41,8 @@ keep the same checks in CI and protect the default branch.
 - [ ] Examples use `example.invalid` or dummy paths only.
 - [ ] Static development signing key is either removed or clearly documented as non-production.
 - [ ] No claim of production readiness.
+- [ ] `CONTRIBUTING.md` describes security-sensitive change rules.
+- [ ] `docs/release-checklist.md` describes signed release steps.
 
 ## Public Repository Controls
 
