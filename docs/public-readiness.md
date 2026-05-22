@@ -1,8 +1,9 @@
 # Public Readiness Checklist
 
-AgentK should stay local until this checklist is boring.
+AgentK should stay local until the pre-public checklist is boring. After the first public push,
+keep the same checks in CI and protect the default branch.
 
-## Repository Hygiene
+## Pre-Public Repository Hygiene
 
 - [ ] No git remote configured.
 - [ ] No generated `.agentk/` logs tracked.
@@ -41,6 +42,15 @@ AgentK should stay local until this checklist is boring.
 - [ ] Static development signing key is either removed or clearly documented as non-production.
 - [ ] No claim of production readiness.
 
+## Public Repository Controls
+
+- [x] CI runs `cargo run --locked -- release-audit` on pushes and pull requests.
+- [x] Default branch requires the CI `audit` check before merging.
+- [x] Default branch blocks force pushes and deletion.
+- [x] Secret scanning and push protection are enabled.
+- [x] Dependabot vulnerability alerts and security updates are enabled.
+- [x] GitHub private vulnerability reporting is enabled.
+
 ## Release Gate
 
 Before first public push:
@@ -61,3 +71,14 @@ cargo run -- mcp-server < examples/mcp-server-session.jsonl
 ```
 
 Then manually inspect every tracked file.
+
+After first public push:
+
+```txt
+git status --short
+cargo run -- release-audit
+gh repo view Atomics-hub/agentk --json visibility,url,defaultBranchRef
+gh api repos/Atomics-hub/agentk/private-vulnerability-reporting --jq '.enabled'
+gh api repos/Atomics-hub/agentk/automated-security-fixes --jq '.enabled'
+gh api repos/Atomics-hub/agentk --jq '.security_and_analysis'
+```

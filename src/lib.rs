@@ -2084,8 +2084,8 @@ fn check_git_remote(root: &Path) -> ReadinessCheck {
             } else {
                 readiness_check(
                     "git remote",
-                    ReadinessStatus::Fail,
-                    "a remote is configured; keep local until release approval",
+                    ReadinessStatus::Warn,
+                    "remote configured; verify release approval and branch protection",
                 )
             }
         }
@@ -2233,7 +2233,7 @@ fn check_signing_key_source() -> ReadinessCheck {
         SigningKeySource::Development => readiness_check(
             "signing key source",
             ReadinessStatus::Warn,
-            "using static development key; acceptable only before public release",
+            "using static development key; acceptable only for demos and CI smoke checks",
         ),
         SigningKeySource::InvalidEnvironmentFallback => readiness_check(
             "signing key source",

@@ -1,8 +1,10 @@
 # AgentK
 
+[![CI](https://github.com/Atomics-hub/agentk/actions/workflows/ci.yml/badge.svg)](https://github.com/Atomics-hub/agentk/actions/workflows/ci.yml)
+
 AgentK is a tiny prototype of an **agent security kernel**.
 
-Status: local prototype, not production-ready, not publicly released.
+Status: public prototype, not production-ready.
 
 It is not another agent framework. It is the syscall boundary agent frameworks should run through:
 

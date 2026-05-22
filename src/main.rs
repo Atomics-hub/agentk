@@ -539,7 +539,7 @@ fn readiness(json: bool) -> Result<(), AgentKError> {
         .iter()
         .any(|check| check.status == ReadinessStatus::Warn)
     {
-        println!("note      warnings still need human review before public release");
+        println!("note      warnings still need human review before release or merge");
     }
 
     Ok(())
@@ -577,7 +577,7 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
     );
 
     if has_warnings {
-        println!("note      warnings still need human review before public release");
+        println!("note      warnings still need human review before release or merge");
     }
 
     if strict && has_warnings {

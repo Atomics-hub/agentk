@@ -69,12 +69,19 @@ Status: in progress.
 ## Milestone 5: Public Release Gate
 
 - [x] No git remote until explicit release approval.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo test` passes.
-- [ ] `cargo clippy --all-targets --all-features` passes.
-- [ ] `cargo run -- readiness` passes.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo test` passes.
+- [x] `cargo clippy --all-targets --all-features` passes.
+- [x] `cargo run -- readiness` passes.
 - [x] Add one-command local release audit.
-- [ ] Manual tracked-file review completed.
-- [ ] README claims match implemented behavior.
+- [x] Manual tracked-file review completed.
+- [x] README claims match implemented behavior.
 - [x] Security disclosure instructions are real.
-- [ ] GitHub private vulnerability reporting enabled before announcement.
+- [x] GitHub private vulnerability reporting enabled before announcement.
+
+## Milestone 5.5: Maintainer Guardrails
+
+- [x] Add CI release-audit workflow.
+- [x] Protect the default branch with the CI `audit` check.
+- [ ] Add contributor guidelines for security-sensitive changes.
+- [ ] Add a signed release checklist for tagged versions.
