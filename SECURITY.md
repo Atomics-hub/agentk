@@ -59,4 +59,10 @@ Before public release:
 
 While this is local-only, report issues directly to the repository owner.
 
-If AgentK becomes public, replace this section with a private disclosure address and a supported-version table before announcing the repo.
+Before public announcement, enable GitHub private vulnerability reporting for the repository. Once enabled, report suspected vulnerabilities through GitHub's **Security** tab with **Report a vulnerability**. Do not open public issues for suspected vulnerabilities.
+
+## Supported Versions
+
+AgentK is currently a local prototype. No public versions are supported yet.
+
+When AgentK becomes public, the first tagged prototype release should be the only supported disclosure target until a broader support policy exists.

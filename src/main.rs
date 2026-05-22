@@ -135,6 +135,9 @@ enum Command {
         /// Emit the full audit report as JSON.
         #[arg(long)]
         json: bool,
+        /// Treat warnings as blocking failures for final pre-push review.
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -171,7 +174,7 @@ fn run() -> Result<(), AgentKError> {
         Command::KeyRotateVerify { manifest, json } => key_rotate_verify(manifest, json),
         Command::PolicyCheck { path } => policy_check(path),
         Command::Readiness { json } => readiness(json),
-        Command::ReleaseAudit { json } => release_audit(json),
+        Command::ReleaseAudit { json, strict } => release_audit(json, strict),
     }
 }
 
@@ -542,15 +545,23 @@ fn readiness(json: bool) -> Result<(), AgentKError> {
     Ok(())
 }
 
-fn release_audit(json: bool) -> Result<(), AgentKError> {
+fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
     let report = release_audit_report(".");
+    let has_warnings = report
+        .checks
+        .iter()
+        .any(|check| check.status == ReadinessStatus::Warn);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.passed || (strict && has_warnings) {
+            std::process::exit(2);
+        }
         return Ok(());
     }
 
     println!("AgentK release audit");
+    println!("mode      {}", if strict { "strict" } else { "standard" });
     println!("root      {}", report.root.display());
     for check in &report.checks {
         println!("[{}] {:<30} {}", check.status, check.name, check.detail);
@@ -558,22 +569,22 @@ fn release_audit(json: bool) -> Result<(), AgentKError> {
     println!();
     println!(
         "verdict   {}",
-        if report.passed {
+        if report.passed && !(strict && has_warnings) {
             "no blocking failures"
         } else {
             "not ready"
         }
     );
 
-    if report
-        .checks
-        .iter()
-        .any(|check| check.status == ReadinessStatus::Warn)
-    {
+    if has_warnings {
         println!("note      warnings still need human review before public release");
     }
 
-    if !report.passed {
+    if strict && has_warnings {
+        println!("strict    warnings are treated as blockers");
+    }
+
+    if !report.passed || (strict && has_warnings) {
         std::process::exit(2);
     }
 

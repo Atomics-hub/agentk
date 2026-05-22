@@ -1841,6 +1841,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
         check_policy(&root),
         check_policy_profiles(&root),
+        check_security_disclosure(&root),
         check_signing_key_source(),
         check_signing_key_disclaimer(&root),
         check_sensitive_patterns(&root),
@@ -2192,6 +2193,32 @@ fn check_policy_profiles(root: &Path) -> ReadinessCheck {
             ReadinessStatus::Pass,
             format!("{checked} profile policies parsed"),
         )
+    }
+}
+
+fn check_security_disclosure(root: &Path) -> ReadinessCheck {
+    match fs::read_to_string(root.join("SECURITY.md")) {
+        Ok(content)
+            if content.contains("GitHub private vulnerability reporting")
+                && content.contains("Supported Versions")
+                && !content.contains("replace this section") =>
+        {
+            readiness_check(
+                "security disclosure",
+                ReadinessStatus::Pass,
+                "disclosure path and supported-version policy are documented",
+            )
+        }
+        Ok(_) => readiness_check(
+            "security disclosure",
+            ReadinessStatus::Fail,
+            "SECURITY.md must document disclosure path and supported versions",
+        ),
+        Err(error) => readiness_check(
+            "security disclosure",
+            ReadinessStatus::Fail,
+            format!("could not read SECURITY.md: {error}"),
+        ),
     }
 }
 

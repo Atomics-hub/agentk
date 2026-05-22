@@ -76,4 +76,5 @@ Status: in progress.
 - [x] Add one-command local release audit.
 - [ ] Manual tracked-file review completed.
 - [ ] README claims match implemented behavior.
-- [ ] Security disclosure instructions are real.
+- [x] Security disclosure instructions are real.
+- [ ] GitHub private vulnerability reporting enabled before announcement.

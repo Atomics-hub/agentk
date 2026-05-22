@@ -35,7 +35,8 @@ AgentK should stay local until this checklist is boring.
 
 - [ ] Each feature is marked implemented, planned, or experimental.
 - [ ] Threat model is current.
-- [ ] `SECURITY.md` has real disclosure instructions.
+- [ ] GitHub private vulnerability reporting is enabled before public announcement.
+- [ ] `SECURITY.md` has disclosure instructions and a supported-version policy.
 - [ ] Examples use `example.invalid` or dummy paths only.
 - [ ] Static development signing key is either removed or clearly documented as non-production.
 - [ ] No claim of production readiness.
@@ -47,7 +48,7 @@ Before first public push:
 ```txt
 git remote -v
 git status --short
-cargo run -- release-audit
+AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-signing-key) cargo run -- release-audit --strict
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features

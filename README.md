@@ -109,6 +109,12 @@ Run the full local release audit:
 cargo run -- release-audit
 ```
 
+Run the strict pre-push audit with a configured signing key:
+
+```sh
+AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-signing-key) cargo run -- release-audit --strict
+```
+
 Mediate a demo MCP-shaped tool request without executing it:
 
 ```sh
