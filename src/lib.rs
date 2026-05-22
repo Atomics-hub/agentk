@@ -1,0 +1,2802 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::env;
+use std::fmt;
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+const DEFAULT_POLICY_TOML: &str = include_str!("../examples/agentk.policy.toml");
+const PROOF_ALGORITHM: &str = "ed25519";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const MCP_MEDIATE_TOOL: &str = "agentk.mediate";
+const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
+pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Label {
+    Trusted,
+    Untrusted,
+    External,
+    Private,
+    Secret,
+    PoisonedSuspect,
+}
+
+impl Label {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Untrusted => "untrusted",
+            Self::External => "external",
+            Self::Private => "private",
+            Self::Secret => "secret",
+            Self::PoisonedSuspect => "poisoned-suspect",
+        }
+    }
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextPage {
+    pub id: String,
+    pub source: String,
+    pub summary: String,
+    pub labels: BTreeSet<Label>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SyscallKind {
+    ContextRead,
+    ModelCall,
+    SecretOpen,
+    NetworkSend,
+    ToolInvoke,
+    Unknown(String),
+}
+
+impl SyscallKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ContextRead => "context.read",
+            Self::ModelCall => "model.call",
+            Self::SecretOpen => "secret.open",
+            Self::NetworkSend => "network.send",
+            Self::ToolInvoke => "tool.invoke",
+            Self::Unknown(name) => name,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "context.read" => Self::ContextRead,
+            "model.call" => Self::ModelCall,
+            "secret.open" => Self::SecretOpen,
+            "network.send" => Self::NetworkSend,
+            "tool.invoke" => Self::ToolInvoke,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
+impl fmt::Display for SyscallKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for SyscallKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SyscallKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&name))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Syscall {
+    pub kind: SyscallKind,
+    pub target: String,
+    pub intent: String,
+    pub labels: BTreeSet<Label>,
+    pub inputs: Vec<String>,
+}
+
+impl Syscall {
+    pub fn capability_name(&self) -> String {
+        format!("{}:{}", self.kind, self.target)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Allow,
+    Deny,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+impl fmt::Display for Verdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CapabilityReceipt {
+    pub id: String,
+    pub issued_to: String,
+    pub syscall: String,
+    pub target: String,
+    pub scope: String,
+    pub expires_at_step: u64,
+    pub proof: String,
+    pub signature: String,
+    pub public_key: String,
+    pub algorithm: String,
+    pub key_source: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SecretHandle {
+    pub id: String,
+    pub target: String,
+    pub labels: BTreeSet<Label>,
+    pub expires_at_step: u64,
+    pub proof: String,
+    pub signature: String,
+    pub public_key: String,
+    pub algorithm: String,
+    pub key_source: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SecretBroker {
+    secrets: BTreeMap<String, String>,
+}
+
+impl SecretBroker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, target: impl Into<String>, secret: impl Into<String>) {
+        self.secrets.insert(target.into(), secret.into());
+    }
+
+    fn open(
+        &self,
+        agent_id: &str,
+        step: u64,
+        target: &str,
+        previous_hash: &str,
+    ) -> Option<SecretHandle> {
+        self.secrets.get(target)?;
+
+        let proof = hash_json(&SecretHandleProofInput {
+            agent_id,
+            step,
+            target,
+            previous_hash,
+        });
+        let signed = sign_proof(&proof);
+
+        Some(SecretHandle {
+            id: format!("secret_fd_{}", &proof[..12]),
+            target: target.to_string(),
+            labels: labels(&[Label::Secret, Label::Private]),
+            expires_at_step: step,
+            proof,
+            signature: signed.signature,
+            public_key: signed.public_key,
+            algorithm: signed.algorithm,
+            key_source: signed.key_source,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct SecretHandleProofInput<'a> {
+    agent_id: &'a str,
+    step: u64,
+    target: &'a str,
+    previous_hash: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyDecision {
+    pub verdict: Verdict,
+    pub reason: String,
+    pub rule: String,
+    pub missing_capability: Option<String>,
+    pub receipt: Option<CapabilityReceipt>,
+    pub secret_handle: Option<SecretHandle>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Event {
+    pub step: u64,
+    pub syscall: Syscall,
+    pub decision: PolicyDecision,
+    pub previous_hash: String,
+    pub event_hash: String,
+}
+
+impl Event {
+    pub fn new(
+        step: u64,
+        syscall: Syscall,
+        decision: PolicyDecision,
+        previous_hash: String,
+    ) -> Self {
+        let event_hash = hash_json(&EventHashInput {
+            step,
+            syscall: &syscall,
+            decision: &decision,
+            previous_hash: &previous_hash,
+        });
+
+        Self {
+            step,
+            syscall,
+            decision,
+            previous_hash,
+            event_hash,
+        }
+    }
+
+    pub fn verify_hash(&self) -> bool {
+        let expected = hash_json(&EventHashInput {
+            step: self.step,
+            syscall: &self.syscall,
+            decision: &self.decision,
+            previous_hash: &self.previous_hash,
+        });
+        expected == self.event_hash
+    }
+}
+
+#[derive(Serialize)]
+struct EventHashInput<'a> {
+    step: u64,
+    syscall: &'a Syscall,
+    decision: &'a PolicyDecision,
+    previous_hash: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentKernel {
+    agent_id: String,
+    capabilities: BTreeSet<String>,
+    policy: Policy,
+    secret_broker: SecretBroker,
+    previous_hash: String,
+    events: Vec<Event>,
+}
+
+impl AgentKernel {
+    pub fn new(agent_id: impl Into<String>) -> Self {
+        Self::with_policy(agent_id, Policy::default())
+    }
+
+    pub fn with_policy(agent_id: impl Into<String>, policy: Policy) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            capabilities: BTreeSet::new(),
+            policy,
+            secret_broker: SecretBroker::new(),
+            previous_hash: ZERO_HASH.to_string(),
+            events: Vec::new(),
+        }
+    }
+
+    pub fn with_secret_broker(mut self, secret_broker: SecretBroker) -> Self {
+        self.secret_broker = secret_broker;
+        self
+    }
+
+    pub fn grant(&mut self, capability: impl Into<String>) {
+        self.capabilities.insert(capability.into());
+    }
+
+    pub fn syscall(&mut self, syscall: Syscall) -> &Event {
+        let step = self.events.len() as u64 + 1;
+        let decision = self.evaluate(step, &syscall);
+        let event = Event::new(step, syscall, decision, self.previous_hash.clone());
+        self.previous_hash = event.event_hash.clone();
+        self.events.push(event);
+        self.events.last().expect("event was just pushed")
+    }
+
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub fn write_jsonl(&self, path: impl AsRef<Path>) -> Result<PathBuf, AgentKError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut out = String::new();
+        for event in &self.events {
+            out.push_str(&serde_json::to_string(event)?);
+            out.push('\n');
+        }
+        fs::write(path, out)?;
+        Ok(path.to_path_buf())
+    }
+
+    fn evaluate(&self, step: u64, syscall: &Syscall) -> PolicyDecision {
+        let context = PolicyContext::new(
+            syscall,
+            self.capabilities.contains(&syscall.capability_name()),
+        );
+
+        for rule in &self.policy.rules {
+            if !rule.when.matches(&context) {
+                continue;
+            }
+
+            return match rule.effect {
+                RuleEffect::Allow => self.allow_for_rule(step, syscall, rule),
+                RuleEffect::Deny => self.deny_for_rule(syscall, rule, context.capability_present),
+            };
+        }
+
+        self.deny(
+            "default-deny",
+            &self.policy.reason(
+                "default-deny",
+                "no policy rule allowed this syscall; default deny",
+            ),
+            (!context.capability_present).then(|| syscall.capability_name()),
+        )
+    }
+
+    fn allow_for_rule(&self, step: u64, syscall: &Syscall, rule: &PolicyRule) -> PolicyDecision {
+        if matches!(&syscall.kind, SyscallKind::SecretOpen) {
+            if let Some(secret_handle) =
+                self.secret_broker
+                    .open(&self.agent_id, step, &syscall.target, &self.previous_hash)
+            {
+                return self.allow_with_secret_handle(step, syscall, rule, secret_handle);
+            }
+
+            return self.deny(
+                "secret-fd-unavailable",
+                &self.policy.reason(
+                    "secret-fd-unavailable",
+                    "secret capability was present, but no brokered secret handle exists",
+                ),
+                None,
+            );
+        }
+
+        self.allow(step, syscall, &rule.id, &rule.reason)
+    }
+
+    fn deny_for_rule(
+        &self,
+        syscall: &Syscall,
+        rule: &PolicyRule,
+        capability_present: bool,
+    ) -> PolicyDecision {
+        self.deny(
+            &rule.id,
+            &rule.reason,
+            (!capability_present).then(|| syscall.capability_name()),
+        )
+    }
+
+    fn allow(&self, step: u64, syscall: &Syscall, rule: &str, reason: &str) -> PolicyDecision {
+        PolicyDecision {
+            verdict: Verdict::Allow,
+            reason: reason.to_string(),
+            rule: rule.to_string(),
+            missing_capability: None,
+            receipt: Some(self.receipt(step, syscall)),
+            secret_handle: None,
+        }
+    }
+
+    fn allow_with_secret_handle(
+        &self,
+        step: u64,
+        syscall: &Syscall,
+        rule: &PolicyRule,
+        secret_handle: SecretHandle,
+    ) -> PolicyDecision {
+        PolicyDecision {
+            verdict: Verdict::Allow,
+            reason: rule.reason.clone(),
+            rule: rule.id.clone(),
+            missing_capability: None,
+            receipt: Some(self.receipt(step, syscall)),
+            secret_handle: Some(secret_handle),
+        }
+    }
+
+    fn deny(&self, rule: &str, reason: &str, missing_capability: Option<String>) -> PolicyDecision {
+        PolicyDecision {
+            verdict: Verdict::Deny,
+            reason: reason.to_string(),
+            rule: rule.to_string(),
+            missing_capability,
+            receipt: None,
+            secret_handle: None,
+        }
+    }
+
+    fn receipt(&self, step: u64, syscall: &Syscall) -> CapabilityReceipt {
+        let scope = syscall.capability_name();
+        let proof = hash_json(&ReceiptProofInput {
+            agent_id: &self.agent_id,
+            step,
+            syscall: syscall.kind.as_str(),
+            target: &syscall.target,
+            scope: &scope,
+            previous_hash: &self.previous_hash,
+        });
+        let signed = sign_proof(&proof);
+
+        CapabilityReceipt {
+            id: format!("cap_{}", &proof[..12]),
+            issued_to: self.agent_id.clone(),
+            syscall: syscall.kind.to_string(),
+            target: syscall.target.clone(),
+            scope,
+            expires_at_step: step,
+            proof,
+            signature: signed.signature,
+            public_key: signed.public_key,
+            algorithm: signed.algorithm,
+            key_source: signed.key_source,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReceiptProofInput<'a> {
+    agent_id: &'a str,
+    step: u64,
+    syscall: &'a str,
+    target: &'a str,
+    scope: &'a str,
+    previous_hash: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Policy {
+    pub agent: PolicyAgent,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rules: Vec<PolicyRule>,
+}
+
+impl Policy {
+    pub fn parse_toml(input: &str) -> Result<Self, AgentKError> {
+        let policy: Self = toml::from_str(input)?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, AgentKError> {
+        Self::parse_toml(&fs::read_to_string(path)?)
+    }
+
+    pub fn reason(&self, rule_id: &str, fallback: &str) -> String {
+        self.rules
+            .iter()
+            .find(|rule| rule.id == rule_id)
+            .map(|rule| rule.reason.clone())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    pub fn validate(&self) -> Result<(), AgentKError> {
+        if self.agent.id.trim().is_empty() {
+            return Err(AgentKError::InvalidPolicy(
+                "agent.id must not be empty".to_string(),
+            ));
+        }
+
+        let mut ids = BTreeSet::new();
+        for rule in &self.rules {
+            if rule.id.trim().is_empty() {
+                return Err(AgentKError::InvalidPolicy(
+                    "rule id must not be empty".to_string(),
+                ));
+            }
+            if !ids.insert(rule.id.clone()) {
+                return Err(AgentKError::InvalidPolicy(format!(
+                    "duplicate rule id {}",
+                    rule.id
+                )));
+            }
+            if rule.reason.trim().is_empty() {
+                return Err(AgentKError::InvalidPolicy(format!(
+                    "rule {} must include a reason",
+                    rule.id
+                )));
+            }
+            if rule.id != "default-deny" && rule.when.syscalls.is_empty() {
+                return Err(AgentKError::InvalidPolicy(format!(
+                    "rule {} must include at least one syscall",
+                    rule.id
+                )));
+            }
+            if let Some(unknown) = rule.when.syscalls.iter().find(|kind| !kind.is_known()) {
+                return Err(AgentKError::InvalidPolicy(format!(
+                    "rule {} references unknown syscall {}",
+                    rule.id, unknown
+                )));
+            }
+        }
+
+        if !self
+            .rules
+            .last()
+            .map(|rule| rule.id == "default-deny")
+            .unwrap_or(false)
+        {
+            return Err(AgentKError::InvalidPolicy(
+                "default-deny must be the final policy rule".to_string(),
+            ));
+        }
+
+        for required in [
+            "context-read",
+            "secret-fd",
+            "secret-fd-unavailable",
+            "secret-fd-required",
+            "taint-sensitive-egress",
+            "taint-untrusted-egress",
+            "capability-missing",
+            "capability-receipt",
+            "tool-sensitive-input",
+            "tool-invoke-receipt",
+            "tool-invoke-capability-missing",
+            "default-deny",
+        ] {
+            if !ids.contains(required) {
+                return Err(AgentKError::InvalidPolicy(format!(
+                    "missing required rule {required}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self::parse_toml(DEFAULT_POLICY_TOML).expect("bundled default policy should parse")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyAgent {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyRule {
+    pub id: String,
+    pub effect: RuleEffect,
+    pub when: PolicyWhen,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyWhen {
+    pub syscalls: Vec<SyscallKind>,
+    pub labels_any: BTreeSet<Label>,
+    pub labels_all: BTreeSet<Label>,
+    pub labels_none: BTreeSet<Label>,
+    pub capability: Option<CapabilityState>,
+}
+
+impl PolicyWhen {
+    fn matches(&self, context: &PolicyContext<'_>) -> bool {
+        if !self.syscalls.is_empty()
+            && !self
+                .syscalls
+                .iter()
+                .any(|kind| kind == &context.syscall.kind)
+        {
+            return false;
+        }
+
+        if !self.labels_any.is_empty()
+            && self
+                .labels_any
+                .iter()
+                .all(|label| !context.syscall.labels.contains(label))
+        {
+            return false;
+        }
+
+        if !self
+            .labels_all
+            .iter()
+            .all(|label| context.syscall.labels.contains(label))
+        {
+            return false;
+        }
+
+        if self
+            .labels_none
+            .iter()
+            .any(|label| context.syscall.labels.contains(label))
+        {
+            return false;
+        }
+
+        match self.capability {
+            Some(CapabilityState::Present) => context.capability_present,
+            Some(CapabilityState::Missing) => !context.capability_present,
+            None => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityState {
+    Present,
+    Missing,
+}
+
+struct PolicyContext<'a> {
+    syscall: &'a Syscall,
+    capability_present: bool,
+}
+
+impl<'a> PolicyContext<'a> {
+    fn new(syscall: &'a Syscall, capability_present: bool) -> Self {
+        Self {
+            syscall,
+            capability_present,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleEffect {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DemoReport {
+    pub log_path: PathBuf,
+    pub final_hash: String,
+    pub blocked: usize,
+    pub events: Vec<Event>,
+}
+
+pub fn run_poisoned_webpage_demo(log_path: impl AsRef<Path>) -> Result<DemoReport, AgentKError> {
+    let policy = Policy::default();
+    let mut kernel = AgentKernel::with_policy(policy.agent.id.clone(), policy);
+
+    let poisoned_page = ContextPage {
+        id: "ctx_web_001".to_string(),
+        source: "https://docs.example.invalid/page-with-hidden-instructions".to_string(),
+        summary: "A webpage containing hidden instructions to exfiltrate ~/.ssh/id_rsa."
+            .to_string(),
+        labels: labels(&[Label::Untrusted, Label::External, Label::PoisonedSuspect]),
+    };
+
+    kernel.syscall(Syscall {
+        kind: SyscallKind::ContextRead,
+        target: poisoned_page.source.clone(),
+        intent: "read webpage for the user's research task".to_string(),
+        labels: poisoned_page.labels.clone(),
+        inputs: vec![poisoned_page.id.clone()],
+    });
+
+    kernel.syscall(Syscall {
+        kind: SyscallKind::ModelCall,
+        target: "local-or-remote-llm".to_string(),
+        intent: "summarize context and choose next action".to_string(),
+        labels: poisoned_page.labels.clone(),
+        inputs: vec![poisoned_page.id.clone()],
+    });
+
+    kernel.syscall(Syscall {
+        kind: SyscallKind::SecretOpen,
+        target: "~/.ssh/id_rsa".to_string(),
+        intent: "open private key requested by untrusted webpage content".to_string(),
+        labels: labels(&[
+            Label::Untrusted,
+            Label::External,
+            Label::PoisonedSuspect,
+            Label::Secret,
+            Label::Private,
+        ]),
+        inputs: vec![poisoned_page.id.clone()],
+    });
+
+    kernel.syscall(Syscall {
+        kind: SyscallKind::NetworkSend,
+        target: "https://evil.example.invalid/upload".to_string(),
+        intent: "send private key material to attacker-controlled endpoint".to_string(),
+        labels: labels(&[
+            Label::Untrusted,
+            Label::External,
+            Label::PoisonedSuspect,
+            Label::Secret,
+            Label::Private,
+        ]),
+        inputs: vec!["secret_fd:ssh_key_denied".to_string(), poisoned_page.id],
+    });
+
+    let log_path = kernel.write_jsonl(log_path)?;
+    let blocked = kernel
+        .events()
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Deny)
+        .count();
+
+    Ok(DemoReport {
+        log_path,
+        final_hash: kernel
+            .events()
+            .last()
+            .map(|event| event.event_hash.clone())
+            .unwrap_or_else(|| ZERO_HASH.to_string()),
+        blocked,
+        events: kernel.events().to_vec(),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpToolRequest {
+    pub agent_id: String,
+    pub tool: String,
+    #[serde(default)]
+    pub intent: String,
+    #[serde(default)]
+    pub labels: BTreeSet<Label>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpProxyReport {
+    pub executed: bool,
+    pub event: Event,
+}
+
+pub fn mcp_proxy_from_path(path: impl AsRef<Path>) -> Result<McpProxyReport, AgentKError> {
+    let request: McpToolRequest = serde_json::from_str(&fs::read_to_string(path)?)?;
+    Ok(mediate_mcp_tool_request(request))
+}
+
+pub fn mediate_mcp_tool_request(request: McpToolRequest) -> McpProxyReport {
+    let mut kernel = None;
+    mediate_mcp_tool_request_in_session(request, &mut kernel)
+}
+
+fn mediate_mcp_tool_request_in_session(
+    request: McpToolRequest,
+    kernel: &mut Option<AgentKernel>,
+) -> McpProxyReport {
+    let (agent_id, capabilities, syscall) = mcp_request_into_syscall(request);
+    let kernel = kernel.get_or_insert_with(|| AgentKernel::new(agent_id));
+    for capability in capabilities {
+        kernel.grant(capability);
+    }
+
+    let event = kernel.syscall(syscall).clone();
+
+    McpProxyReport {
+        executed: false,
+        event,
+    }
+}
+
+pub fn mediate_mcp_json_lines(input: &str) -> Result<String, AgentKError> {
+    let mut out = String::new();
+    let mut kernel = None::<AgentKernel>;
+
+    for (index, line) in input.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request: McpToolRequest = serde_json::from_str(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!("line {}: {error}", index + 1))
+        })?;
+        let report = mediate_mcp_tool_request_in_session(request, &mut kernel);
+        out.push_str(&serde_json::to_string(&report)?);
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
+    let mut out = String::new();
+    let mut kernel = None::<AgentKernel>;
+
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(message) => handle_mcp_json_rpc_message(message, &mut kernel),
+            Err(error) => Some(jsonrpc_error(
+                serde_json::Value::Null,
+                -32700,
+                "Parse error",
+                Some(serde_json::json!({ "detail": error.to_string() })),
+            )),
+        };
+
+        if let Some(response) = response {
+            out.push_str(&serde_json::to_string(&response)?);
+            out.push('\n');
+        }
+    }
+
+    Ok(out)
+}
+
+fn handle_mcp_json_rpc_message(
+    message: serde_json::Value,
+    kernel: &mut Option<AgentKernel>,
+) -> Option<serde_json::Value> {
+    if message.is_array() {
+        return Some(jsonrpc_error(
+            serde_json::Value::Null,
+            -32600,
+            "Invalid Request",
+            Some(serde_json::json!({ "detail": "batch requests are not supported" })),
+        ));
+    }
+
+    let Some(object) = message.as_object() else {
+        return Some(jsonrpc_error(
+            serde_json::Value::Null,
+            -32600,
+            "Invalid Request",
+            Some(serde_json::json!({ "detail": "message must be a JSON object" })),
+        ));
+    };
+
+    let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let is_notification = !object.contains_key("id");
+
+    if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
+        return (!is_notification).then(|| {
+            jsonrpc_error(
+                id,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({ "detail": "jsonrpc must be \"2.0\"" })),
+            )
+        });
+    }
+
+    let Some(method) = object.get("method").and_then(|value| value.as_str()) else {
+        return (!is_notification).then(|| {
+            jsonrpc_error(
+                id,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({ "detail": "method must be a string" })),
+            )
+        });
+    };
+
+    if is_notification {
+        return None;
+    }
+
+    let params = object
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    match method {
+        "initialize" => Some(jsonrpc_success(id, mcp_initialize_result())),
+        "ping" => Some(jsonrpc_success(id, serde_json::json!({}))),
+        "tools/list" => Some(jsonrpc_success(
+            id,
+            serde_json::json!({ "tools": [mcp_mediate_tool_descriptor()] }),
+        )),
+        "tools/call" => Some(handle_mcp_tool_call(id, params, kernel)),
+        _ => Some(jsonrpc_error(id, -32601, "Method not found", None)),
+    }
+}
+
+fn handle_mcp_tool_call(
+    id: serde_json::Value,
+    params: serde_json::Value,
+    kernel: &mut Option<AgentKernel>,
+) -> serde_json::Value {
+    let Some(params) = params.as_object() else {
+        return jsonrpc_error(
+            id,
+            -32602,
+            "Invalid params",
+            Some(serde_json::json!({ "detail": "params must be an object" })),
+        );
+    };
+
+    let Some(name) = params.get("name").and_then(|value| value.as_str()) else {
+        return jsonrpc_error(
+            id,
+            -32602,
+            "Invalid params",
+            Some(serde_json::json!({ "detail": "params.name must be a string" })),
+        );
+    };
+
+    if name != MCP_MEDIATE_TOOL {
+        return jsonrpc_error(
+            id,
+            -32602,
+            "Invalid params",
+            Some(serde_json::json!({ "detail": format!("unknown AgentK tool {name}") })),
+        );
+    }
+
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let request = match serde_json::from_value::<McpToolRequest>(arguments) {
+        Ok(request) => request,
+        Err(error) => {
+            return jsonrpc_error(
+                id,
+                -32602,
+                "Invalid params",
+                Some(serde_json::json!({ "detail": error.to_string() })),
+            );
+        }
+    };
+    let report = mediate_mcp_tool_request_in_session(request, kernel);
+
+    jsonrpc_success(id, mcp_tool_call_result(report))
+}
+
+fn mcp_initialize_result() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {
+                "listChanged": false
+            }
+        },
+        "serverInfo": {
+            "name": "agentk",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+fn mcp_mediate_tool_descriptor() -> serde_json::Value {
+    serde_json::json!({
+        "name": MCP_MEDIATE_TOOL,
+        "title": "AgentK Mediate",
+        "description": "Mediate an AgentK tool invocation without executing the underlying tool.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id", "tool"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Stable AgentK agent identifier."
+                },
+                "tool": {
+                    "type": "string",
+                    "description": "Underlying tool name to mediate."
+                },
+                "intent": {
+                    "type": "string",
+                    "description": "Human-readable reason for the tool invocation."
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "trusted",
+                            "untrusted",
+                            "external",
+                            "private",
+                            "secret",
+                            "poisoned-suspect"
+                        ]
+                    }
+                },
+                "capabilities": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        }
+    })
+}
+
+fn mcp_tool_call_result(report: McpProxyReport) -> serde_json::Value {
+    let verdict = report.event.decision.verdict;
+    serde_json::json!({
+        "content": [
+            {
+                "type": "text",
+                "text": format!(
+                    "AgentK {} tool.invoke:{} via {}",
+                    verdict,
+                    report.event.syscall.target,
+                    report.event.decision.rule
+                )
+            }
+        ],
+        "structuredContent": report,
+        "isError": verdict == Verdict::Deny
+    })
+}
+
+fn jsonrpc_success(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn jsonrpc_error(
+    id: serde_json::Value,
+    code: i64,
+    message: &str,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut error = serde_json::json!({
+        "code": code,
+        "message": message
+    });
+
+    if let Some(data) = data {
+        error["data"] = data;
+    }
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": error
+    })
+}
+
+fn mcp_request_into_syscall(request: McpToolRequest) -> (String, Vec<String>, Syscall) {
+    let syscall = Syscall {
+        kind: SyscallKind::ToolInvoke,
+        target: request.tool,
+        intent: if request.intent.trim().is_empty() {
+            "mediate MCP tool invocation".to_string()
+        } else {
+            request.intent
+        },
+        labels: request.labels,
+        inputs: vec![format!("args_sha256:{}", hash_json(&request.arguments))],
+    };
+
+    (request.agent_id, request.capabilities, syscall)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayReport {
+    pub events_replayed: u64,
+    pub blocked: usize,
+    pub side_effects_stubbed: usize,
+    pub final_hash: String,
+}
+
+pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError> {
+    let events = read_events_jsonl(path)?;
+    let verify = verify_events(&events)?;
+    let blocked = events
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Deny)
+        .count();
+    let side_effects_stubbed = events
+        .iter()
+        .filter(|event| {
+            event.decision.verdict == Verdict::Allow
+                && matches!(
+                    &event.syscall.kind,
+                    SyscallKind::ModelCall | SyscallKind::NetworkSend | SyscallKind::ToolInvoke
+                )
+        })
+        .count();
+
+    Ok(ReplayReport {
+        events_replayed: verify.events_checked,
+        blocked,
+        side_effects_stubbed,
+        final_hash: verify.final_hash,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForkReplayReport {
+    pub events_replayed: u64,
+    pub changed: usize,
+    pub changes: Vec<ForkReplayChange>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForkReplayChange {
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub original_verdict: Verdict,
+    pub original_rule: String,
+    pub fork_verdict: Verdict,
+    pub fork_rule: String,
+}
+
+pub fn fork_replay_jsonl(
+    log_path: impl AsRef<Path>,
+    policy_path: impl AsRef<Path>,
+) -> Result<ForkReplayReport, AgentKError> {
+    let events = read_events_jsonl(log_path)?;
+    verify_events(&events)?;
+
+    let policy = Policy::from_path(policy_path)?;
+    let mut kernel = AgentKernel::with_policy(policy.agent.id.clone(), policy);
+    let mut changes = Vec::new();
+
+    for event in &events {
+        let fork = kernel.syscall(event.syscall.clone()).decision.clone();
+        if fork.verdict != event.decision.verdict || fork.rule != event.decision.rule {
+            changes.push(ForkReplayChange {
+                step: event.step,
+                syscall: event.syscall.kind.to_string(),
+                target: event.syscall.target.clone(),
+                original_verdict: event.decision.verdict,
+                original_rule: event.decision.rule.clone(),
+                fork_verdict: fork.verdict,
+                fork_rule: fork.rule,
+            });
+        }
+    }
+
+    Ok(ForkReplayReport {
+        events_replayed: events.len() as u64,
+        changed: changes.len(),
+        changes,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignatureVerifyReport {
+    pub events_checked: u64,
+    pub receipts_checked: u64,
+    pub secret_handles_checked: u64,
+    pub ok: bool,
+    pub failures: Vec<String>,
+}
+
+pub fn verify_signatures_jsonl(
+    path: impl AsRef<Path>,
+) -> Result<SignatureVerifyReport, AgentKError> {
+    let events = read_events_jsonl(path)?;
+    verify_event_signatures(&events)
+}
+
+pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport, AgentKError> {
+    verify_events(events)?;
+
+    let mut receipts_checked = 0_u64;
+    let mut secret_handles_checked = 0_u64;
+    let mut failures = Vec::new();
+
+    for event in events {
+        if let Some(receipt) = &event.decision.receipt {
+            receipts_checked += 1;
+            if receipt.algorithm != PROOF_ALGORITHM {
+                failures.push(format!(
+                    "step {} receipt {} uses unsupported algorithm {}",
+                    event.step, receipt.id, receipt.algorithm
+                ));
+            } else if !verify_signed_proof(&receipt.proof, &receipt.signature, &receipt.public_key)
+            {
+                failures.push(format!(
+                    "step {} receipt {} signature failed",
+                    event.step, receipt.id
+                ));
+            }
+        }
+
+        if let Some(handle) = &event.decision.secret_handle {
+            secret_handles_checked += 1;
+            if handle.algorithm != PROOF_ALGORITHM {
+                failures.push(format!(
+                    "step {} secret handle {} uses unsupported algorithm {}",
+                    event.step, handle.id, handle.algorithm
+                ));
+            } else if !verify_signed_proof(&handle.proof, &handle.signature, &handle.public_key) {
+                failures.push(format!(
+                    "step {} secret handle {} signature failed",
+                    event.step, handle.id
+                ));
+            }
+        }
+    }
+
+    Ok(SignatureVerifyReport {
+        events_checked: events.len() as u64,
+        receipts_checked,
+        secret_handles_checked,
+        ok: failures.is_empty(),
+        failures,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReadinessReport {
+    pub root: PathBuf,
+    pub ready: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+impl ReadinessReport {
+    pub fn failed(&self) -> impl Iterator<Item = &ReadinessCheck> {
+        self.checks
+            .iter()
+            .filter(|check| check.status == ReadinessStatus::Fail)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReadinessCheck {
+    pub name: String,
+    pub status: ReadinessStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadinessStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+impl ReadinessStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Warn => "WARN",
+            Self::Fail => "FAIL",
+        }
+    }
+}
+
+impl fmt::Display for ReadinessStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
+    let root = root.as_ref().to_path_buf();
+    let checks = vec![
+        check_git_remote(&root),
+        check_gitignore(&root),
+        check_required_file(&root, "README.md"),
+        check_required_file(&root, "SECURITY.md"),
+        check_required_file(&root, "Cargo.lock"),
+        check_required_file(&root, "docs/threat-model.md"),
+        check_required_file(&root, "docs/public-readiness.md"),
+        check_required_file(&root, "docs/roadmap.md"),
+        check_required_file(&root, "examples/mcp-tool-request.json"),
+        check_required_file(&root, "examples/mcp-tool-requests.jsonl"),
+        check_required_file(&root, "examples/mcp-server-session.jsonl"),
+        check_policy(&root),
+        check_policy_profiles(&root),
+        check_signing_key_source(),
+        check_signing_key_disclaimer(&root),
+        check_sensitive_patterns(&root),
+    ];
+
+    let ready = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    ReadinessReport {
+        root,
+        ready,
+        checks,
+    }
+}
+
+fn check_git_remote(root: &Path) -> ReadinessCheck {
+    match Command::new("git")
+        .arg("remote")
+        .arg("-v")
+        .current_dir(root)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                readiness_check("git remote", ReadinessStatus::Pass, "no remotes configured")
+            } else {
+                readiness_check(
+                    "git remote",
+                    ReadinessStatus::Fail,
+                    "a remote is configured; keep local until release approval",
+                )
+            }
+        }
+        Ok(output) => readiness_check(
+            "git remote",
+            ReadinessStatus::Warn,
+            format!("git remote check exited with status {}", output.status),
+        ),
+        Err(error) => readiness_check(
+            "git remote",
+            ReadinessStatus::Warn,
+            format!("could not run git: {error}"),
+        ),
+    }
+}
+
+fn check_gitignore(root: &Path) -> ReadinessCheck {
+    match fs::read_to_string(root.join(".gitignore")) {
+        Ok(content) if content.lines().any(|line| line.trim() == ".agentk/") => readiness_check(
+            "gitignore artifacts",
+            ReadinessStatus::Pass,
+            ".agentk/ run artifacts are ignored",
+        ),
+        Ok(_) => readiness_check(
+            "gitignore artifacts",
+            ReadinessStatus::Fail,
+            ".agentk/ must be ignored before any public push",
+        ),
+        Err(error) => readiness_check(
+            "gitignore artifacts",
+            ReadinessStatus::Fail,
+            format!("could not read .gitignore: {error}"),
+        ),
+    }
+}
+
+fn check_required_file(root: &Path, file: &str) -> ReadinessCheck {
+    let path = root.join(file);
+    if path.is_file() {
+        readiness_check(file, ReadinessStatus::Pass, "present")
+    } else {
+        readiness_check(file, ReadinessStatus::Fail, "missing")
+    }
+}
+
+fn check_policy(root: &Path) -> ReadinessCheck {
+    let path = root.join("examples/agentk.policy.toml");
+    match Policy::from_path(&path) {
+        Ok(policy) => readiness_check(
+            "policy parse",
+            ReadinessStatus::Pass,
+            format!(
+                "{} rules loaded for {}",
+                policy.rules.len(),
+                policy.agent.id
+            ),
+        ),
+        Err(error) => readiness_check("policy parse", ReadinessStatus::Fail, error.to_string()),
+    }
+}
+
+fn check_policy_profiles(root: &Path) -> ReadinessCheck {
+    let dir = root.join("examples/policies");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return readiness_check(
+            "policy profiles",
+            ReadinessStatus::Fail,
+            "examples/policies is missing",
+        );
+    };
+
+    let mut checked = 0_usize;
+    let mut failures = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+
+        checked += 1;
+        if let Err(error) = Policy::from_path(&path) {
+            let display = path.strip_prefix(root).unwrap_or(&path).display();
+            failures.push(format!("{display}: {error}"));
+        }
+    }
+
+    if !failures.is_empty() {
+        return readiness_check(
+            "policy profiles",
+            ReadinessStatus::Fail,
+            failures.join("; "),
+        );
+    }
+
+    if checked == 0 {
+        readiness_check(
+            "policy profiles",
+            ReadinessStatus::Fail,
+            "no TOML profiles found in examples/policies",
+        )
+    } else {
+        readiness_check(
+            "policy profiles",
+            ReadinessStatus::Pass,
+            format!("{checked} profile policies parsed"),
+        )
+    }
+}
+
+fn check_signing_key_source() -> ReadinessCheck {
+    let status = signing_key_status();
+    match status.source {
+        SigningKeySource::Environment => readiness_check(
+            "signing key source",
+            ReadinessStatus::Pass,
+            "using configured signing key",
+        ),
+        SigningKeySource::Development => readiness_check(
+            "signing key source",
+            ReadinessStatus::Warn,
+            "using static development key; acceptable only before public release",
+        ),
+        SigningKeySource::InvalidEnvironmentFallback => readiness_check(
+            "signing key source",
+            ReadinessStatus::Fail,
+            format!("{SIGNING_KEY_ENV} is invalid"),
+        ),
+    }
+}
+
+fn check_signing_key_disclaimer(root: &Path) -> ReadinessCheck {
+    let mut combined = String::new();
+    for file in ["README.md", "SECURITY.md", "docs/architecture.md"] {
+        match fs::read_to_string(root.join(file)) {
+            Ok(content) => combined.push_str(&content),
+            Err(error) => {
+                return readiness_check(
+                    "signing key disclaimer",
+                    ReadinessStatus::Fail,
+                    format!("could not read {file}: {error}"),
+                );
+            }
+        }
+    }
+
+    if combined.contains("static development key") && combined.contains("production key management")
+    {
+        readiness_check(
+            "signing key disclaimer",
+            ReadinessStatus::Pass,
+            "development signer is documented as non-production",
+        )
+    } else {
+        readiness_check(
+            "signing key disclaimer",
+            ReadinessStatus::Fail,
+            "static development signer must be clearly documented",
+        )
+    }
+}
+
+fn check_sensitive_patterns(root: &Path) -> ReadinessCheck {
+    let mut hits = Vec::new();
+    collect_sensitive_hits(root, root, &mut hits);
+
+    if hits.is_empty() {
+        readiness_check(
+            "sensitive pattern scan",
+            ReadinessStatus::Pass,
+            "no obvious key/token/local-path patterns found",
+        )
+    } else {
+        readiness_check(
+            "sensitive pattern scan",
+            ReadinessStatus::Fail,
+            hits.join("; "),
+        )
+    }
+}
+
+fn collect_sensitive_hits(root: &Path, path: &Path, hits: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let child = entry.path();
+        let Some(name) = child.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if matches!(name, ".git" | ".agentk" | "target") {
+            continue;
+        }
+
+        if child.is_dir() {
+            collect_sensitive_hits(root, &child, hits);
+            continue;
+        }
+
+        if !is_scannable_text_file(&child) {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(&child) else {
+            continue;
+        };
+        for (index, line) in content.lines().enumerate() {
+            if has_sensitive_pattern(line) {
+                let display = child.strip_prefix(root).unwrap_or(&child).display();
+                hits.push(format!("{display}:{}", index + 1));
+            }
+        }
+    }
+}
+
+fn is_scannable_text_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("rs" | "md" | "toml" | "txt" | "json" | "yaml" | "yml")
+    ) || matches!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some(".gitignore" | "LICENSE")
+    )
+}
+
+fn has_sensitive_pattern(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let private_key_marker = ["BEGIN", "OPENSSH", "PRIVATE", "KEY"].join(" ");
+    let rsa_key_marker = ["BEGIN", "RSA", "PRIVATE", "KEY"].join(" ");
+    let openai_key_prefix = ["sk", "-"].concat();
+    let local_user_path = ["/Users", "/guts"].concat();
+
+    line.contains(&private_key_marker)
+        || line.contains(&rsa_key_marker)
+        || line.contains(&openai_key_prefix)
+        || line.contains(&local_user_path)
+        || lower.contains(&["api", "_key="].concat())
+        || lower.contains(&["api", "key="].concat())
+        || lower.contains(&["pass", "word="].concat())
+        || lower.contains(&["tok", "en="].concat())
+        || lower.contains(&["authorization:", " bearer"].concat())
+}
+
+fn readiness_check(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    ReadinessCheck {
+        name: name.into(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+pub fn verify_jsonl(path: impl AsRef<Path>) -> Result<VerifyReport, AgentKError> {
+    verify_events(&read_events_jsonl(path)?)
+}
+
+pub fn read_events_jsonl(path: impl AsRef<Path>) -> Result<Vec<Event>, AgentKError> {
+    let content = fs::read_to_string(path.as_ref())?;
+    let mut events = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        events.push(serde_json::from_str(line)?);
+    }
+
+    Ok(events)
+}
+
+pub fn verify_events(events: &[Event]) -> Result<VerifyReport, AgentKError> {
+    let mut previous = ZERO_HASH.to_string();
+    let mut checked = 0_u64;
+
+    for (index, event) in events.iter().enumerate() {
+        if event.step != checked + 1 {
+            return Err(AgentKError::InvalidLog(format!(
+                "line {} has step {}, expected {}",
+                index + 1,
+                event.step,
+                checked + 1
+            )));
+        }
+        if event.previous_hash != previous {
+            return Err(AgentKError::InvalidLog(format!(
+                "line {} previous hash mismatch",
+                index + 1
+            )));
+        }
+        if !event.verify_hash() {
+            return Err(AgentKError::InvalidLog(format!(
+                "line {} event hash mismatch",
+                index + 1
+            )));
+        }
+
+        previous = event.event_hash.clone();
+        checked += 1;
+    }
+
+    Ok(VerifyReport {
+        events_checked: checked,
+        final_hash: previous,
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VerifyReport {
+    pub events_checked: u64,
+    pub final_hash: String,
+}
+
+pub fn default_log_path() -> PathBuf {
+    PathBuf::from(".agentk")
+        .join("runs")
+        .join(format!("demo-{}.jsonl", unix_timestamp()))
+}
+
+pub fn latest_log_path() -> PathBuf {
+    PathBuf::from(".agentk").join("runs").join("latest.jsonl")
+}
+
+pub fn write_latest_copy(from: impl AsRef<Path>) -> Result<PathBuf, AgentKError> {
+    let latest = latest_log_path();
+    if let Some(parent) = latest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(from, &latest)?;
+    Ok(latest)
+}
+
+fn labels(values: &[Label]) -> BTreeSet<Label> {
+    values.iter().copied().collect()
+}
+
+pub fn union_labels<'a>(sources: impl IntoIterator<Item = &'a BTreeSet<Label>>) -> BTreeSet<Label> {
+    sources
+        .into_iter()
+        .flat_map(|source| source.iter().copied())
+        .collect()
+}
+
+pub fn derive_model_labels(inputs: &[ContextPage]) -> BTreeSet<Label> {
+    union_labels(inputs.iter().map(|page| &page.labels))
+}
+
+pub fn derive_tool_output_labels(
+    input_labels: &BTreeSet<Label>,
+    tool_declared_labels: &[Label],
+) -> BTreeSet<Label> {
+    let declared = labels(tool_declared_labels);
+    union_labels([input_labels, &declared])
+}
+
+fn hash_json<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("hash input should serialize");
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+#[derive(Debug, Clone)]
+struct SignedProofParts {
+    signature: String,
+    public_key: String,
+    algorithm: String,
+    key_source: String,
+}
+
+fn sign_proof(proof: &str) -> SignedProofParts {
+    let active = active_signing_key();
+    let signing_key = active.signing_key;
+    let verifying_key = signing_key.verifying_key();
+    let signature: Signature = signing_key.sign(proof.as_bytes());
+
+    SignedProofParts {
+        signature: hex::encode(signature.to_bytes()),
+        public_key: hex::encode(verifying_key.to_bytes()),
+        algorithm: PROOF_ALGORITHM.to_string(),
+        key_source: active.source.as_str().to_string(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveSigningKey {
+    signing_key: SigningKey,
+    source: SigningKeySource,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SigningKeySource {
+    Environment,
+    Development,
+    InvalidEnvironmentFallback,
+}
+
+impl SigningKeySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::Development => "development",
+            Self::InvalidEnvironmentFallback => "invalid-environment-fallback",
+        }
+    }
+}
+
+impl fmt::Display for SigningKeySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SigningKeyStatus {
+    pub algorithm: String,
+    pub source: SigningKeySource,
+    pub public_key: String,
+    pub production_ready: bool,
+    pub warning: Option<String>,
+}
+
+pub fn signing_key_status() -> SigningKeyStatus {
+    let active = active_signing_key();
+    let public_key = hex::encode(active.signing_key.verifying_key().to_bytes());
+    let warning = match active.source {
+        SigningKeySource::Environment => None,
+        SigningKeySource::Development => Some(format!(
+            "{SIGNING_KEY_ENV} is not set; using static development key"
+        )),
+        SigningKeySource::InvalidEnvironmentFallback => Some(format!(
+            "{SIGNING_KEY_ENV} is invalid; using static development key"
+        )),
+    };
+
+    SigningKeyStatus {
+        algorithm: PROOF_ALGORITHM.to_string(),
+        source: active.source,
+        public_key,
+        production_ready: active.source == SigningKeySource::Environment,
+        warning,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GeneratedSigningKey {
+    pub path: PathBuf,
+    pub algorithm: String,
+    pub public_key: String,
+    pub env_var: String,
+    pub file_mode: String,
+}
+
+pub fn generate_signing_key_file(
+    path: impl AsRef<Path>,
+    force: bool,
+) -> Result<GeneratedSigningKey, AgentKError> {
+    let path = path.as_ref();
+    if path.exists() && !force {
+        return Err(AgentKError::KeyFileExists(path.to_path_buf()));
+    }
+
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| AgentKError::KeyGeneration(error.to_string()))?;
+
+    let signing_key = SigningKey::from_bytes(&bytes);
+    let public_key = hex::encode(signing_key.verifying_key().to_bytes());
+    let private_key_hex = hex::encode(bytes);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    write_secret_file(path, format!("{private_key_hex}\n").as_bytes(), force)?;
+
+    Ok(GeneratedSigningKey {
+        path: path.to_path_buf(),
+        algorithm: PROOF_ALGORITHM.to_string(),
+        public_key,
+        env_var: SIGNING_KEY_ENV.to_string(),
+        file_mode: "0600".to_string(),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SigningKeyRotationReport {
+    pub next_key_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub next_key_file_mode: String,
+    pub manifest: SigningKeyRotationManifest,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SigningKeyRotationManifest {
+    pub algorithm: String,
+    pub previous_public_key: String,
+    pub next_public_key: String,
+    pub generated_at_unix: u64,
+    pub payload_hash: String,
+    pub signature: String,
+    pub signer_public_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SigningKeyRotationVerifyReport {
+    pub manifest_path: PathBuf,
+    pub ok: bool,
+    pub reason: String,
+    pub algorithm: String,
+    pub previous_public_key: String,
+    pub next_public_key: String,
+    pub payload_hash: String,
+}
+
+#[derive(Serialize)]
+struct SigningKeyRotationPayload<'a> {
+    algorithm: &'a str,
+    previous_public_key: &'a str,
+    next_public_key: &'a str,
+    generated_at_unix: u64,
+}
+
+pub fn rotate_signing_key_file(
+    current_key_path: impl AsRef<Path>,
+    next_key_path: impl AsRef<Path>,
+    manifest_path: impl AsRef<Path>,
+    force: bool,
+) -> Result<SigningKeyRotationReport, AgentKError> {
+    let current_key_path = current_key_path.as_ref();
+    let next_key_path = next_key_path.as_ref();
+    let manifest_path = manifest_path.as_ref();
+
+    if next_key_path.exists() && !force {
+        return Err(AgentKError::KeyFileExists(next_key_path.to_path_buf()));
+    }
+    if manifest_path.exists() && !force {
+        return Err(AgentKError::FileExists(manifest_path.to_path_buf()));
+    }
+
+    let current_key = read_signing_key_file(current_key_path)?;
+    let previous_public_key = hex::encode(current_key.verifying_key().to_bytes());
+
+    let mut next_key_bytes = [0_u8; 32];
+    getrandom::getrandom(&mut next_key_bytes)
+        .map_err(|error| AgentKError::KeyGeneration(error.to_string()))?;
+    let next_key = SigningKey::from_bytes(&next_key_bytes);
+    let next_public_key = hex::encode(next_key.verifying_key().to_bytes());
+
+    if let Some(parent) = next_key_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_secret_file(
+        next_key_path,
+        format!("{}\n", hex::encode(next_key_bytes)).as_bytes(),
+        force,
+    )?;
+
+    let generated_at_unix = unix_timestamp();
+    let payload = SigningKeyRotationPayload {
+        algorithm: PROOF_ALGORITHM,
+        previous_public_key: &previous_public_key,
+        next_public_key: &next_public_key,
+        generated_at_unix,
+    };
+    let payload_hash = hash_json(&payload);
+    let signature: Signature = current_key.sign(payload_hash.as_bytes());
+    let manifest = SigningKeyRotationManifest {
+        algorithm: PROOF_ALGORITHM.to_string(),
+        previous_public_key: previous_public_key.clone(),
+        next_public_key,
+        generated_at_unix,
+        payload_hash,
+        signature: hex::encode(signature.to_bytes()),
+        signer_public_key: previous_public_key,
+    };
+
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_public_file(
+        manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest)?).as_bytes(),
+        force,
+    )?;
+
+    Ok(SigningKeyRotationReport {
+        next_key_path: next_key_path.to_path_buf(),
+        manifest_path: manifest_path.to_path_buf(),
+        next_key_file_mode: "0600".to_string(),
+        manifest,
+    })
+}
+
+pub fn verify_signing_key_rotation_manifest_file(
+    manifest_path: impl AsRef<Path>,
+) -> Result<SigningKeyRotationVerifyReport, AgentKError> {
+    let manifest_path = manifest_path.as_ref();
+    let manifest: SigningKeyRotationManifest =
+        serde_json::from_str(&fs::read_to_string(manifest_path)?)?;
+    let failure = signing_key_rotation_manifest_failure(&manifest);
+    let ok = failure.is_none();
+    let reason =
+        failure.unwrap_or_else(|| "manifest signature and payload hash verified".to_string());
+
+    Ok(SigningKeyRotationVerifyReport {
+        manifest_path: manifest_path.to_path_buf(),
+        ok,
+        reason,
+        algorithm: manifest.algorithm,
+        previous_public_key: manifest.previous_public_key,
+        next_public_key: manifest.next_public_key,
+        payload_hash: manifest.payload_hash,
+    })
+}
+
+pub fn verify_signing_key_rotation_manifest(manifest: &SigningKeyRotationManifest) -> bool {
+    signing_key_rotation_manifest_failure(manifest).is_none()
+}
+
+fn signing_key_rotation_manifest_failure(manifest: &SigningKeyRotationManifest) -> Option<String> {
+    if manifest.algorithm != PROOF_ALGORITHM {
+        return Some(format!("unsupported algorithm {}", manifest.algorithm));
+    }
+    if manifest.signer_public_key != manifest.previous_public_key {
+        return Some("signer public key does not match previous public key".to_string());
+    }
+
+    let payload = SigningKeyRotationPayload {
+        algorithm: &manifest.algorithm,
+        previous_public_key: &manifest.previous_public_key,
+        next_public_key: &manifest.next_public_key,
+        generated_at_unix: manifest.generated_at_unix,
+    };
+    let expected_hash = hash_json(&payload);
+    if expected_hash != manifest.payload_hash {
+        return Some("payload hash mismatch".to_string());
+    }
+
+    if !verify_signed_proof(
+        &manifest.payload_hash,
+        &manifest.signature,
+        &manifest.signer_public_key,
+    ) {
+        return Some("manifest signature failed".to_string());
+    }
+
+    None
+}
+
+fn read_signing_key_file(path: &Path) -> Result<SigningKey, AgentKError> {
+    signing_key_from_hex(&fs::read_to_string(path)?).ok_or_else(|| {
+        AgentKError::InvalidSigningKeyFile(
+            path.to_path_buf(),
+            "expected a 32-byte hex Ed25519 signing key".to_string(),
+        )
+    })
+}
+
+fn write_secret_file(path: &Path, contents: &[u8], force: bool) -> Result<(), AgentKError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true);
+    if force {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+fn write_public_file(path: &Path, contents: &[u8], force: bool) -> Result<(), AgentKError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true);
+    if force {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+
+    Ok(())
+}
+
+fn active_signing_key() -> ActiveSigningKey {
+    match env::var(SIGNING_KEY_ENV) {
+        Ok(value) => match signing_key_from_hex(&value) {
+            Some(signing_key) => ActiveSigningKey {
+                signing_key,
+                source: SigningKeySource::Environment,
+            },
+            None => ActiveSigningKey {
+                signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
+                source: SigningKeySource::InvalidEnvironmentFallback,
+            },
+        },
+        Err(_) => ActiveSigningKey {
+            signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
+            source: SigningKeySource::Development,
+        },
+    }
+}
+
+fn signing_key_from_hex(value: &str) -> Option<SigningKey> {
+    let decoded = hex::decode(value.trim()).ok()?;
+    let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
+    Some(SigningKey::from_bytes(&bytes))
+}
+
+pub fn verify_signed_proof(proof: &str, signature: &str, public_key: &str) -> bool {
+    let Ok(signature_bytes) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+        return false;
+    };
+    let Ok(public_key_bytes) = hex::decode(public_key) else {
+        return false;
+    };
+    let Ok(public_key_bytes) = <[u8; 32]>::try_from(public_key_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key_bytes) else {
+        return false;
+    };
+
+    verifying_key.verify(proof.as_bytes(), &signature).is_ok()
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Debug)]
+pub enum AgentKError {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    FileExists(PathBuf),
+    KeyFileExists(PathBuf),
+    KeyGeneration(String),
+    InvalidSigningKeyFile(PathBuf, String),
+    InvalidMcpRequest(String),
+    InvalidLog(String),
+    InvalidPolicy(String),
+    TomlDeserialize(toml::de::Error),
+}
+
+impl fmt::Display for AgentKError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Json(error) => write!(f, "JSON error: {error}"),
+            Self::FileExists(path) => write!(
+                f,
+                "file already exists: {} (use --force to overwrite)",
+                path.display()
+            ),
+            Self::KeyFileExists(path) => write!(
+                f,
+                "signing key file already exists: {} (use --force to overwrite)",
+                path.display()
+            ),
+            Self::KeyGeneration(message) => write!(f, "key generation error: {message}"),
+            Self::InvalidSigningKeyFile(path, message) => {
+                write!(f, "invalid signing key file {}: {message}", path.display())
+            }
+            Self::InvalidMcpRequest(message) => write!(f, "invalid MCP request: {message}"),
+            Self::InvalidLog(message) => write!(f, "invalid flight log: {message}"),
+            Self::InvalidPolicy(message) => write!(f, "invalid policy: {message}"),
+            Self::TomlDeserialize(error) => write!(f, "TOML error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentKError {}
+
+impl From<std::io::Error> for AgentKError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for AgentKError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<toml::de::Error> for AgentKError {
+    fn from(error: toml::de::Error) -> Self {
+        Self::TomlDeserialize(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(prefix: &str, extension: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{nanos}.{extension}",
+            std::process::id()
+        ))
+    }
+
+    fn decision(mut kernel: AgentKernel, syscall: Syscall) -> PolicyDecision {
+        kernel.syscall(syscall).decision.clone()
+    }
+
+    fn syscall(kind: SyscallKind, target: &str, labels: &[Label]) -> Syscall {
+        Syscall {
+            kind,
+            target: target.to_string(),
+            intent: "test syscall".to_string(),
+            labels: labels.iter().copied().collect(),
+            inputs: vec!["test_input".to_string()],
+        }
+    }
+
+    #[test]
+    fn tainted_secret_egress_is_blocked() {
+        let mut kernel = AgentKernel::new("agent://test");
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: "https://evil.example.invalid/upload".to_string(),
+            intent: "exfiltrate".to_string(),
+            labels: labels(&[Label::Untrusted, Label::Secret, Label::External]),
+            inputs: vec!["ctx".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Deny);
+        assert_eq!(event.decision.rule, "taint-sensitive-egress");
+        assert!(event.verify_hash());
+    }
+
+    #[test]
+    fn every_default_policy_rule_has_a_behavior_test_case() {
+        let mut covered = BTreeSet::new();
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(SyscallKind::ContextRead, "ctx://trusted", &[Label::Trusted]),
+            )
+            .rule,
+        );
+
+        let mut broker = SecretBroker::new();
+        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+        let mut secret_kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        secret_kernel.grant("secret.open:secret://github-token");
+        covered.insert(
+            decision(
+                secret_kernel,
+                syscall(
+                    SyscallKind::SecretOpen,
+                    "secret://github-token",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        let mut missing_broker_kernel = AgentKernel::new("agent://test");
+        missing_broker_kernel.grant("secret.open:secret://missing");
+        covered.insert(
+            decision(
+                missing_broker_kernel,
+                syscall(
+                    SyscallKind::SecretOpen,
+                    "secret://missing",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(
+                    SyscallKind::SecretOpen,
+                    "secret://github-token",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(
+                    SyscallKind::NetworkSend,
+                    "https://evil.example.invalid/upload",
+                    &[Label::Secret],
+                ),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(
+                    SyscallKind::NetworkSend,
+                    "https://api.example.invalid",
+                    &[Label::Untrusted],
+                ),
+            )
+            .rule,
+        );
+
+        let mut network_kernel = AgentKernel::new("agent://test");
+        network_kernel.grant("network.send:https://api.example.invalid");
+        covered.insert(
+            decision(
+                network_kernel,
+                syscall(
+                    SyscallKind::NetworkSend,
+                    "https://api.example.invalid",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(
+                    SyscallKind::NetworkSend,
+                    "https://api.example.invalid",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        let mut sensitive_tool_kernel = AgentKernel::new("agent://test");
+        sensitive_tool_kernel.grant("tool.invoke:demo.echo");
+        covered.insert(
+            decision(
+                sensitive_tool_kernel,
+                syscall(SyscallKind::ToolInvoke, "demo.echo", &[Label::Private]),
+            )
+            .rule,
+        );
+
+        let mut tool_kernel = AgentKernel::new("agent://test");
+        tool_kernel.grant("tool.invoke:demo.echo");
+        covered.insert(
+            decision(
+                tool_kernel,
+                syscall(SyscallKind::ToolInvoke, "demo.echo", &[Label::Trusted]),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(SyscallKind::ToolInvoke, "demo.echo", &[Label::Trusted]),
+            )
+            .rule,
+        );
+
+        covered.insert(
+            decision(
+                AgentKernel::new("agent://test"),
+                syscall(
+                    SyscallKind::Unknown("kernel.reboot".to_string()),
+                    "host",
+                    &[Label::Trusted],
+                ),
+            )
+            .rule,
+        );
+
+        let policy_ids = Policy::default()
+            .rules
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(covered, policy_ids);
+    }
+
+    #[test]
+    fn label_derivation_preserves_untrusted_provenance() {
+        let trusted = ContextPage {
+            id: "ctx_user_goal".to_string(),
+            source: "user".to_string(),
+            summary: "trusted user task".to_string(),
+            labels: labels(&[Label::Trusted]),
+        };
+        let webpage = ContextPage {
+            id: "ctx_web".to_string(),
+            source: "https://docs.example.invalid".to_string(),
+            summary: "external page".to_string(),
+            labels: labels(&[Label::Untrusted, Label::External, Label::PoisonedSuspect]),
+        };
+
+        let model_labels = derive_model_labels(&[trusted, webpage]);
+        assert!(model_labels.contains(&Label::Trusted));
+        assert!(model_labels.contains(&Label::Untrusted));
+        assert!(model_labels.contains(&Label::PoisonedSuspect));
+
+        let tool_output = derive_tool_output_labels(&model_labels, &[Label::Private]);
+        assert!(tool_output.contains(&Label::Untrusted));
+        assert!(tool_output.contains(&Label::Private));
+    }
+
+    #[test]
+    fn granted_network_capability_allows_clean_egress() {
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("network.send:https://api.github.com".to_string());
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: "https://api.github.com".to_string(),
+            intent: "fetch public issue metadata".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Allow);
+        let receipt = event.decision.receipt.as_ref().expect("receipt is present");
+        assert!(verify_signed_proof(
+            &receipt.proof,
+            &receipt.signature,
+            &receipt.public_key
+        ));
+        assert!(event.verify_hash());
+    }
+
+    #[test]
+    fn default_policy_parses_and_contains_required_rules() {
+        let policy = Policy::default();
+
+        assert_eq!(policy.agent.id, "agent://demo/researcher");
+        assert_eq!(
+            policy.reason("taint-sensitive-egress", "fallback"),
+            "sensitive data cannot flow to external network sinks"
+        );
+    }
+
+    #[test]
+    fn invalid_policy_rejects_missing_rules() {
+        let error = Policy::parse_toml(
+            r#"
+            [agent]
+            id = "agent://demo"
+            "#,
+        )
+        .expect_err("policy should reject missing rules");
+
+        assert!(error.to_string().contains("default-deny"));
+    }
+
+    #[test]
+    fn unknown_syscalls_are_default_denied() {
+        let mut kernel = AgentKernel::new("agent://test");
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::Unknown("kernel.reboot".to_string()),
+            target: "host".to_string(),
+            intent: "attempt unknown privileged action".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Deny);
+        assert_eq!(event.decision.rule, "default-deny");
+        assert!(event.verify_hash());
+    }
+
+    #[test]
+    fn secret_fd_handle_does_not_log_raw_secret_material() {
+        let raw_secret = "RAW_SECRET_VALUE_DO_NOT_LOG";
+        let mut broker = SecretBroker::new();
+        broker.register("secret://github-token", raw_secret);
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open brokered GitHub token".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Allow);
+        let handle = event
+            .decision
+            .secret_handle
+            .as_ref()
+            .expect("secret handle is present");
+        assert!(verify_signed_proof(
+            &handle.proof,
+            &handle.signature,
+            &handle.public_key
+        ));
+
+        let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
+        assert!(!serialized.contains(raw_secret));
+        assert!(serialized.contains("secret_fd_"));
+    }
+
+    #[test]
+    fn tampered_receipt_signature_fails_verification() {
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("network.send:https://api.github.com".to_string());
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: "https://api.github.com".to_string(),
+            intent: "fetch public issue metadata".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+        let receipt = event.decision.receipt.as_ref().expect("receipt is present");
+
+        assert!(!verify_signed_proof(
+            "tampered-proof",
+            &receipt.signature,
+            &receipt.public_key
+        ));
+    }
+
+    #[test]
+    fn mcp_proxy_allows_capability_scoped_tool_without_raw_args_in_inputs() {
+        let request = McpToolRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            intent: "demo tool call".to_string(),
+            labels: labels(&[Label::Trusted]),
+            capabilities: vec!["tool.invoke:demo.echo".to_string()],
+            arguments: serde_json::json!({
+                "message": "do not put raw args in event inputs"
+            }),
+        };
+
+        let report = mediate_mcp_tool_request(request);
+
+        assert!(!report.executed);
+        assert_eq!(report.event.decision.verdict, Verdict::Allow);
+        assert_eq!(report.event.decision.rule, "tool-invoke-receipt");
+        assert_eq!(report.event.syscall.inputs.len(), 1);
+        assert!(report.event.syscall.inputs[0].starts_with("args_sha256:"));
+        assert!(!report.event.syscall.inputs[0].contains("raw args"));
+    }
+
+    #[test]
+    fn replay_uses_recorded_events_without_side_effects() {
+        let path = temp_path("agentk-replay", "jsonl");
+        let demo = run_poisoned_webpage_demo(&path).expect("demo should run");
+        let replay = replay_jsonl(&path).expect("replay should verify");
+
+        assert_eq!(replay.events_replayed, 4);
+        assert_eq!(replay.blocked, 2);
+        assert_eq!(replay.side_effects_stubbed, 1);
+        assert_eq!(replay.final_hash, demo.final_hash);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn signature_report_verifies_demo_receipts() {
+        let path = temp_path("agentk-signatures", "jsonl");
+        run_poisoned_webpage_demo(&path).expect("demo should run");
+        let report = verify_signatures_jsonl(&path).expect("signatures should verify");
+
+        assert!(report.ok);
+        assert_eq!(report.events_checked, 4);
+        assert_eq!(report.receipts_checked, 2);
+        assert_eq!(report.secret_handles_checked, 0);
+        assert!(report.failures.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn signing_key_status_never_exposes_private_key() {
+        let status = signing_key_status();
+        let serialized = serde_json::to_string(&status).expect("status should serialize");
+
+        assert!(serialized.contains("public_key"));
+        assert!(!serialized.contains("signing_key"));
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains(&hex::encode(DEV_SIGNING_KEY_BYTES)));
+    }
+
+    #[test]
+    fn keygen_writes_private_key_without_returning_it() {
+        let path = temp_path("agentk-keygen", "key");
+        let generated = generate_signing_key_file(&path, false).expect("key should generate");
+        let private_key = fs::read_to_string(&path).expect("key file should be readable in test");
+        let metadata = serde_json::to_string(&generated).expect("metadata should serialize");
+
+        assert_eq!(private_key.trim().len(), 64);
+        assert!(
+            private_key
+                .trim()
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        );
+        assert!(!metadata.contains(private_key.trim()));
+        assert!(metadata.contains(&generated.public_key));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn fork_replay_reports_policy_decision_changes() {
+        let log_path = temp_path("agentk-fork-log", "jsonl");
+        let policy_path = temp_path("agentk-fork-policy", "toml");
+
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(syscall(
+            SyscallKind::ToolInvoke,
+            "demo.echo",
+            &[Label::Trusted],
+        ));
+        kernel.write_jsonl(&log_path).expect("log should write");
+
+        let fork_policy = DEFAULT_POLICY_TOML.replace(
+            r#"id = "tool-invoke-capability-missing"
+effect = "deny""#,
+            r#"id = "tool-invoke-capability-missing"
+effect = "allow""#,
+        );
+        fs::write(&policy_path, fork_policy).expect("policy should write");
+
+        let report = fork_replay_jsonl(&log_path, &policy_path).expect("fork replay should run");
+
+        assert_eq!(report.events_replayed, 1);
+        assert_eq!(report.changed, 1);
+        assert_eq!(report.changes[0].original_verdict, Verdict::Deny);
+        assert_eq!(report.changes[0].fork_verdict, Verdict::Allow);
+
+        let _ = fs::remove_file(log_path);
+        let _ = fs::remove_file(policy_path);
+    }
+
+    #[test]
+    fn mcp_json_lines_mediates_each_request() {
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "first",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": { "message": "first" }
+        });
+        let input = format!("{request}\n{request}\n");
+        let output = mediate_mcp_json_lines(&input).expect("line mediation should work");
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let report: McpProxyReport =
+                serde_json::from_str(line).expect("line should be a proxy report");
+            assert!(!report.executed);
+            assert_eq!(report.event.decision.verdict, Verdict::Allow);
+        }
+
+        let first: McpProxyReport =
+            serde_json::from_str(lines[0]).expect("first line should be a proxy report");
+        let second: McpProxyReport =
+            serde_json::from_str(lines[1]).expect("second line should be a proxy report");
+        assert_eq!(first.event.step, 1);
+        assert_eq!(second.event.step, 2);
+        assert_eq!(second.event.previous_hash, first.event.event_hash);
+        assert_ne!(
+            first
+                .event
+                .decision
+                .receipt
+                .as_ref()
+                .expect("first receipt")
+                .id,
+            second
+                .event
+                .decision
+                .receipt
+                .as_ref()
+                .expect("second receipt")
+                .id
+        );
+    }
+
+    #[test]
+    fn mcp_server_json_rpc_lists_and_calls_agentk_tool() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentk.mediate","arguments":{"agent_id":"agent://test","tool":"demo.echo","intent":"first","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"],"arguments":{"message":"first"}}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agentk.mediate","arguments":{"agent_id":"agent://test","tool":"demo.echo","intent":"second","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"],"arguments":{"message":"second"}}}}
+"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 4);
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            responses[1]["result"]["tools"][0]["name"],
+            serde_json::json!(MCP_MEDIATE_TOOL)
+        );
+
+        let first: McpProxyReport =
+            serde_json::from_value(responses[2]["result"]["structuredContent"].clone())
+                .expect("first structured content should be report");
+        let second: McpProxyReport =
+            serde_json::from_value(responses[3]["result"]["structuredContent"].clone())
+                .expect("second structured content should be report");
+
+        assert_eq!(responses[2]["result"]["isError"], serde_json::json!(false));
+        assert_eq!(first.event.step, 1);
+        assert_eq!(second.event.step, 2);
+        assert_eq!(second.event.previous_hash, first.event.event_hash);
+        assert_eq!(first.event.decision.verdict, Verdict::Allow);
+        assert_ne!(
+            first
+                .event
+                .decision
+                .receipt
+                .as_ref()
+                .expect("first receipt")
+                .id,
+            second
+                .event
+                .decision
+                .receipt
+                .as_ref()
+                .expect("second receipt")
+                .id
+        );
+    }
+
+    #[test]
+    fn key_rotation_writes_signed_manifest_without_private_keys() {
+        let current_path = temp_path("agentk-current", "agentk-key");
+        let next_path = temp_path("agentk-next", "agentk-key");
+        let manifest_path = temp_path("agentk-rotation", "json");
+
+        let current =
+            generate_signing_key_file(&current_path, false).expect("current key should generate");
+        let report = rotate_signing_key_file(&current_path, &next_path, &manifest_path, false)
+            .expect("rotation should succeed");
+
+        let current_private =
+            fs::read_to_string(&current_path).expect("current private key should be readable");
+        let next_private = fs::read_to_string(&next_path).expect("next private key should exist");
+        let manifest_text =
+            fs::read_to_string(&manifest_path).expect("manifest should be readable");
+        let manifest: SigningKeyRotationManifest =
+            serde_json::from_str(&manifest_text).expect("manifest should parse");
+
+        assert_eq!(manifest.previous_public_key, current.public_key);
+        assert_eq!(manifest.signer_public_key, manifest.previous_public_key);
+        assert_eq!(manifest.algorithm, PROOF_ALGORITHM);
+        assert_eq!(next_private.trim().len(), 64);
+        assert!(verify_signed_proof(
+            &manifest.payload_hash,
+            &manifest.signature,
+            &manifest.signer_public_key
+        ));
+        assert!(verify_signing_key_rotation_manifest(&manifest));
+        let verify_report = verify_signing_key_rotation_manifest_file(&manifest_path)
+            .expect("manifest verification should run");
+        assert!(verify_report.ok);
+        assert_eq!(report.manifest.payload_hash, manifest.payload_hash);
+        assert!(!manifest_text.contains(current_private.trim()));
+        assert!(!manifest_text.contains(next_private.trim()));
+
+        let _ = fs::remove_file(current_path);
+        let _ = fs::remove_file(next_path);
+        let _ = fs::remove_file(manifest_path);
+    }
+}

@@ -1,0 +1,24 @@
+/target
+
+# AgentK run artifacts. These may contain prompts, paths, URLs, tool args,
+# or other sensitive local execution context.
+.agentk/
+.agentk-keys/
+*.agentk-key
+*.agentk-key-next
+agentk-signing-key*
+
+# Local environment and credentials.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# OS/editor noise.
+.DS_Store
+.vscode/
+.idea/

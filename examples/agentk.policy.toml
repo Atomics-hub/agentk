@@ -1,0 +1,120 @@
+# AgentK prototype policy.
+
+[agent]
+id = "agent://demo/researcher"
+
+[labels]
+trusted = "user/system/developer supplied control context"
+untrusted = "tool output, webpages, email, tickets, retrieved docs"
+external = "originated outside the trusted workspace"
+private = "user-private or organization-private data"
+secret = "credential or key material"
+poisoned-suspect = "content likely trying to steer tool use"
+
+[[rules]]
+id = "context-read"
+effect = "allow"
+reason = "read-only context or model operation"
+
+[rules.when]
+syscalls = ["context.read", "model.call"]
+
+[[rules]]
+id = "secret-fd"
+effect = "allow"
+reason = "secret access was brokered through an explicit handle"
+
+[rules.when]
+syscalls = ["secret.open"]
+capability = "present"
+
+[[rules]]
+id = "secret-fd-unavailable"
+effect = "deny"
+reason = "secret capability was present, but no brokered secret handle exists"
+
+[rules.when]
+syscalls = ["secret.open"]
+capability = "present"
+
+[[rules]]
+id = "secret-fd-required"
+effect = "deny"
+reason = "agents cannot read raw secrets; use a scoped secret fd"
+
+[rules.when]
+syscalls = ["secret.open"]
+capability = "missing"
+
+[[rules]]
+id = "taint-sensitive-egress"
+effect = "deny"
+reason = "sensitive data cannot flow to external network sinks"
+
+[rules.when]
+syscalls = ["network.send"]
+labels_any = ["secret", "private"]
+
+[[rules]]
+id = "taint-untrusted-egress"
+effect = "deny"
+reason = "untrusted context cannot authorize external network sends"
+
+[rules.when]
+syscalls = ["network.send"]
+labels_any = ["untrusted", "poisoned-suspect"]
+capability = "missing"
+
+[[rules]]
+id = "capability-receipt"
+effect = "allow"
+reason = "network send covered by a scoped receipt"
+
+[rules.when]
+syscalls = ["network.send"]
+labels_none = ["secret", "private"]
+capability = "present"
+
+[[rules]]
+id = "capability-missing"
+effect = "deny"
+reason = "network sends require explicit target-scoped capability"
+
+[rules.when]
+syscalls = ["network.send"]
+capability = "missing"
+
+[[rules]]
+id = "tool-sensitive-input"
+effect = "deny"
+reason = "secret or private labels cannot be passed into agent tools"
+
+[rules.when]
+syscalls = ["tool.invoke"]
+labels_any = ["secret", "private"]
+
+[[rules]]
+id = "tool-invoke-receipt"
+effect = "allow"
+reason = "tool invocation covered by a scoped receipt"
+
+[rules.when]
+syscalls = ["tool.invoke"]
+labels_none = ["secret", "private"]
+capability = "present"
+
+[[rules]]
+id = "tool-invoke-capability-missing"
+effect = "deny"
+reason = "tool invocation requires explicit target-scoped capability"
+
+[rules.when]
+syscalls = ["tool.invoke"]
+capability = "missing"
+
+[[rules]]
+id = "default-deny"
+effect = "deny"
+reason = "no policy rule allowed this syscall; default deny"
+
+[rules.when]

@@ -1,0 +1,10 @@
+{
+  "agent_id": "agent://demo/researcher",
+  "tool": "demo.echo",
+  "intent": "invoke a harmless demo MCP tool through AgentK",
+  "labels": ["trusted"],
+  "capabilities": ["tool.invoke:demo.echo"],
+  "arguments": {
+    "message": "public demo payload"
+  }
+}

@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"agentk-example","version":"0.1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentk.mediate","arguments":{"agent_id":"agent://demo/researcher","tool":"demo.echo","intent":"invoke a harmless demo MCP tool through AgentK","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"],"arguments":{"message":"public demo payload"}}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agentk.mediate","arguments":{"agent_id":"agent://demo/researcher","tool":"demo.echo","intent":"invoke a second harmless demo MCP tool through AgentK","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"],"arguments":{"message":"second public demo payload"}}}}
