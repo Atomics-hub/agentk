@@ -73,6 +73,7 @@ Status: in progress.
 - [ ] `cargo test` passes.
 - [ ] `cargo clippy --all-targets --all-features` passes.
 - [ ] `cargo run -- readiness` passes.
+- [x] Add one-command local release audit.
 - [ ] Manual tracked-file review completed.
 - [ ] README claims match implemented behavior.
 - [ ] Security disclosure instructions are real.

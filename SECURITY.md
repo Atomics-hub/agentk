@@ -17,6 +17,7 @@ Current guarantees are intentionally narrow:
 - generated flight logs are hash-chained and locally verifiable,
 - flight-log inspection redacts raw event input refs into hash evidence,
 - deterministic replay verifies recorded logs without side effects,
+- release audit runs local-only checks and does not configure remotes or push,
 - the MCP proxy MVP mediates one `tool.invoke` request without executing the tool,
 - MCP descriptor mediation records descriptor/schema hashes without logging raw descriptor text,
 - MCP response recording records response hashes without logging raw tool output,

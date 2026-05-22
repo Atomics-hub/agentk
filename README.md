@@ -103,6 +103,12 @@ Run the public-readiness gate:
 cargo run -- readiness
 ```
 
+Run the full local release audit:
+
+```sh
+cargo run -- release-audit
+```
+
 Mediate a demo MCP-shaped tool request without executing it:
 
 ```sh
@@ -196,6 +202,7 @@ This repo currently includes:
 - signing key generation to a caller-chosen local file,
 - signed key-rotation manifests that do not include private key material,
 - key-rotation manifest verification,
+- a one-command local release audit,
 - a local public-readiness gate,
 - and tests for tainted egress, capability receipts, secret redaction, replay, MCP mediation, descriptor/response hashing, key rotation, and unknown syscall denial.
 
@@ -227,7 +234,8 @@ Implemented today:
 - MCP-shaped tool mediation without execution,
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
 - a minimal MCP JSON-RPC stdio server,
-- local key generation and signed key-rotation manifests.
+- local key generation and signed key-rotation manifests,
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, inspect, and MCP smoke checks.
 
 Not implemented yet:
 

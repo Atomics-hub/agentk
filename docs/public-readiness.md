@@ -20,6 +20,7 @@ AgentK should stay local until this checklist is boring.
 - [ ] `cargo fmt` passes.
 - [ ] `cargo test` passes.
 - [ ] `cargo clippy` reviewed.
+- [ ] `cargo run -- release-audit` passes.
 - [ ] Errors do not leak sensitive syscall payloads by default.
 - [ ] All policy deny paths have tests.
 - [ ] All receipt/hash verification paths have tests.
@@ -46,6 +47,7 @@ Before first public push:
 ```txt
 git remote -v
 git status --short
+cargo run -- release-audit
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features

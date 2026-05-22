@@ -1785,6 +1785,20 @@ pub struct ReadinessCheck {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReleaseAuditReport {
+    pub root: PathBuf,
+    pub passed: bool,
+    pub checks: Vec<ReleaseAuditCheck>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReleaseAuditCheck {
+    pub name: String,
+    pub status: ReadinessStatus,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReadinessStatus {
@@ -1840,6 +1854,218 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         root,
         ready,
         checks,
+    }
+}
+
+pub fn release_audit_report(root: impl AsRef<Path>) -> ReleaseAuditReport {
+    let root = root.as_ref().to_path_buf();
+    let mut checks = Vec::new();
+
+    for check in readiness_report(&root).checks {
+        checks.push(ReleaseAuditCheck {
+            name: format!("readiness: {}", check.name),
+            status: check.status,
+            detail: check.detail,
+        });
+    }
+
+    checks.push(check_git_worktree(&root));
+    checks.push(command_audit_check(
+        &root,
+        "git diff whitespace",
+        "git",
+        &["diff", "--check"],
+    ));
+    checks.push(command_audit_check(
+        &root,
+        "cargo fmt",
+        "cargo",
+        &["fmt", "--check"],
+    ));
+    checks.push(command_audit_check(&root, "cargo test", "cargo", &["test"]));
+    checks.push(command_audit_check(
+        &root,
+        "cargo clippy",
+        "cargo",
+        &["clippy", "--all-targets", "--all-features"],
+    ));
+
+    match release_audit_runtime_checks(&root) {
+        Ok(runtime_checks) => checks.extend(runtime_checks),
+        Err(error) => checks.push(release_audit_check(
+            "runtime gate",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        )),
+    }
+
+    release_audit_from_checks(root, checks)
+}
+
+fn release_audit_from_checks(root: PathBuf, checks: Vec<ReleaseAuditCheck>) -> ReleaseAuditReport {
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+    ReleaseAuditReport {
+        root,
+        passed,
+        checks,
+    }
+}
+
+fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, AgentKError> {
+    let demo = run_poisoned_webpage_demo(root.join(default_log_path()))?;
+    let latest = root.join(latest_log_path());
+    if let Some(parent) = latest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&demo.log_path, &latest)?;
+
+    let verify = verify_jsonl(&latest)?;
+    let signatures = verify_signatures_jsonl(&latest)?;
+    let inspect = inspect_jsonl(&latest)?;
+    let replay = replay_jsonl(&latest)?;
+    let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
+    let mcp_session = fs::read_to_string(root.join("examples/mcp-server-session.jsonl"))?;
+    let mcp_output = mcp_server_json_lines(&mcp_session)?;
+    let mcp_responses = mcp_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+
+    Ok(vec![
+        release_audit_check(
+            "demo trace",
+            ReadinessStatus::Pass,
+            format!("{} events, {} blocked", demo.events.len(), demo.blocked),
+        ),
+        release_audit_check(
+            "verify latest",
+            ReadinessStatus::Pass,
+            format!(
+                "{} events, final {}",
+                verify.events_checked, verify.final_hash
+            ),
+        ),
+        release_audit_check(
+            "verify signatures",
+            if signatures.ok {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} receipts, {} handles",
+                signatures.receipts_checked, signatures.secret_handles_checked
+            ),
+        ),
+        release_audit_check(
+            "trace inspect",
+            if inspect.signatures_ok {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} events, {} redacted",
+                inspect.events_checked,
+                inspect
+                    .events
+                    .iter()
+                    .filter(|event| event.redacted_inputs)
+                    .count()
+            ),
+        ),
+        release_audit_check(
+            "replay latest",
+            ReadinessStatus::Pass,
+            format!(
+                "{} events, {} blocked, {} stubbed",
+                replay.events_replayed, replay.blocked, replay.side_effects_stubbed
+            ),
+        ),
+        release_audit_check(
+            "fork replay research policy",
+            if fork.changed == 0 {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Warn
+            },
+            format!(
+                "{} events, {} decision changes",
+                fork.events_replayed, fork.changed
+            ),
+        ),
+        release_audit_check(
+            "mcp server session",
+            if mcp_responses > 0 {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!("{mcp_responses} JSON-RPC responses"),
+        ),
+    ])
+}
+
+fn check_git_worktree(root: &Path) -> ReleaseAuditCheck {
+    match Command::new("git")
+        .arg("status")
+        .arg("--short")
+        .current_dir(root)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            if output.stdout.is_empty() {
+                release_audit_check("git status", ReadinessStatus::Pass, "working tree clean")
+            } else {
+                release_audit_check(
+                    "git status",
+                    ReadinessStatus::Warn,
+                    "working tree has uncommitted changes; commit before public push",
+                )
+            }
+        }
+        Ok(output) => release_audit_check(
+            "git status",
+            ReadinessStatus::Fail,
+            format!("git status exited with {}", output.status),
+        ),
+        Err(error) => release_audit_check(
+            "git status",
+            ReadinessStatus::Fail,
+            format!("could not run git status: {error}"),
+        ),
+    }
+}
+
+fn command_audit_check(root: &Path, name: &str, program: &str, args: &[&str]) -> ReleaseAuditCheck {
+    match Command::new(program).args(args).current_dir(root).output() {
+        Ok(output) if output.status.success() => {
+            release_audit_check(name, ReadinessStatus::Pass, "command exited successfully")
+        }
+        Ok(output) => release_audit_check(
+            name,
+            ReadinessStatus::Fail,
+            format!("command exited with {}", output.status),
+        ),
+        Err(error) => release_audit_check(
+            name,
+            ReadinessStatus::Fail,
+            format!("could not run command: {error}"),
+        ),
+    }
+}
+
+fn release_audit_check(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReleaseAuditCheck {
+    ReleaseAuditCheck {
+        name: name.into(),
+        status,
+        detail: detail.into(),
     }
 }
 
@@ -3236,6 +3462,27 @@ mod tests {
         assert!(!serialized.contains("signing_key"));
         assert!(!serialized.contains("private"));
         assert!(!serialized.contains(&hex::encode(DEV_SIGNING_KEY_BYTES)));
+    }
+
+    #[test]
+    fn release_audit_passes_with_warnings_but_not_failures() {
+        let warn_only = release_audit_from_checks(
+            PathBuf::from("."),
+            vec![
+                release_audit_check("required", ReadinessStatus::Pass, "ok"),
+                release_audit_check("human review", ReadinessStatus::Warn, "review"),
+            ],
+        );
+        assert!(warn_only.passed);
+
+        let failed = release_audit_from_checks(
+            PathBuf::from("."),
+            vec![
+                release_audit_check("required", ReadinessStatus::Pass, "ok"),
+                release_audit_check("blocking", ReadinessStatus::Fail, "nope"),
+            ],
+        );
+        assert!(!failed.passed);
     }
 
     #[test]

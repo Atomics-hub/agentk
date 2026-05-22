@@ -1,9 +1,9 @@
 use agentk::{
     AgentKError, McpToolRequest, Policy, ReadinessStatus, Verdict, default_log_path,
     fork_replay_jsonl, generate_signing_key_file, inspect_jsonl, mcp_proxy_from_path,
-    mcp_server_json_lines, readiness_report, replay_jsonl, rotate_signing_key_file,
-    run_poisoned_webpage_demo, signing_key_status, verify_jsonl, verify_signatures_jsonl,
-    verify_signing_key_rotation_manifest_file, write_latest_copy,
+    mcp_server_json_lines, readiness_report, release_audit_report, replay_jsonl,
+    rotate_signing_key_file, run_poisoned_webpage_demo, signing_key_status, verify_jsonl,
+    verify_signatures_jsonl, verify_signing_key_rotation_manifest_file, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
@@ -130,6 +130,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the full local release-audit gate.
+    ReleaseAudit {
+        /// Emit the full audit report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -165,6 +171,7 @@ fn run() -> Result<(), AgentKError> {
         Command::KeyRotateVerify { manifest, json } => key_rotate_verify(manifest, json),
         Command::PolicyCheck { path } => policy_check(path),
         Command::Readiness { json } => readiness(json),
+        Command::ReleaseAudit { json } => release_audit(json),
     }
 }
 
@@ -530,6 +537,44 @@ fn readiness(json: bool) -> Result<(), AgentKError> {
         .any(|check| check.status == ReadinessStatus::Warn)
     {
         println!("note      warnings still need human review before public release");
+    }
+
+    Ok(())
+}
+
+fn release_audit(json: bool) -> Result<(), AgentKError> {
+    let report = release_audit_report(".");
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK release audit");
+    println!("root      {}", report.root.display());
+    for check in &report.checks {
+        println!("[{}] {:<30} {}", check.status, check.name, check.detail);
+    }
+    println!();
+    println!(
+        "verdict   {}",
+        if report.passed {
+            "no blocking failures"
+        } else {
+            "not ready"
+        }
+    );
+
+    if report
+        .checks
+        .iter()
+        .any(|check| check.status == ReadinessStatus::Warn)
+    {
+        println!("note      warnings still need human review before public release");
+    }
+
+    if !report.passed {
+        std::process::exit(2);
     }
 
     Ok(())
