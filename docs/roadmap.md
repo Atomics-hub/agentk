@@ -83,5 +83,5 @@ Status: in progress.
 
 - [x] Add CI release-audit workflow.
 - [x] Protect the default branch with the CI `audit` check.
-- [ ] Add contributor guidelines for security-sensitive changes.
-- [ ] Add a signed release checklist for tagged versions.
+- [x] Add contributor guidelines for security-sensitive changes.
+- [x] Add a signed release checklist for tagged versions.

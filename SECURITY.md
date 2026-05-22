@@ -4,7 +4,7 @@ AgentK is security-sensitive software. Treat all code, docs, tests, and demos as
 
 ## Current Status
 
-This repository is a local prototype. It is not ready for production, remote deployment, or public trust claims.
+This repository is a public prototype. It is not ready for production, remote deployment, or public trust claims.
 
 Current guarantees are intentionally narrow:
 
@@ -45,9 +45,8 @@ For non-demo runs, configure `AGENTK_SIGNING_KEY_HEX` with a 32-byte hex Ed25519
 
 ## Maintainer Rules
 
-Before public release:
+For every public change:
 
-- No remotes or pushes until explicitly approved.
 - No real prompts, real traces, local usernames, local paths, tokens, API keys, or customer data in examples, tests, issues, or docs.
 - Every security claim must say whether it is implemented, planned, or experimental.
 - Demos must use invalid domains such as `example.invalid`.
@@ -57,12 +56,10 @@ Before public release:
 
 ## Reporting
 
-While this is local-only, report issues directly to the repository owner.
-
-Before public announcement, enable GitHub private vulnerability reporting for the repository. Once enabled, report suspected vulnerabilities through GitHub's **Security** tab with **Report a vulnerability**. Do not open public issues for suspected vulnerabilities.
+GitHub private vulnerability reporting is enabled. Report suspected vulnerabilities through GitHub's **Security** tab with **Report a vulnerability**. Do not open public issues for suspected vulnerabilities.
 
 ## Supported Versions
 
-AgentK is currently a local prototype. No public versions are supported yet.
+AgentK is currently a public prototype. No tagged public versions are supported yet.
 
-When AgentK becomes public, the first tagged prototype release should be the only supported disclosure target until a broader support policy exists.
+The first tagged prototype release should be the only supported disclosure target until a broader support policy exists.

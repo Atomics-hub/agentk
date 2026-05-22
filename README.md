@@ -117,6 +117,9 @@ Run the strict pre-push audit with a configured signing key:
 AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-signing-key) cargo run -- release-audit --strict
 ```
 
+Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md) and
+[docs/release-checklist.md](docs/release-checklist.md).
+
 Mediate a demo MCP-shaped tool request without executing it:
 
 ```sh
