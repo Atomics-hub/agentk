@@ -85,6 +85,14 @@ syscalls = ["network.send"]
 capability = "missing"
 
 [[rules]]
+id = "tool-descriptor-read"
+effect = "allow"
+reason = "browser tool descriptors are hashed and mediated as untrusted context before use"
+
+[rules.when]
+syscalls = ["tool.describe"]
+
+[[rules]]
 id = "tool-sensitive-input"
 effect = "deny"
 reason = "secret or private labels cannot be passed into browser tools"
@@ -111,6 +119,14 @@ reason = "browser tools require explicit target-scoped capability"
 [rules.when]
 syscalls = ["tool.invoke"]
 capability = "missing"
+
+[[rules]]
+id = "tool-response-record"
+effect = "allow"
+reason = "browser tool response content is recorded by hash without storing raw output"
+
+[rules.when]
+syscalls = ["tool.response"]
 
 [[rules]]
 id = "default-deny"

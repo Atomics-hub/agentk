@@ -38,11 +38,11 @@ Status: in progress.
 - [x] Add an MCP-shaped proxy command that mediates one `tool.invoke` request without execution.
 - [x] Record MCP request argument hashes instead of raw arguments.
 - [x] Expose AgentK as a minimal MCP JSON-RPC stdio server.
+- [x] Mediate tool descriptors.
+- [x] Record MCP response hashes.
 - [ ] Build a complete production MCP proxy/server transport.
-- [ ] Mediate tool descriptors.
 - [ ] Attach labels to tool outputs.
 - [ ] Block tainted flows at tool-call boundaries.
-- [ ] Record MCP response hashes.
 
 ## Milestone 4: Deterministic Replay
 

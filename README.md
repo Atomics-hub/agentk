@@ -10,7 +10,9 @@ It is not another agent framework. It is the syscall boundary agent frameworks s
 model.call
 context.read
 memory.write
+tool.describe
 tool.invoke
+tool.response
 secret.open
 network.send
 file.patch
@@ -179,14 +181,16 @@ This repo currently includes:
 - deterministic side-effect-free replay,
 - fork replay with policy comparison,
 - an MCP proxy MVP that mediates `tool.invoke` without execution,
+- MCP descriptor mediation that hashes untrusted tool metadata before model exposure,
+- MCP response recording that hashes raw tool output instead of logging it,
 - stdin mediation for one MCP-shaped request,
 - newline-delimited stdin mediation for repeated MCP-shaped requests,
-- a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`,
+- a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`, `agentk.mediate_descriptor`, and `agentk.record_response`,
 - signing key generation to a caller-chosen local file,
 - signed key-rotation manifests that do not include private key material,
 - key-rotation manifest verification,
 - a local public-readiness gate,
-- and tests for tainted egress, capability receipts, secret redaction, replay, MCP mediation, key rotation, and unknown syscall denial.
+- and tests for tainted egress, capability receipts, secret redaction, replay, MCP mediation, descriptor/response hashing, key rotation, and unknown syscall denial.
 
 Next obvious pieces:
 
@@ -213,6 +217,7 @@ Implemented today:
 - deterministic replay that stubs side effects,
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,
+- MCP descriptor and response hash evidence without raw descriptor/response logging,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests.
 

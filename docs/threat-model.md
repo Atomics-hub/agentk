@@ -33,7 +33,9 @@ An agent may plan freely, but actions must cross typed syscalls:
 ```txt
 context.read
 model.call
+tool.describe
 tool.invoke
+tool.response
 secret.open
 network.send
 file.patch
@@ -61,7 +63,7 @@ tool output cannot grant itself new tools
 - Receipts and secret handles use Ed25519 signatures, but the default signer is still a static development key.
 - Replay verifies the log chain and stubs side effects; fork replay currently compares policy decisions only.
 - There is no host process sandbox yet.
-- MCP support includes side-effect-free mediation commands and a minimal JSON-RPC stdio server, not a complete production proxy.
+- MCP support includes side-effect-free mediation commands, descriptor hashing, response hashing, and a minimal JSON-RPC stdio server, not a complete production proxy.
 - Key rotation emits a signed public manifest, but there is no production key storage yet.
 
 ## Design Bias

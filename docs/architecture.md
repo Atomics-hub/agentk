@@ -15,7 +15,9 @@ context.read
 model.call
 memory.read
 memory.write
+tool.describe
 tool.invoke
+tool.response
 secret.open
 network.send
 file.patch
@@ -130,7 +132,19 @@ It does not execute the tool.
 
 `agentk mcp-lines` accepts newline-delimited JSON requests on stdin and emits newline-delimited mediation reports. This is useful for simple adapters and tests.
 
-`agentk mcp-server` is a minimal MCP JSON-RPC stdio server. It handles `initialize`, `ping`, `tools/list`, and `tools/call`, and exposes one tool: `agentk.mediate`. The tool call result includes human-readable content plus structured AgentK mediation evidence. This is useful for integration experiments, but it is not a full MCP proxy and it still never executes the underlying tool.
+`agentk mcp-server` is a minimal MCP JSON-RPC stdio server. It handles `initialize`, `ping`, `tools/list`, and `tools/call`, and exposes three AgentK tools:
+
+```txt
+agentk.mediate
+agentk.mediate_descriptor
+agentk.record_response
+```
+
+`agentk.mediate_descriptor` converts an MCP `Tool` descriptor into a `tool.describe` syscall. AgentK hashes the full descriptor, hashes input/output schemas separately, marks suspicious descriptor text as `poisoned-suspect`, and does not put raw descriptor text into event inputs.
+
+`agentk.record_response` converts an MCP tool result into a `tool.response` syscall. AgentK records a response hash and labels, but does not serialize raw tool output into event inputs.
+
+This is useful for integration experiments, but it is not a full MCP proxy and it still never executes the underlying tool.
 
 ### Key Rotation Manifests
 

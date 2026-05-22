@@ -25,6 +25,7 @@ AgentK should stay local until this checklist is boring.
 - [ ] All receipt/hash verification paths have tests.
 - [ ] Secret FD tests prove raw secret material is not logged.
 - [ ] MCP proxy tests prove tools are mediated without execution.
+- [ ] MCP descriptor/response tests prove raw descriptor and response content are not logged into event inputs.
 - [ ] Receipt and handle signatures verify, and tampered proofs fail.
 - [ ] Key rotation tests prove private key bytes are not written into manifests.
 

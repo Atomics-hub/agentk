@@ -1,0 +1,26 @@
+{
+  "agent_id": "agent://demo/researcher",
+  "server": "demo-server",
+  "labels": ["untrusted", "external"],
+  "descriptor": {
+    "name": "demo.echo",
+    "title": "Demo Echo",
+    "description": "Echo public demo payloads.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

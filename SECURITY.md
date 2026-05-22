@@ -17,6 +17,8 @@ Current guarantees are intentionally narrow:
 - generated flight logs are hash-chained and locally verifiable,
 - deterministic replay verifies recorded logs without side effects,
 - the MCP proxy MVP mediates one `tool.invoke` request without executing the tool,
+- MCP descriptor mediation records descriptor/schema hashes without logging raw descriptor text,
+- MCP response recording records response hashes without logging raw tool output,
 - the minimal MCP JSON-RPC stdio server exposes only side-effect-free mediation,
 - key rotation writes a next private key file and a signed public manifest,
 - no actual model, network, secret, or filesystem side effects occur in the demo.

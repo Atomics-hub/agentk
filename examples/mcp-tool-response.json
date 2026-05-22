@@ -1,0 +1,18 @@
+{
+  "agent_id": "agent://demo/researcher",
+  "tool": "demo.echo",
+  "labels": ["untrusted", "external"],
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "public demo payload"
+      }
+    ],
+    "structuredContent": {
+      "message": "public demo payload"
+    },
+    "isError": false
+  },
+  "is_error": false
+}
