@@ -15,6 +15,7 @@ Current guarantees are intentionally narrow:
 - receipts and secret handles carry Ed25519 development signatures,
 - signature verification reports fail closed on tampered proofs,
 - generated flight logs are hash-chained and locally verifiable,
+- flight-log inspection redacts raw event input refs into hash evidence,
 - deterministic replay verifies recorded logs without side effects,
 - the MCP proxy MVP mediates one `tool.invoke` request without executing the tool,
 - MCP descriptor mediation records descriptor/schema hashes without logging raw descriptor text,

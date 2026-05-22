@@ -49,6 +49,7 @@ Status: in progress.
 - [x] Re-run an event log without side effects.
 - [x] Count stubbed model/tool/network side effects.
 - [x] Fork replay with changed policy.
+- [x] Add redacted flight-log inspect output for human review.
 - [ ] Record stub outputs for model/tool/network syscalls.
 - [ ] Fork replay with changed model/tool behavior.
 - [ ] Emit divergence reports.

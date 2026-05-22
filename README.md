@@ -65,6 +65,12 @@ Verify receipt and secret-handle signatures:
 cargo run -- verify-signatures .agentk/runs/latest.jsonl
 ```
 
+Inspect the latest flight log without printing raw input refs:
+
+```sh
+cargo run -- trace-inspect .agentk/runs/latest.jsonl
+```
+
 Replay the latest flight log without side effects:
 
 ```sh
@@ -178,6 +184,7 @@ This repo currently includes:
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,
+- redacted flight-log inspection for human review,
 - deterministic side-effect-free replay,
 - fork replay with policy comparison,
 - an MCP proxy MVP that mediates `tool.invoke` without execution,
@@ -214,6 +221,7 @@ Implemented today:
 - Ed25519-signed development secret handles,
 - JSONL flight log hash chain,
 - local log verification,
+- redacted flight-log inspection that replaces raw input refs with hash evidence,
 - deterministic replay that stubs side effects,
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,

@@ -1,8 +1,8 @@
 use agentk::{
     AgentKError, McpToolRequest, Policy, ReadinessStatus, Verdict, default_log_path,
-    fork_replay_jsonl, generate_signing_key_file, mcp_proxy_from_path, mcp_server_json_lines,
-    readiness_report, replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
-    signing_key_status, verify_jsonl, verify_signatures_jsonl,
+    fork_replay_jsonl, generate_signing_key_file, inspect_jsonl, mcp_proxy_from_path,
+    mcp_server_json_lines, readiness_report, replay_jsonl, rotate_signing_key_file,
+    run_poisoned_webpage_demo, signing_key_status, verify_jsonl, verify_signatures_jsonl,
     verify_signing_key_rotation_manifest_file, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
@@ -34,6 +34,14 @@ enum Command {
     VerifySignatures {
         /// Path to a JSONL flight log.
         path: PathBuf,
+    },
+    /// Inspect a flight log with redacted hash-first evidence summaries.
+    TraceInspect {
+        /// Path to a JSONL flight log.
+        path: PathBuf,
+        /// Emit the inspection report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Replay a hash-chained flight log without side effects.
     Replay {
@@ -138,6 +146,7 @@ fn run() -> Result<(), AgentKError> {
         Command::Demo { json } => demo(json),
         Command::Verify { path } => verify(path),
         Command::VerifySignatures { path } => verify_signatures(path),
+        Command::TraceInspect { path, json } => trace_inspect(path, json),
         Command::Replay { path } => replay(path),
         Command::ForkReplay { path, policy, json } => fork_replay(path, policy, json),
         Command::McpProxy { request, json } => mcp_proxy(request, json),
@@ -239,6 +248,73 @@ fn verify_signatures(path: PathBuf) -> Result<(), AgentKError> {
     }
 
     if !report.ok {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+fn trace_inspect(path: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = inspect_jsonl(&path)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK flight log inspect");
+    println!("log       {}", report.path.display());
+    println!("events    {}", report.events_checked);
+    println!("allowed   {}", report.allowed);
+    println!("blocked   {}", report.blocked);
+    println!("stubbed   {}", report.side_effects_stubbed);
+    println!("signatures {}", report.signatures_ok);
+    println!("receipts  {}", report.receipts_checked);
+    println!("handles   {}", report.secret_handles_checked);
+    println!("final     {}", report.final_hash);
+    println!();
+
+    for event in &report.events {
+        let marker = match event.verdict {
+            Verdict::Allow => "ALLOW",
+            Verdict::Deny => "BLOCK",
+        };
+        let labels = if event.labels.is_empty() {
+            "-".to_string()
+        } else {
+            event.labels.join(", ")
+        };
+        let evidence = if event.evidence_refs.is_empty() {
+            "-".to_string()
+        } else {
+            event.evidence_refs.join(", ")
+        };
+
+        println!(
+            "[{marker}] #{:<2} {:<13} {}",
+            event.step, event.syscall, event.target
+        );
+        println!("       rule:     {}", event.rule);
+        println!("       labels:   {labels}");
+        println!("       evidence: {evidence}");
+        if event.redacted_inputs {
+            println!("       redacted: raw input refs were replaced with input_sha256 evidence");
+        }
+        if let Some(receipt_id) = &event.receipt_id {
+            println!("       receipt:  {receipt_id}");
+        }
+        if let Some(handle_id) = &event.secret_handle_id {
+            println!("       handle:   {handle_id}");
+        }
+        println!("       hash:     {}", &event.event_hash[..16]);
+        println!();
+    }
+
+    for failure in &report.signature_failures {
+        println!("signature failure: {failure}");
+    }
+
+    if !report.signatures_ok {
         std::process::exit(2);
     }
 

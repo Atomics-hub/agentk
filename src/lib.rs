@@ -1486,6 +1486,137 @@ pub struct ReplayReport {
     pub final_hash: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlightLogInspectReport {
+    pub path: PathBuf,
+    pub events_checked: u64,
+    pub final_hash: String,
+    pub signatures_ok: bool,
+    pub receipts_checked: u64,
+    pub secret_handles_checked: u64,
+    pub allowed: usize,
+    pub blocked: usize,
+    pub side_effects_stubbed: usize,
+    pub events: Vec<FlightLogEventSummary>,
+    pub signature_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlightLogEventSummary {
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub verdict: Verdict,
+    pub rule: String,
+    pub labels: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub redacted_inputs: bool,
+    pub receipt_id: Option<String>,
+    pub secret_handle_id: Option<String>,
+    pub event_hash: String,
+}
+
+pub fn inspect_jsonl(path: impl AsRef<Path>) -> Result<FlightLogInspectReport, AgentKError> {
+    let path = path.as_ref();
+    let events = read_events_jsonl(path)?;
+    inspect_events(path.to_path_buf(), &events)
+}
+
+pub fn inspect_events(
+    path: PathBuf,
+    events: &[Event],
+) -> Result<FlightLogInspectReport, AgentKError> {
+    let verify = verify_events(events)?;
+    let signatures = verify_event_signatures(events)?;
+    let allowed = events
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Allow)
+        .count();
+    let blocked = events
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Deny)
+        .count();
+    let side_effects_stubbed = events
+        .iter()
+        .filter(|event| {
+            event.decision.verdict == Verdict::Allow
+                && is_side_effecting_syscall(&event.syscall.kind)
+        })
+        .count();
+    let events = events.iter().map(inspect_event_summary).collect();
+
+    Ok(FlightLogInspectReport {
+        path,
+        events_checked: verify.events_checked,
+        final_hash: verify.final_hash,
+        signatures_ok: signatures.ok,
+        receipts_checked: signatures.receipts_checked,
+        secret_handles_checked: signatures.secret_handles_checked,
+        allowed,
+        blocked,
+        side_effects_stubbed,
+        events,
+        signature_failures: signatures.failures,
+    })
+}
+
+fn inspect_event_summary(event: &Event) -> FlightLogEventSummary {
+    let evidence_refs = event
+        .syscall
+        .inputs
+        .iter()
+        .map(|input| {
+            if is_safe_evidence_ref(input) {
+                input.clone()
+            } else {
+                format!("input_sha256:{}", hash_json(input))
+            }
+        })
+        .collect::<Vec<_>>();
+    let redacted_inputs = event
+        .syscall
+        .inputs
+        .iter()
+        .any(|input| !is_safe_evidence_ref(input));
+
+    FlightLogEventSummary {
+        step: event.step,
+        syscall: event.syscall.kind.to_string(),
+        target: event.syscall.target.clone(),
+        verdict: event.decision.verdict,
+        rule: event.decision.rule.clone(),
+        labels: event
+            .syscall
+            .labels
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        evidence_refs,
+        redacted_inputs,
+        receipt_id: event
+            .decision
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.id.clone()),
+        secret_handle_id: event
+            .decision
+            .secret_handle
+            .as_ref()
+            .map(|handle| handle.id.clone()),
+        event_hash: event.event_hash.clone(),
+    }
+}
+
+fn is_safe_evidence_ref(input: &str) -> bool {
+    ["args_sha256:", "descriptor_sha256:", "response_sha256:"]
+        .iter()
+        .any(|prefix| {
+            input.strip_prefix(prefix).is_some_and(|hash| {
+                hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit())
+            })
+        })
+}
+
 pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError> {
     let events = read_events_jsonl(path)?;
     let verify = verify_events(&events)?;
@@ -1497,10 +1628,7 @@ pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError>
         .iter()
         .filter(|event| {
             event.decision.verdict == Verdict::Allow
-                && matches!(
-                    &event.syscall.kind,
-                    SyscallKind::ModelCall | SyscallKind::NetworkSend | SyscallKind::ToolInvoke
-                )
+                && is_side_effecting_syscall(&event.syscall.kind)
         })
         .count();
 
@@ -1510,6 +1638,13 @@ pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError>
         side_effects_stubbed,
         final_hash: verify.final_hash,
     })
+}
+
+fn is_side_effecting_syscall(kind: &SyscallKind) -> bool {
+    matches!(
+        kind,
+        SyscallKind::ModelCall | SyscallKind::NetworkSend | SyscallKind::ToolInvoke
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3006,6 +3141,61 @@ mod tests {
         );
         assert!(!serialized.contains("raw tool output"));
         assert!(!serialized.contains("structuredContent"));
+    }
+
+    #[test]
+    fn flight_log_inspect_redacts_raw_input_refs() {
+        let path = temp_path("agentk-inspect", "jsonl");
+        let raw_input = "RAW_PAYLOAD_SHOULD_NOT_APPEAR";
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("tool.invoke:demo.echo");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "demo.echo".to_string(),
+            intent: "inspect redaction test".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![raw_input.to_string()],
+        });
+        kernel.write_jsonl(&path).expect("log should write");
+
+        let report = inspect_jsonl(&path).expect("inspect should verify");
+        let serialized = serde_json::to_string(&report).expect("report should serialize");
+
+        assert_eq!(report.events_checked, 1);
+        assert_eq!(report.allowed, 1);
+        assert_eq!(report.blocked, 0);
+        assert!(report.signatures_ok);
+        assert!(report.events[0].redacted_inputs);
+        assert!(report.events[0].evidence_refs[0].starts_with("input_sha256:"));
+        assert!(!serialized.contains(raw_input));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn flight_log_inspect_preserves_safe_hash_evidence_refs() {
+        let path = temp_path("agentk-inspect-hash", "jsonl");
+        let request = McpToolResponseRecordRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            labels: labels(&[Label::Untrusted]),
+            response: serde_json::json!({ "content": [{ "type": "text", "text": "public" }] }),
+            is_error: false,
+        };
+        let report = record_mcp_tool_response(request);
+        let event = serde_json::to_string(&report.event).expect("event should serialize");
+        fs::write(&path, format!("{event}\n")).expect("log should write");
+
+        let inspect = inspect_jsonl(&path).expect("inspect should verify");
+
+        assert_eq!(inspect.events_checked, 1);
+        assert!(!inspect.events[0].redacted_inputs);
+        assert_eq!(
+            inspect.events[0].evidence_refs[0],
+            format!("response_sha256:{}", report.response_hash)
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

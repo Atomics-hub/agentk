@@ -61,6 +61,7 @@ tool output cannot grant itself new tools
 - Policy uses a small typed AST, not a full formal policy language.
 - Labels are manually attached in the demo.
 - Receipts and secret handles use Ed25519 signatures, but the default signer is still a static development key.
+- Flight-log inspection is redacted by default, but raw JSONL logs may still contain sensitive targets or any raw inputs produced by future adapters.
 - Replay verifies the log chain and stubs side effects; fork replay currently compares policy decisions only.
 - There is no host process sandbox yet.
 - MCP support includes side-effect-free mediation commands, descriptor hashing, response hashing, and a minimal JSON-RPC stdio server, not a complete production proxy.
