@@ -30,7 +30,7 @@ Status: in progress.
 - [x] Prevent raw secret material from being serialized into flight logs.
 - [x] Add tests proving raw secret bytes never appear in flight logs.
 - [x] Add Ed25519 development signatures for secret handles.
-- [ ] Add expiry, scope, and receipt binding.
+- [x] Add expiry, scope, and receipt binding.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy

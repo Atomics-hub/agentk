@@ -186,8 +186,11 @@ pub struct CapabilityReceipt {
 pub struct SecretHandle {
     pub id: String,
     pub target: String,
+    pub scope: String,
     pub labels: BTreeSet<Label>,
     pub expires_at_step: u64,
+    pub receipt_id: String,
+    pub receipt_proof: String,
     pub proof: String,
     pub signature: String,
     pub public_key: String,
@@ -215,22 +218,32 @@ impl SecretBroker {
         step: u64,
         target: &str,
         previous_hash: &str,
+        receipt: &CapabilityReceipt,
     ) -> Option<SecretHandle> {
         self.secrets.get(target)?;
 
+        let labels = labels(&[Label::Secret, Label::Private]);
         let proof = hash_json(&SecretHandleProofInput {
             agent_id,
             step,
             target,
+            scope: &receipt.scope,
+            labels: &labels,
+            expires_at_step: receipt.expires_at_step,
             previous_hash,
+            receipt_id: &receipt.id,
+            receipt_proof: &receipt.proof,
         });
         let signed = sign_proof(&proof);
 
         Some(SecretHandle {
             id: format!("secret_fd_{}", &proof[..12]),
             target: target.to_string(),
-            labels: labels(&[Label::Secret, Label::Private]),
-            expires_at_step: step,
+            scope: receipt.scope.clone(),
+            labels,
+            expires_at_step: receipt.expires_at_step,
+            receipt_id: receipt.id.clone(),
+            receipt_proof: receipt.proof.clone(),
             proof,
             signature: signed.signature,
             public_key: signed.public_key,
@@ -245,7 +258,12 @@ struct SecretHandleProofInput<'a> {
     agent_id: &'a str,
     step: u64,
     target: &'a str,
+    scope: &'a str,
+    labels: &'a BTreeSet<Label>,
+    expires_at_step: u64,
     previous_hash: &'a str,
+    receipt_id: &'a str,
+    receipt_proof: &'a str,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -401,11 +419,15 @@ impl AgentKernel {
 
     fn allow_for_rule(&self, step: u64, syscall: &Syscall, rule: &PolicyRule) -> PolicyDecision {
         if matches!(&syscall.kind, SyscallKind::SecretOpen) {
-            if let Some(secret_handle) =
-                self.secret_broker
-                    .open(&self.agent_id, step, &syscall.target, &self.previous_hash)
-            {
-                return self.allow_with_secret_handle(step, syscall, rule, secret_handle);
+            let receipt = self.receipt(step, syscall);
+            if let Some(secret_handle) = self.secret_broker.open(
+                &self.agent_id,
+                step,
+                &syscall.target,
+                &self.previous_hash,
+                &receipt,
+            ) {
+                return self.allow_with_secret_handle(rule, receipt, secret_handle);
             }
 
             return self.deny(
@@ -447,9 +469,8 @@ impl AgentKernel {
 
     fn allow_with_secret_handle(
         &self,
-        step: u64,
-        syscall: &Syscall,
         rule: &PolicyRule,
+        receipt: CapabilityReceipt,
         secret_handle: SecretHandle,
     ) -> PolicyDecision {
         PolicyDecision {
@@ -457,7 +478,7 @@ impl AgentKernel {
             reason: rule.reason.clone(),
             rule: rule.id.clone(),
             missing_capability: None,
-            receipt: Some(self.receipt(step, syscall)),
+            receipt: Some(receipt),
             secret_handle: Some(secret_handle),
         }
     }
@@ -475,12 +496,14 @@ impl AgentKernel {
 
     fn receipt(&self, step: u64, syscall: &Syscall) -> CapabilityReceipt {
         let scope = syscall.capability_name();
+        let expires_at_step = step;
         let proof = hash_json(&ReceiptProofInput {
             agent_id: &self.agent_id,
             step,
             syscall: syscall.kind.as_str(),
             target: &syscall.target,
             scope: &scope,
+            expires_at_step,
             previous_hash: &self.previous_hash,
         });
         let signed = sign_proof(&proof);
@@ -491,7 +514,7 @@ impl AgentKernel {
             syscall: syscall.kind.to_string(),
             target: syscall.target.clone(),
             scope,
-            expires_at_step: step,
+            expires_at_step,
             proof,
             signature: signed.signature,
             public_key: signed.public_key,
@@ -508,6 +531,7 @@ struct ReceiptProofInput<'a> {
     syscall: &'a str,
     target: &'a str,
     scope: &'a str,
+    expires_at_step: u64,
     previous_hash: &'a str,
 }
 
@@ -1724,6 +1748,7 @@ pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport
     for event in events {
         if let Some(receipt) = &event.decision.receipt {
             receipts_checked += 1;
+            failures.extend(validate_receipt_binding(event, receipt));
             if receipt.algorithm != PROOF_ALGORITHM {
                 failures.push(format!(
                     "step {} receipt {} uses unsupported algorithm {}",
@@ -1740,6 +1765,11 @@ pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport
 
         if let Some(handle) = &event.decision.secret_handle {
             secret_handles_checked += 1;
+            failures.extend(validate_secret_handle_binding(
+                event,
+                handle,
+                event.decision.receipt.as_ref(),
+            ));
             if handle.algorithm != PROOF_ALGORITHM {
                 failures.push(format!(
                     "step {} secret handle {} uses unsupported algorithm {}",
@@ -1761,6 +1791,154 @@ pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport
         ok: failures.is_empty(),
         failures,
     })
+}
+
+fn validate_receipt_binding(event: &Event, receipt: &CapabilityReceipt) -> Vec<String> {
+    let mut failures = Vec::new();
+    let expected_scope = event.syscall.capability_name();
+    let expected_syscall = event.syscall.kind.as_str();
+
+    if receipt.syscall != expected_syscall {
+        failures.push(format!(
+            "step {} receipt {} syscall mismatch",
+            event.step, receipt.id
+        ));
+    }
+    if receipt.target != event.syscall.target {
+        failures.push(format!(
+            "step {} receipt {} target mismatch",
+            event.step, receipt.id
+        ));
+    }
+    if receipt.scope != expected_scope {
+        failures.push(format!(
+            "step {} receipt {} scope mismatch",
+            event.step, receipt.id
+        ));
+    }
+    if receipt.expires_at_step < event.step {
+        failures.push(format!(
+            "step {} receipt {} is expired",
+            event.step, receipt.id
+        ));
+    }
+
+    let expected_proof = hash_json(&ReceiptProofInput {
+        agent_id: &receipt.issued_to,
+        step: event.step,
+        syscall: &receipt.syscall,
+        target: &receipt.target,
+        scope: &receipt.scope,
+        expires_at_step: receipt.expires_at_step,
+        previous_hash: &event.previous_hash,
+    });
+    if receipt.proof != expected_proof {
+        failures.push(format!(
+            "step {} receipt {} proof does not match receipt fields",
+            event.step, receipt.id
+        ));
+    }
+    if proof_id("cap_", &receipt.proof).as_deref() != Some(receipt.id.as_str()) {
+        failures.push(format!(
+            "step {} receipt {} id does not match proof",
+            event.step, receipt.id
+        ));
+    }
+
+    failures
+}
+
+fn validate_secret_handle_binding(
+    event: &Event,
+    handle: &SecretHandle,
+    receipt: Option<&CapabilityReceipt>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let expected_scope = event.syscall.capability_name();
+
+    if !matches!(event.syscall.kind, SyscallKind::SecretOpen) {
+        failures.push(format!(
+            "step {} secret handle {} attached to non-secret syscall",
+            event.step, handle.id
+        ));
+    }
+    if handle.target != event.syscall.target {
+        failures.push(format!(
+            "step {} secret handle {} target mismatch",
+            event.step, handle.id
+        ));
+    }
+    if handle.scope != expected_scope {
+        failures.push(format!(
+            "step {} secret handle {} scope mismatch",
+            event.step, handle.id
+        ));
+    }
+    if handle.expires_at_step < event.step {
+        failures.push(format!(
+            "step {} secret handle {} is expired",
+            event.step, handle.id
+        ));
+    }
+    if !handle.labels.contains(&Label::Secret) || !handle.labels.contains(&Label::Private) {
+        failures.push(format!(
+            "step {} secret handle {} missing secret/private labels",
+            event.step, handle.id
+        ));
+    }
+
+    let Some(receipt) = receipt else {
+        failures.push(format!(
+            "step {} secret handle {} has no receipt to bind",
+            event.step, handle.id
+        ));
+        return failures;
+    };
+
+    if handle.receipt_id != receipt.id || handle.receipt_proof != receipt.proof {
+        failures.push(format!(
+            "step {} secret handle {} receipt binding mismatch",
+            event.step, handle.id
+        ));
+    }
+    if handle.expires_at_step != receipt.expires_at_step {
+        failures.push(format!(
+            "step {} secret handle {} expiry does not match receipt",
+            event.step, handle.id
+        ));
+    }
+
+    let expected_proof = hash_json(&SecretHandleProofInput {
+        agent_id: &receipt.issued_to,
+        step: event.step,
+        target: &handle.target,
+        scope: &handle.scope,
+        labels: &handle.labels,
+        expires_at_step: handle.expires_at_step,
+        previous_hash: &event.previous_hash,
+        receipt_id: &handle.receipt_id,
+        receipt_proof: &handle.receipt_proof,
+    });
+    if handle.proof != expected_proof {
+        failures.push(format!(
+            "step {} secret handle {} proof does not match handle fields",
+            event.step, handle.id
+        ));
+    }
+    if proof_id("secret_fd_", &handle.proof).as_deref() != Some(handle.id.as_str()) {
+        failures.push(format!(
+            "step {} secret handle {} id does not match proof",
+            event.step, handle.id
+        ));
+    }
+
+    failures
+}
+
+fn proof_id(prefix: &str, proof: &str) -> Option<String> {
+    proof
+        .get(..12)
+        .map(|proof_prefix| format!("{prefix}{proof_prefix}"))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3278,6 +3456,41 @@ mod tests {
     }
 
     #[test]
+    fn secret_fd_handle_binds_scope_expiry_and_receipt() {
+        let mut broker = SecretBroker::new();
+        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open brokered GitHub token".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        let receipt = event.decision.receipt.as_ref().expect("receipt is present");
+        let handle = event
+            .decision
+            .secret_handle
+            .as_ref()
+            .expect("secret handle is present");
+
+        assert_eq!(receipt.scope, "secret.open:secret://github-token");
+        assert_eq!(handle.scope, receipt.scope);
+        assert_eq!(handle.expires_at_step, receipt.expires_at_step);
+        assert_eq!(handle.receipt_id, receipt.id);
+        assert_eq!(handle.receipt_proof, receipt.proof);
+        assert!(handle.labels.contains(&Label::Secret));
+        assert!(handle.labels.contains(&Label::Private));
+
+        let report = verify_event_signatures(kernel.events()).expect("signatures should verify");
+        assert!(report.ok, "{:?}", report.failures);
+    }
+
+    #[test]
     fn tampered_receipt_signature_fails_verification() {
         let mut kernel = AgentKernel::new("agent://test");
         kernel.grant("network.send:https://api.github.com".to_string());
@@ -3296,6 +3509,81 @@ mod tests {
             &receipt.signature,
             &receipt.public_key
         ));
+    }
+
+    #[test]
+    fn tampered_receipt_metadata_fails_signature_report() {
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("network.send:https://api.github.com".to_string());
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: "https://api.github.com".to_string(),
+            intent: "fetch public issue metadata".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+        let mut decision = event.decision.clone();
+        decision
+            .receipt
+            .as_mut()
+            .expect("receipt is present")
+            .expires_at_step += 1;
+
+        let tampered = Event::new(
+            event.step,
+            event.syscall.clone(),
+            decision,
+            event.previous_hash.clone(),
+        );
+        let report = verify_event_signatures(&[tampered]).expect("report should be produced");
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("proof does not match receipt fields"))
+        );
+    }
+
+    #[test]
+    fn tampered_secret_handle_receipt_binding_fails_signature_report() {
+        let mut broker = SecretBroker::new();
+        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open brokered GitHub token".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+        let mut decision = event.decision.clone();
+        decision
+            .secret_handle
+            .as_mut()
+            .expect("secret handle is present")
+            .receipt_id = "cap_tampered".to_string();
+
+        let tampered = Event::new(
+            event.step,
+            event.syscall.clone(),
+            decision,
+            event.previous_hash.clone(),
+        );
+        let report = verify_event_signatures(&[tampered]).expect("report should be produced");
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("receipt binding mismatch"))
+        );
     }
 
     #[test]

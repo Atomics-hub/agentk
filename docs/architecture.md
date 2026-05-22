@@ -113,6 +113,11 @@ The agent can use the handle through a broker, but cannot print, copy, or send t
 
 The current prototype stores only dummy in-memory secrets in tests and serializes the handle, proof, signature, public key, and labels. It does not serialize raw secret material.
 
+Secret handles are scoped to the same capability string as the `secret.open`
+receipt, share the receipt expiry step, and carry the receipt id and proof hash.
+Signature verification recomputes both proof hashes from visible event fields,
+then checks that the handle is bound to the receipt before accepting the proof.
+
 ### Flight Recorder
 
 Every syscall is written as JSONL with a hash chain.

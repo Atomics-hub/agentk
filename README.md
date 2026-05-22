@@ -196,8 +196,8 @@ This repo currently includes:
 - label propagation for demo syscalls,
 - default-deny behavior for unknown syscalls,
 - Ed25519-signed development capability receipts,
-- opaque secret FD handles,
-- Ed25519-signed development secret handles,
+- opaque secret FD handles scoped to signed receipts,
+- Ed25519-signed development secret handles with expiry and receipt binding,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,
@@ -215,7 +215,7 @@ This repo currently includes:
 - key-rotation manifest verification,
 - a one-command local release audit,
 - a local public-readiness gate,
-- and tests for tainted egress, capability receipts, secret redaction, replay, MCP mediation, descriptor/response hashing, key rotation, and unknown syscall denial.
+- and tests for tainted egress, capability receipts, secret redaction, secret-handle binding, replay, MCP mediation, descriptor/response hashing, key rotation, and unknown syscall denial.
 
 Next obvious pieces:
 
@@ -236,7 +236,7 @@ Implemented today:
 - typed TOML policy validation,
 - Ed25519-signed development capability receipts,
 - opaque secret FD handle minting,
-- Ed25519-signed development secret handles,
+- Ed25519-signed development secret handles with expiry, scope, and receipt binding,
 - JSONL flight log hash chain,
 - local log verification,
 - redacted flight-log inspection that replaces raw input refs with hash evidence,
