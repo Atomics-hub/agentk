@@ -1682,13 +1682,13 @@ fn handle_mcp_tool_request_line(
 
 pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
     let mut out = String::new();
-    let mut kernel = None::<AgentKernel>;
+    let mut session = McpJsonRpcSession::default();
 
     for line in input.lines() {
         if let Some(response) = handle_mcp_json_rpc_line(
             line.as_bytes(),
             line.len() > MCP_STDIN_MAX_MESSAGE_BYTES,
-            &mut kernel,
+            &mut session,
         ) {
             out.push_str(&serde_json::to_string(&response)?);
             out.push('\n');
@@ -1703,10 +1703,10 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut kernel = None::<AgentKernel>;
+    let mut session = McpJsonRpcSession::default();
 
     while let Some(line) = read_mcp_bounded_line(&mut reader)? {
-        if let Some(response) = handle_mcp_json_rpc_line(&line.bytes, line.too_long, &mut kernel) {
+        if let Some(response) = handle_mcp_json_rpc_line(&line.bytes, line.too_long, &mut session) {
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
         }
@@ -1719,6 +1719,12 @@ where
 struct McpBoundedLine {
     bytes: Vec<u8>,
     too_long: bool,
+}
+
+#[derive(Default)]
+struct McpJsonRpcSession {
+    kernel: Option<AgentKernel>,
+    initialized: bool,
 }
 
 fn read_mcp_bounded_line<R: BufRead>(
@@ -1764,7 +1770,7 @@ fn read_mcp_bounded_line<R: BufRead>(
 fn handle_mcp_json_rpc_line(
     line: &[u8],
     too_long: bool,
-    kernel: &mut Option<AgentKernel>,
+    session: &mut McpJsonRpcSession,
 ) -> Option<serde_json::Value> {
     if too_long {
         return Some(jsonrpc_line_limit_error());
@@ -1775,7 +1781,7 @@ fn handle_mcp_json_rpc_line(
     }
 
     match serde_json::from_slice::<serde_json::Value>(line) {
-        Ok(message) => handle_mcp_json_rpc_message(message, kernel),
+        Ok(message) => handle_mcp_json_rpc_message(message, session),
         Err(error) => Some(jsonrpc_error(
             serde_json::Value::Null,
             -32700,
@@ -1800,7 +1806,7 @@ fn jsonrpc_line_limit_error() -> serde_json::Value {
 
 fn handle_mcp_json_rpc_message(
     message: serde_json::Value,
-    kernel: &mut Option<AgentKernel>,
+    session: &mut McpJsonRpcSession,
 ) -> Option<serde_json::Value> {
     if message.is_array() {
         return Some(jsonrpc_error(
@@ -1861,13 +1867,24 @@ fn handle_mcp_json_rpc_message(
         return None;
     }
 
-    let params = object
-        .get("params")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+    if !session.initialized && matches!(method, "tools/list" | "tools/call") {
+        return Some(jsonrpc_not_initialized(id));
+    }
 
     match method {
-        "initialize" => Some(jsonrpc_success(id, mcp_initialize_result())),
+        "initialize" => {
+            if session.initialized {
+                Some(jsonrpc_error(
+                    id,
+                    -32600,
+                    "Invalid Request",
+                    Some(serde_json::json!({ "detail": "server is already initialized" })),
+                ))
+            } else {
+                session.initialized = true;
+                Some(jsonrpc_success(id, mcp_initialize_result()))
+            }
+        }
         "ping" => Some(jsonrpc_success(id, serde_json::json!({}))),
         "tools/list" => Some(jsonrpc_success(
             id,
@@ -1879,9 +1896,26 @@ fn handle_mcp_json_rpc_message(
                 ]
             }),
         )),
-        "tools/call" => Some(handle_mcp_tool_call(id, params, kernel)),
+        "tools/call" => {
+            let params = object
+                .get("params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            Some(handle_mcp_tool_call(id, params, &mut session.kernel))
+        }
         _ => Some(jsonrpc_error(id, -32601, "Method not found", None)),
     }
+}
+
+fn jsonrpc_not_initialized(id: serde_json::Value) -> serde_json::Value {
+    jsonrpc_error(
+        id,
+        -32002,
+        "Server not initialized",
+        Some(serde_json::json!({
+            "detail": "initialize must complete before tool requests"
+        })),
+    )
 }
 
 fn jsonrpc_request_id(id: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -3470,14 +3504,16 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_transport_guard.oversized_line_rejected
                 && mcp_transport_guard.mcp_lines_oversized_rejected
                 && mcp_transport_guard.mcp_stdio_oversized_rejected
+                && mcp_transport_guard.preinit_tool_rejected
                 && mcp_transport_guard.bounded_stdin_not_reflected
+                && mcp_transport_guard.preinit_payload_not_reflected
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, redacted {}",
+                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, preinit {}, redacted {}",
                 if mcp_transport_guard.invalid_id_rejected {
                     "rejected"
                 } else {
@@ -3495,8 +3531,14 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 },
                 mcp_transport_guard.mcp_lines_oversized_rejected
                     && mcp_transport_guard.mcp_stdio_oversized_rejected,
+                if mcp_transport_guard.preinit_tool_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
                 mcp_transport_guard.invalid_id_not_reflected
                     && mcp_transport_guard.bounded_stdin_not_reflected
+                    && mcp_transport_guard.preinit_payload_not_reflected
             ),
         ),
         release_audit_check(
@@ -3726,13 +3768,16 @@ struct McpTransportGuardSmokeReport {
     oversized_line_rejected: bool,
     mcp_lines_oversized_rejected: bool,
     mcp_stdio_oversized_rejected: bool,
+    preinit_tool_rejected: bool,
     bounded_stdin_not_reflected: bool,
+    preinit_payload_not_reflected: bool,
 }
 
 fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKError> {
     const RAW_ID_PAYLOAD: &str = "RELEASE_AUDIT_MCP_ID_SHOULD_NOT_REFLECT";
     const RAW_LINES_PAYLOAD: &str = "RELEASE_AUDIT_MCP_LINES_SHOULD_NOT_REFLECT";
     const RAW_STDIO_PAYLOAD: &str = "RELEASE_AUDIT_MCP_STDIO_SHOULD_NOT_REFLECT";
+    const RAW_PREINIT_PAYLOAD: &str = "RELEASE_AUDIT_MCP_PREINIT_SHOULD_NOT_REFLECT";
 
     let batch = serde_json::json!([
         { "jsonrpc": "2.0", "id": 1, "method": "ping" }
@@ -3790,6 +3835,24 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     let stdio_error = mediate_mcp_json_reader(std::io::Cursor::new(stdio_request))
         .expect_err("oversized MCP stdio smoke should fail")
         .to_string();
+    let preinit_tool_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_MEDIATE_TOOL,
+            "arguments": {
+                "agent_id": "agent://release-audit",
+                "tool": "demo.echo",
+                "intent": "pre-initialize tool call",
+                "labels": ["trusted"],
+                "capabilities": ["tool.invoke:demo.echo"],
+                "arguments": { "secret": RAW_PREINIT_PAYLOAD }
+            }
+        }
+    });
+    let preinit_output = mcp_server_json_lines(&preinit_tool_call.to_string())?;
+    let preinit_response: serde_json::Value = serde_json::from_str(preinit_output.trim())?;
 
     Ok(McpTransportGuardSmokeReport {
         invalid_id_rejected: responses.first().is_some_and(|response| {
@@ -3811,9 +3874,12 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
         mcp_lines_oversized_rejected: lines_error.contains("MCP line limit")
             && lines_output.is_empty(),
         mcp_stdio_oversized_rejected: stdio_error.contains("MCP request limit"),
+        preinit_tool_rejected: preinit_response["error"]["code"] == serde_json::json!(-32002)
+            && preinit_response["error"]["message"] == "Server not initialized",
         bounded_stdin_not_reflected: !lines_error.contains(RAW_LINES_PAYLOAD)
             && !String::from_utf8_lossy(&lines_output).contains(RAW_LINES_PAYLOAD)
             && !stdio_error.contains(RAW_STDIO_PAYLOAD),
+        preinit_payload_not_reflected: !preinit_output.contains(RAW_PREINIT_PAYLOAD),
     })
 }
 
@@ -7070,6 +7136,65 @@ effect = "allow""#,
     }
 
     #[test]
+    fn mcp_server_requires_initialize_before_tools_list() {
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            response["error"]["message"],
+            serde_json::json!("Server not initialized")
+        );
+    }
+
+    #[test]
+    fn mcp_server_requires_initialize_before_tools_call_without_reflecting_arguments() {
+        let raw_payload = "MCP_PREINIT_PAYLOAD_SHOULD_NOT_REFLECT";
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"agentk.mediate","arguments":{{"agent_id":"agent://test","tool":"demo.echo","intent":"preinit","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"],"arguments":{{"secret":"{raw_payload}"}}}}}}}}"#
+        );
+        let output = mcp_server_json_lines(&input).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            response["error"]["data"]["detail"],
+            serde_json::json!("initialize must complete before tool requests")
+        );
+        assert!(!output.contains(raw_payload));
+    }
+
+    #[test]
+    fn mcp_server_rejects_duplicate_initialize() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(responses[1]["id"], serde_json::json!(2));
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32600));
+        assert_eq!(
+            responses[1]["error"]["data"]["detail"],
+            serde_json::json!("server is already initialized")
+        );
+    }
+
+    #[test]
     fn mcp_server_json_stream_matches_json_lines_session() {
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
@@ -7202,14 +7327,17 @@ effect = "allow""#,
         assert!(report.oversized_line_rejected);
         assert!(report.mcp_lines_oversized_rejected);
         assert!(report.mcp_stdio_oversized_rejected);
+        assert!(report.preinit_tool_rejected);
         assert!(report.bounded_stdin_not_reflected);
+        assert!(report.preinit_payload_not_reflected);
     }
 
     #[test]
     fn mcp_server_records_descriptor_and_response_hashes() {
         let input = r#"
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agentk.mediate_descriptor","arguments":{"agent_id":"agent://test","server":"demo-server","labels":["untrusted","external"],"descriptor":{"name":"demo.echo","description":"Echo public demo payloads.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agentk.record_response","arguments":{"agent_id":"agent://test","tool":"demo.echo","labels":["untrusted","external"],"response":{"content":[{"type":"text","text":"public demo payload"}],"structuredContent":{"ok":true},"isError":false},"is_error":false}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agentk.mediate_descriptor","arguments":{"agent_id":"agent://test","server":"demo-server","labels":["untrusted","external"],"descriptor":{"name":"demo.echo","description":"Echo public demo payloads.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentk.record_response","arguments":{"agent_id":"agent://test","tool":"demo.echo","labels":["untrusted","external"],"response":{"content":[{"type":"text","text":"public demo payload"}],"structuredContent":{"ok":true},"isError":false},"is_error":false}}}
 "#;
         let output = mcp_server_json_lines(input).expect("server should respond");
         let responses = output
@@ -7217,13 +7345,13 @@ effect = "allow""#,
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
             .collect::<Vec<_>>();
 
-        assert_eq!(responses.len(), 2);
+        assert_eq!(responses.len(), 3);
 
         let descriptor: McpToolDescriptorReport =
-            serde_json::from_value(responses[0]["result"]["structuredContent"].clone())
+            serde_json::from_value(responses[1]["result"]["structuredContent"].clone())
                 .expect("descriptor report should deserialize");
         let response: McpToolResponseRecordReport =
-            serde_json::from_value(responses[1]["result"]["structuredContent"].clone())
+            serde_json::from_value(responses[2]["result"]["structuredContent"].clone())
                 .expect("response report should deserialize");
 
         assert_eq!(descriptor.event.step, 1);
