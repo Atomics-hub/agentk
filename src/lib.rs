@@ -2504,6 +2504,152 @@ pub struct SignatureVerifyReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Clone, Deserialize)]
+pub struct TrustedSigningKeyManifest {
+    #[serde(default = "default_trusted_signing_key_manifest_version")]
+    version: u64,
+    #[serde(default)]
+    trusted_keys: Vec<TrustedSigningKeyEntry>,
+}
+
+impl TrustedSigningKeyManifest {
+    pub fn parse_toml(input: &str) -> Result<Self, AgentKError> {
+        let manifest: Self = toml::from_str(input)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, AgentKError> {
+        Self::parse_toml(&fs::read_to_string(path)?)
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn trusted_keys(&self) -> &[TrustedSigningKeyEntry] {
+        &self.trusted_keys
+    }
+
+    pub fn public_keys(&self) -> Vec<String> {
+        self.trusted_keys
+            .iter()
+            .map(|entry| entry.normalized_public_key())
+            .collect()
+    }
+
+    fn validate(&self) -> Result<(), AgentKError> {
+        if self.version != default_trusted_signing_key_manifest_version() {
+            return Err(AgentKError::InvalidTrustedSignerManifest(format!(
+                "unsupported trusted signer manifest version {}",
+                self.version
+            )));
+        }
+        if self.trusted_keys.is_empty() {
+            return Err(AgentKError::InvalidTrustedSignerManifest(
+                "trusted signer manifest must include at least one public key".to_string(),
+            ));
+        }
+
+        let mut seen = BTreeSet::new();
+        for key in &self.trusted_keys {
+            key.validate()?;
+            if !seen.insert(key.normalized_public_key()) {
+                return Err(AgentKError::InvalidTrustedSignerManifest(
+                    "duplicate trusted signer public key".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Debug for TrustedSigningKeyManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrustedSigningKeyManifest")
+            .field("version", &self.version)
+            .field("trusted_key_count", &self.trusted_keys.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct TrustedSigningKeyEntry {
+    public_key: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+impl TrustedSigningKeyEntry {
+    pub fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    fn normalized_public_key(&self) -> String {
+        normalized_public_key_hex(&self.public_key).expect("manifest validation normalized key")
+    }
+
+    fn validate(&self) -> Result<(), AgentKError> {
+        if normalized_public_key_hex(&self.public_key).is_none() {
+            return Err(AgentKError::InvalidTrustedSignerManifest(
+                "trusted signer public key must be a 32-byte hex Ed25519 public key".to_string(),
+            ));
+        }
+        if self
+            .label
+            .as_deref()
+            .is_some_and(|label| label.trim().is_empty())
+        {
+            return Err(AgentKError::InvalidTrustedSignerManifest(
+                "trusted signer label must not be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for TrustedSigningKeyEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let public_key_ref = normalized_public_key_hex(&self.public_key)
+            .unwrap_or_else(|| "<invalid-public-key>".to_string());
+        f.debug_struct("TrustedSigningKeyEntry")
+            .field("public_key_sha256", &hash_json(&public_key_ref))
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustedSigningKeyManifestReport {
+    pub version: u64,
+    pub trusted_key_count: usize,
+}
+
+pub fn trusted_signing_key_manifest_report_from_path(
+    path: impl AsRef<Path>,
+) -> Result<TrustedSigningKeyManifestReport, AgentKError> {
+    let manifest = TrustedSigningKeyManifest::from_path(path)?;
+    Ok(TrustedSigningKeyManifestReport {
+        version: manifest.version(),
+        trusted_key_count: manifest.trusted_keys().len(),
+    })
+}
+
+pub fn trusted_signing_key_manifest_keys_from_path(
+    path: impl AsRef<Path>,
+) -> Result<Vec<String>, AgentKError> {
+    Ok(TrustedSigningKeyManifest::from_path(path)?.public_keys())
+}
+
+fn default_trusted_signing_key_manifest_version() -> u64 {
+    1
+}
+
 pub fn verify_signatures_jsonl(
     path: impl AsRef<Path>,
 ) -> Result<SignatureVerifyReport, AgentKError> {
@@ -2861,6 +3007,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
         check_required_file(&root, "examples/secret-refs.toml"),
+        check_required_file(&root, "examples/trusted-signers.toml"),
         check_policy(&root),
         check_policy_profiles(&root),
         check_security_disclosure(&root),
@@ -2950,6 +3097,10 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let signatures = verify_signatures_jsonl(&latest)?;
     let pinned_signatures =
         verify_signatures_jsonl_with_trusted_keys(&latest, &signatures.public_keys_seen)?;
+    let trusted_signers =
+        trusted_signing_key_manifest_report_from_path(root.join("examples/trusted-signers.toml"))?;
+    let trusted_signer_keys =
+        trusted_signing_key_manifest_keys_from_path(root.join("examples/trusted-signers.toml"))?;
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
     let secret_refs =
         secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
@@ -3016,6 +3167,21 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 "{} signers, {} trusted",
                 pinned_signatures.public_keys_seen.len(),
                 pinned_signatures.trusted_public_keys
+            ),
+        ),
+        release_audit_check(
+            "trusted signer manifest",
+            if trusted_signers.version == default_trusted_signing_key_manifest_version()
+                && trusted_signers.trusted_key_count > 0
+                && trusted_signer_keys.len() == trusted_signers.trusted_key_count
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "version {}, {} keys",
+                trusted_signers.version, trusted_signers.trusted_key_count
             ),
         ),
         release_audit_check(
@@ -4467,6 +4633,7 @@ pub enum AgentKError {
     InvalidLog(String),
     InvalidPolicy(String),
     InvalidSecretManifest(String),
+    InvalidTrustedSignerManifest(String),
     TomlDeserialize(toml::de::Error),
 }
 
@@ -4494,6 +4661,9 @@ impl fmt::Display for AgentKError {
             Self::InvalidPolicy(message) => write!(f, "invalid policy: {message}"),
             Self::InvalidSecretManifest(message) => {
                 write!(f, "invalid secret reference manifest: {message}")
+            }
+            Self::InvalidTrustedSignerManifest(message) => {
+                write!(f, "invalid trusted signer manifest: {message}")
             }
             Self::TomlDeserialize(error) => write!(f, "TOML error: {error}"),
         }
@@ -6009,6 +6179,110 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn trusted_signing_key_manifest_validates_public_keys_without_logging_them() {
+        let public_key = hex::encode(
+            SigningKey::from_bytes(&[0x45_u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let manifest = TrustedSigningKeyManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[trusted_keys]]
+            label = "release-key"
+            public_key = "{public_key}"
+            "#
+        ))
+        .expect("trusted signer manifest should parse");
+
+        assert_eq!(manifest.version(), 1);
+        assert_eq!(manifest.trusted_keys().len(), 1);
+        assert_eq!(manifest.trusted_keys()[0].label(), Some("release-key"));
+        assert_eq!(manifest.public_keys(), vec![public_key.clone()]);
+
+        let debug = format!("{manifest:?} {:?}", manifest.trusted_keys()[0]);
+        assert!(debug.contains("trusted_key_count"));
+        assert!(debug.contains("public_key_sha256"));
+        assert!(!debug.contains(&public_key));
+
+        let report = TrustedSigningKeyManifestReport {
+            version: manifest.version(),
+            trusted_key_count: manifest.trusted_keys().len(),
+        };
+        let json = serde_json::to_string(&report).expect("report should serialize");
+        assert!(json.contains("\"trusted_key_count\":1"));
+        assert!(!json.contains(&public_key));
+
+        let duplicate = TrustedSigningKeyManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[trusted_keys]]
+            public_key = "{public_key}"
+
+            [[trusted_keys]]
+            public_key = "{public_key}"
+            "#
+        ))
+        .expect_err("duplicate public keys should fail");
+        assert!(duplicate.to_string().contains("duplicate"));
+        assert!(!duplicate.to_string().contains(&public_key));
+
+        let invalid = TrustedSigningKeyManifest::parse_toml(
+            r#"
+            version = 1
+
+            [[trusted_keys]]
+            public_key = "not-a-public-key"
+            "#,
+        )
+        .expect_err("invalid public keys should fail");
+        assert!(invalid.to_string().contains("trusted signer public key"));
+        assert!(!invalid.to_string().contains("not-a-public-key"));
+    }
+
+    #[test]
+    fn signature_report_can_pin_with_trusted_signer_manifest() {
+        let log_path = temp_path("agentk-signature-manifest-log", "jsonl");
+        let manifest_path = temp_path("agentk-trusted-signers", "toml");
+        run_poisoned_webpage_demo(&log_path).expect("demo should run");
+        let unpinned = verify_signatures_jsonl(&log_path).expect("signatures should verify");
+        let trusted_key = unpinned.public_keys_seen[0].clone();
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+                version = 1
+
+                [[trusted_keys]]
+                label = "demo"
+                public_key = "{trusted_key}"
+                "#
+            ),
+        )
+        .expect("manifest should write");
+
+        let trusted_keys = trusted_signing_key_manifest_keys_from_path(&manifest_path)
+            .expect("trusted signer manifest should parse");
+        let pinned = verify_signatures_jsonl_with_trusted_keys(&log_path, &trusted_keys)
+            .expect("pinned verification should run");
+        let report = trusted_signing_key_manifest_report_from_path(&manifest_path)
+            .expect("manifest report should build");
+
+        assert!(pinned.ok, "{:?}", pinned.failures);
+        assert!(pinned.signer_identity_pinned);
+        assert_eq!(pinned.trusted_public_keys, 1);
+        assert_eq!(report.trusted_key_count, 1);
+
+        let report_json = serde_json::to_string(&report).expect("report should serialize");
+        assert!(!report_json.contains(&trusted_key));
+
+        let _ = fs::remove_file(log_path);
+        let _ = fs::remove_file(manifest_path);
     }
 
     #[test]

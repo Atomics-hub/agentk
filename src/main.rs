@@ -4,7 +4,8 @@ use agentk::{
     mcp_proxy_from_path, mcp_server_json_lines, readiness_report, release_audit_report,
     replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
-    signing_key_status, verify_jsonl, verify_signatures_jsonl,
+    signing_key_status, trusted_signing_key_manifest_keys_from_path,
+    trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
     verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
     write_latest_copy,
 };
@@ -40,6 +41,9 @@ enum Command {
         /// Expected Ed25519 public signing key hex. Repeat to allow rotated keys.
         #[arg(long)]
         trusted_public_key: Vec<String>,
+        /// TOML manifest containing trusted public signing keys.
+        #[arg(long)]
+        trusted_key_manifest: Option<PathBuf>,
     },
     /// Inspect a flight log with redacted hash-first evidence summaries.
     TraceInspect {
@@ -159,6 +163,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate a trusted signer manifest without printing keys.
+    TrustedSignersCheck {
+        /// Path to an AgentK trusted-signers TOML manifest.
+        #[arg(long, default_value = "examples/trusted-signers.toml")]
+        manifest: PathBuf,
+        /// Emit only version and count as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run local public-release readiness checks.
     Readiness {
         /// Emit the full report as JSON.
@@ -192,7 +205,8 @@ fn run() -> Result<(), AgentKError> {
         Command::VerifySignatures {
             path,
             trusted_public_key,
-        } => verify_signatures(path, trusted_public_key),
+            trusted_key_manifest,
+        } => verify_signatures(path, trusted_public_key, trusted_key_manifest),
         Command::TraceInspect { path, json } => trace_inspect(path, json),
         Command::Replay { path } => replay(path),
         Command::ForkReplay { path, policy, json } => fork_replay(path, policy, json),
@@ -218,6 +232,7 @@ fn run() -> Result<(), AgentKError> {
         Command::PolicyCheck { path } => policy_check(path),
         Command::SecretRefsCheck { manifest, json } => secret_refs_check(manifest, json),
         Command::SecretRefsStoreCheck { manifest, json } => secret_refs_store_check(manifest, json),
+        Command::TrustedSignersCheck { manifest, json } => trusted_signers_check(manifest, json),
         Command::Readiness { json } => readiness(json),
         Command::ReleaseAudit { json, strict } => release_audit(json, strict),
     }
@@ -290,7 +305,15 @@ fn verify(path: PathBuf) -> Result<(), AgentKError> {
     Ok(())
 }
 
-fn verify_signatures(path: PathBuf, trusted_public_keys: Vec<String>) -> Result<(), AgentKError> {
+fn verify_signatures(
+    path: PathBuf,
+    mut trusted_public_keys: Vec<String>,
+    trusted_key_manifest: Option<PathBuf>,
+) -> Result<(), AgentKError> {
+    if let Some(manifest) = trusted_key_manifest {
+        trusted_public_keys.extend(trusted_signing_key_manifest_keys_from_path(manifest)?);
+    }
+
     let report = if trusted_public_keys.is_empty() {
         verify_signatures_jsonl(&path)?
     } else {
@@ -313,6 +336,21 @@ fn verify_signatures(path: PathBuf, trusted_public_keys: Vec<String>) -> Result<
         std::process::exit(2);
     }
 
+    Ok(())
+}
+
+fn trusted_signers_check(manifest: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = trusted_signing_key_manifest_report_from_path(manifest)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK trusted signers verified");
+    println!("version   {}", report.version);
+    println!("keys      {}", report.trusted_key_count);
+    println!("redacted  public keys were not printed");
     Ok(())
 }
 

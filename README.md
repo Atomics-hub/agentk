@@ -73,6 +73,18 @@ Pin verification to an expected public signing key:
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
 ```
 
+Pin verification to a public trusted-signer manifest:
+
+```sh
+cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-key-manifest examples/trusted-signers.toml
+```
+
+Validate a trusted-signer manifest without printing keys:
+
+```sh
+cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
+```
+
 Inspect the latest flight log without printing raw input refs:
 
 ```sh
@@ -235,6 +247,7 @@ This repo currently includes:
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification with optional trusted-key pinning,
+- a redacted public trusted-signer manifest for verifier pinning,
 - redacted flight-log inspection for human review,
 - deterministic side-effect-free replay,
 - fork replay with policy comparison,
@@ -283,7 +296,7 @@ Implemented today:
 - tainted tool-input blocking at `tool.invoke` boundaries,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 

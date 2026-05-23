@@ -50,6 +50,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] MCP descriptor/response tests prove raw descriptor and response content are not logged into event inputs.
 - [ ] Receipt and handle signatures verify, and tampered proofs fail.
 - [ ] Signature verification can pin receipts and handles to trusted public keys.
+- [ ] Trusted-signer manifest tests prove verifier pinning works without printing keys.
 - [ ] Key rotation tests prove private key bytes are not written into manifests.
 
 ## Security Claims
@@ -87,6 +88,7 @@ cargo clippy --all-targets --all-features
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
+cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- trace-inspect .agentk/runs/latest.jsonl
 cargo run -- fork-replay .agentk/runs/latest.jsonl --policy examples/policies/research-agent.toml
 cargo run -- fork-replay-behavior .agentk/runs/latest.jsonl --behavior examples/replay-behavior-overrides.json

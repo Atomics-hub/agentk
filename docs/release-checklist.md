@@ -54,6 +54,8 @@ Then run the explicit command set used by reviewers:
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
+cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>
 git diff --check
 git status --short
 ```
