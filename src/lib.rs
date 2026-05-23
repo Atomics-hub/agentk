@@ -21,6 +21,8 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_MEDIATE_TOOL: &str = "agentk.mediate";
 const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
+const MCP_JSON_RPC_MAX_ID_BYTES: usize = 128;
+const MCP_JSON_RPC_MAX_LINE_BYTES: usize = 64 * 1024;
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -1627,14 +1629,27 @@ pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
             continue;
         }
 
-        let response = match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(message) => handle_mcp_json_rpc_message(message, &mut kernel),
-            Err(error) => Some(jsonrpc_error(
+        let response = if line.len() > MCP_JSON_RPC_MAX_LINE_BYTES {
+            Some(jsonrpc_error(
                 serde_json::Value::Null,
-                -32700,
-                "Parse error",
-                Some(serde_json::json!({ "detail": error.to_string() })),
-            )),
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({
+                    "detail": format!(
+                        "message exceeds {MCP_JSON_RPC_MAX_LINE_BYTES} byte JSON-RPC line limit"
+                    )
+                })),
+            ))
+        } else {
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(message) => handle_mcp_json_rpc_message(message, &mut kernel),
+                Err(error) => Some(jsonrpc_error(
+                    serde_json::Value::Null,
+                    -32700,
+                    "Parse error",
+                    Some(serde_json::json!({ "detail": error.to_string() })),
+                )),
+            }
         };
 
         if let Some(response) = response {
@@ -1668,8 +1683,20 @@ fn handle_mcp_json_rpc_message(
         ));
     };
 
-    let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
-    let is_notification = !object.contains_key("id");
+    let (id, is_notification) = match object.get("id") {
+        Some(value) => match jsonrpc_request_id(value) {
+            Ok(id) => (id, false),
+            Err(detail) => {
+                return Some(jsonrpc_error(
+                    serde_json::Value::Null,
+                    -32600,
+                    "Invalid Request",
+                    Some(serde_json::json!({ "detail": detail })),
+                ));
+            }
+        },
+        None => (serde_json::Value::Null, true),
+    };
 
     if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
         return (!is_notification).then(|| {
@@ -1717,6 +1744,25 @@ fn handle_mcp_json_rpc_message(
         )),
         "tools/call" => Some(handle_mcp_tool_call(id, params, kernel)),
         _ => Some(jsonrpc_error(id, -32601, "Method not found", None)),
+    }
+}
+
+fn jsonrpc_request_id(id: &serde_json::Value) -> Result<serde_json::Value, String> {
+    match id {
+        serde_json::Value::Null => Ok(serde_json::Value::Null),
+        serde_json::Value::String(value) if value.len() <= MCP_JSON_RPC_MAX_ID_BYTES => {
+            Ok(id.clone())
+        }
+        serde_json::Value::String(_) => Err(format!(
+            "id string must be at most {MCP_JSON_RPC_MAX_ID_BYTES} bytes"
+        )),
+        serde_json::Value::Number(number)
+            if number.as_i64().is_some() || number.as_u64().is_some() =>
+        {
+            Ok(id.clone())
+        }
+        serde_json::Value::Number(_) => Err("id number must be an integer".to_string()),
+        _ => Err("id must be a string, integer, or null".to_string()),
     }
 }
 
@@ -3107,6 +3153,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let secret_refs_validation = secret_ref_validation_smoke()?;
     let secret_refs_store = secret_ref_store_report_smoke()?;
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
+    let mcp_transport_guard = mcp_transport_guard_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let replay_stub_outputs_ok = replay.side_effects_stubbed == replay.stub_outputs.len()
@@ -3276,6 +3323,37 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                     "untainted"
                 },
                 mcp_taint_flow.invoke_rule
+            ),
+        ),
+        release_audit_check(
+            "mcp transport guard",
+            if mcp_transport_guard.invalid_id_rejected
+                && mcp_transport_guard.invalid_id_not_reflected
+                && mcp_transport_guard.batch_rejected
+                && mcp_transport_guard.oversized_line_rejected
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "invalid id {}, batch {}, oversized {}, redacted {}",
+                if mcp_transport_guard.invalid_id_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                if mcp_transport_guard.batch_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                if mcp_transport_guard.oversized_line_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                mcp_transport_guard.invalid_id_not_reflected
             ),
         ),
         release_audit_check(
@@ -3495,6 +3573,57 @@ struct McpTaintFlowSmokeReport {
     invoke_blocked: bool,
     invoke_rule: String,
     raw_response_logged: bool,
+}
+
+#[derive(Debug)]
+struct McpTransportGuardSmokeReport {
+    invalid_id_rejected: bool,
+    invalid_id_not_reflected: bool,
+    batch_rejected: bool,
+    oversized_line_rejected: bool,
+}
+
+fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKError> {
+    const RAW_ID_PAYLOAD: &str = "RELEASE_AUDIT_MCP_ID_SHOULD_NOT_REFLECT";
+
+    let batch = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "ping" }
+    ]);
+    let invalid_id = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": { "secret": RAW_ID_PAYLOAD },
+        "method": "ping"
+    });
+    let oversized = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"ping","params":{{"pad":"{}"}}}}"#,
+        "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES)
+    );
+    let input = format!("{invalid_id}\n{batch}\n{oversized}\n");
+
+    let output = mcp_server_json_lines(&input)?;
+    let responses = output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(McpTransportGuardSmokeReport {
+        invalid_id_rejected: responses.first().is_some_and(|response| {
+            response["id"].is_null() && response["error"]["code"] == serde_json::json!(-32600)
+        }),
+        invalid_id_not_reflected: !output.contains(RAW_ID_PAYLOAD),
+        batch_rejected: responses.get(1).is_some_and(|response| {
+            response["id"].is_null()
+                && response["error"]["code"] == serde_json::json!(-32600)
+                && response["error"]["data"]["detail"] == "batch requests are not supported"
+        }),
+        oversized_line_rejected: responses.get(2).is_some_and(|response| {
+            response["id"].is_null()
+                && response["error"]["code"] == serde_json::json!(-32600)
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("JSON-RPC line limit"))
+        }),
+    })
 }
 
 fn mcp_taint_flow_smoke() -> Result<McpTaintFlowSmokeReport, AgentKError> {
@@ -6656,6 +6785,94 @@ effect = "allow""#,
                 .expect("second receipt")
                 .id
         );
+    }
+
+    #[test]
+    fn mcp_server_rejects_invalid_ids_without_reflecting_payload() {
+        let raw_payload = "MCP_ID_PAYLOAD_SHOULD_NOT_REFLECT";
+        let input =
+            format!(r#"{{"jsonrpc":"2.0","id":{{"secret":"{raw_payload}"}},"method":"ping"}}"#);
+        let output = mcp_server_json_lines(&input).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::Value::Null);
+        assert_eq!(response["error"]["code"], serde_json::json!(-32600));
+        assert_eq!(
+            response["error"]["data"]["detail"],
+            serde_json::json!("id must be a string, integer, or null")
+        );
+        assert!(!output.contains(raw_payload));
+    }
+
+    #[test]
+    fn mcp_server_rejects_fractional_and_long_ids() {
+        let long_id = "a".repeat(MCP_JSON_RPC_MAX_ID_BYTES + 1);
+        let input = format!(
+            r#"
+{{"jsonrpc":"2.0","id":1.5,"method":"ping"}}
+{{"jsonrpc":"2.0","id":"{long_id}","method":"ping"}}
+"#
+        );
+        let output = mcp_server_json_lines(&input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0]["error"]["data"]["detail"],
+            serde_json::json!("id number must be an integer")
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["detail"],
+            serde_json::json!(format!(
+                "id string must be at most {MCP_JSON_RPC_MAX_ID_BYTES} bytes"
+            ))
+        );
+        assert!(!output.contains(&long_id));
+    }
+
+    #[test]
+    fn mcp_server_rejects_oversized_json_rpc_lines_without_parsing_payload() {
+        let raw_payload = "MCP_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "ping",
+            "params": {
+                "pad": "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES),
+                "secret": raw_payload
+            }
+        })
+        .to_string();
+
+        assert!(line.len() > MCP_JSON_RPC_MAX_LINE_BYTES);
+
+        let output = mcp_server_json_lines(&line).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::Value::Null);
+        assert_eq!(response["error"]["code"], serde_json::json!(-32600));
+        assert!(
+            response["error"]["data"]["detail"]
+                .as_str()
+                .expect("detail should be a string")
+                .contains("JSON-RPC line limit")
+        );
+        assert!(!output.contains(raw_payload));
+    }
+
+    #[test]
+    fn mcp_transport_guard_smoke_covers_reflection_and_size_limits() {
+        let report = mcp_transport_guard_smoke().expect("transport guard smoke should run");
+
+        assert!(report.invalid_id_rejected);
+        assert!(report.invalid_id_not_reflected);
+        assert!(report.batch_rejected);
+        assert!(report.oversized_line_rejected);
     }
 
     #[test]

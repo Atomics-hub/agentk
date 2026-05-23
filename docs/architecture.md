@@ -153,7 +153,10 @@ It does not execute the tool.
 
 `agentk mcp-lines` accepts newline-delimited JSON requests on stdin and emits newline-delimited mediation reports. This is useful for simple adapters and tests.
 
-`agentk mcp-server` is a minimal MCP JSON-RPC stdio server. It handles `initialize`, `ping`, `tools/list`, and `tools/call`, and exposes three AgentK tools:
+`agentk mcp-server` is a minimal MCP JSON-RPC stdio server. It handles
+`initialize`, `ping`, `tools/list`, and `tools/call`; rejects batches,
+oversized JSON-RPC lines, and invalid request ids without reflecting raw id
+payloads; and exposes three AgentK tools:
 
 ```txt
 agentk.mediate

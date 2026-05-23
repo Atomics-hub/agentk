@@ -55,6 +55,7 @@ Status: in progress.
 - [x] Mediate tool descriptors.
 - [x] Record MCP response hashes.
 - [x] Attach labels to tool outputs.
+- [x] Reject oversized MCP JSON-RPC lines and invalid request ids without reflecting raw payloads.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
