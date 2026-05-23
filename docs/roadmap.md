@@ -44,6 +44,7 @@ Status: in progress.
 - [x] Allow multiple provider-scoped secret stores to coexist.
 - [x] Validate secret-reference provider ids before registration.
 - [x] Add release-audit smoke coverage for secret-reference validation redaction.
+- [x] Add redacted secret-store availability reporting for secret-reference manifests.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy

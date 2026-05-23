@@ -283,6 +283,75 @@ pub trait SecretStore: Send + Sync {
     fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool;
 }
 
+#[derive(Clone, Default)]
+pub struct SecretStoreRegistry {
+    stores: Vec<Arc<dyn SecretStore>>,
+}
+
+impl SecretStoreRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_secret_store(mut self, secret_store: impl SecretStore + 'static) -> Self {
+        self.stores.push(Arc::new(secret_store));
+        self
+    }
+
+    pub fn with_process_env_store(self) -> Self {
+        self.with_secret_store(EnvironmentSecretStore::process())
+    }
+
+    pub fn len(&self) -> usize {
+        self.stores.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stores.is_empty()
+    }
+
+    fn availability(
+        &self,
+        target: &str,
+        reference: &ExternalSecretReference,
+    ) -> SecretReferenceAvailability {
+        let mut provider_supported = false;
+
+        for store in &self.stores {
+            if !store.supports_provider(reference.provider()) {
+                continue;
+            }
+
+            provider_supported = true;
+            let lookup = SecretStoreLookup::new(target, reference);
+            if store.contains_external_reference(&lookup) {
+                return SecretReferenceAvailability::Available;
+            }
+        }
+
+        if provider_supported {
+            SecretReferenceAvailability::Missing
+        } else {
+            SecretReferenceAvailability::UnsupportedProvider
+        }
+    }
+}
+
+impl fmt::Debug for SecretStoreRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretStoreRegistry")
+            .field("secret_store_count", &self.stores.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SecretReferenceAvailability {
+    Available,
+    Missing,
+    UnsupportedProvider,
+}
+
 #[derive(Clone, Deserialize)]
 pub struct SecretReferenceManifest {
     #[serde(default = "default_secret_reference_manifest_version")]
@@ -362,6 +431,22 @@ pub struct SecretReferenceManifestReport {
     pub secret_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SecretReferenceStoreReport {
+    pub version: u64,
+    pub secret_count: usize,
+    pub store_count: usize,
+    pub available_count: usize,
+    pub missing_count: usize,
+    pub unsupported_provider_count: usize,
+}
+
+impl SecretReferenceStoreReport {
+    pub fn all_available(&self) -> bool {
+        self.missing_count == 0 && self.unsupported_provider_count == 0
+    }
+}
+
 pub fn secret_reference_manifest_report_from_path(
     path: impl AsRef<Path>,
 ) -> Result<SecretReferenceManifestReport, AgentKError> {
@@ -370,6 +455,46 @@ pub fn secret_reference_manifest_report_from_path(
         version: manifest.version(),
         secret_count: manifest.secrets().len(),
     })
+}
+
+pub fn secret_reference_store_report(
+    manifest: &SecretReferenceManifest,
+    registry: &SecretStoreRegistry,
+) -> Result<SecretReferenceStoreReport, AgentKError> {
+    manifest.validate()?;
+
+    let mut available_count = 0;
+    let mut missing_count = 0;
+    let mut unsupported_provider_count = 0;
+
+    for secret in manifest.secrets() {
+        let reference = ExternalSecretReference::new(
+            secret.provider().to_string(),
+            secret.reference().to_string(),
+        );
+        match registry.availability(secret.target(), &reference) {
+            SecretReferenceAvailability::Available => available_count += 1,
+            SecretReferenceAvailability::Missing => missing_count += 1,
+            SecretReferenceAvailability::UnsupportedProvider => unsupported_provider_count += 1,
+        }
+    }
+
+    Ok(SecretReferenceStoreReport {
+        version: manifest.version(),
+        secret_count: manifest.secrets().len(),
+        store_count: registry.len(),
+        available_count,
+        missing_count,
+        unsupported_provider_count,
+    })
+}
+
+pub fn secret_reference_env_store_report_from_path(
+    path: impl AsRef<Path>,
+) -> Result<SecretReferenceStoreReport, AgentKError> {
+    let manifest = SecretReferenceManifest::from_path(path)?;
+    let registry = SecretStoreRegistry::new().with_process_env_store();
+    secret_reference_store_report(&manifest, &registry)
 }
 
 #[derive(Clone, Deserialize)]
@@ -585,7 +710,7 @@ impl fmt::Debug for SecretTarget {
 #[derive(Clone)]
 pub struct SecretBroker {
     targets: BTreeMap<String, SecretTarget>,
-    secret_stores: Vec<Arc<dyn SecretStore>>,
+    secret_stores: SecretStoreRegistry,
     external_refs_require_store: bool,
 }
 
@@ -593,7 +718,7 @@ impl Default for SecretBroker {
     fn default() -> Self {
         Self {
             targets: BTreeMap::new(),
-            secret_stores: Vec::new(),
+            secret_stores: SecretStoreRegistry::new(),
             external_refs_require_store: true,
         }
     }
@@ -618,7 +743,7 @@ impl SecretBroker {
     }
 
     pub fn with_secret_store(mut self, secret_store: impl SecretStore + 'static) -> Self {
-        self.secret_stores.push(Arc::new(secret_store));
+        self.secret_stores = self.secret_stores.with_secret_store(secret_store);
         self
     }
 
@@ -676,12 +801,10 @@ impl SecretBroker {
                     return !self.external_refs_require_store;
                 }
 
-                self.secret_stores.iter().any(|store| {
-                    store.supports_provider(reference.provider()) && {
-                        let lookup = SecretStoreLookup::new(target, reference);
-                        store.contains_external_reference(&lookup)
-                    }
-                })
+                matches!(
+                    self.secret_stores.availability(target, reference),
+                    SecretReferenceAvailability::Available
+                )
             }
             None => false,
         }
@@ -2758,6 +2881,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let secret_refs =
         secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
     let secret_refs_validation = secret_ref_validation_smoke()?;
+    let secret_refs_store = secret_ref_store_report_smoke()?;
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
@@ -2856,6 +2980,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 },
                 !secret_refs_validation.raw_provider_logged
                     && !secret_refs_validation.raw_reference_logged
+            ),
+        ),
+        release_audit_check(
+            "secret refs store report",
+            if secret_refs_store.available_count == 1
+                && secret_refs_store.missing_count == 1
+                && secret_refs_store.unsupported_provider_count == 1
+                && !secret_refs_store.raw_provider_logged
+                && !secret_refs_store.raw_reference_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "available {}, missing {}, unsupported {}, redacted {}",
+                secret_refs_store.available_count,
+                secret_refs_store.missing_count,
+                secret_refs_store.unsupported_provider_count,
+                !secret_refs_store.raw_provider_logged && !secret_refs_store.raw_reference_logged
             ),
         ),
         release_audit_check(
@@ -3026,6 +3170,66 @@ fn secret_ref_validation_smoke() -> Result<SecretRefValidationSmokeReport, Agent
         raw_provider_logged: invalid_provider_error.contains(RAW_PROVIDER),
         raw_reference_logged: invalid_provider_error.contains(RAW_PROVIDER_REF)
             || invalid_env_error.contains(RAW_ENV_REF),
+    })
+}
+
+#[derive(Debug)]
+struct SecretRefStoreReportSmokeReport {
+    available_count: usize,
+    missing_count: usize,
+    unsupported_provider_count: usize,
+    raw_provider_logged: bool,
+    raw_reference_logged: bool,
+}
+
+fn secret_ref_store_report_smoke() -> Result<SecretRefStoreReportSmokeReport, AgentKError> {
+    const AVAILABLE_REF: &str = "AGENTK_RELEASE_AUDIT_AVAILABLE";
+    const MISSING_REF: &str = "AGENTK_RELEASE_AUDIT_MISSING";
+    const UNSUPPORTED_PROVIDER: &str = "vault";
+    const UNSUPPORTED_REF: &str = "release-audit/secret";
+
+    let manifest = SecretReferenceManifest::parse_toml(&format!(
+        r#"
+        version = 1
+
+        [[secrets]]
+        target = "secret://release-audit-available"
+        provider = "env"
+        reference = "{AVAILABLE_REF}"
+
+        [[secrets]]
+        target = "secret://release-audit-missing"
+        provider = "env"
+        reference = "{MISSING_REF}"
+
+        [[secrets]]
+        target = "secret://release-audit-unsupported"
+        provider = "{UNSUPPORTED_PROVIDER}"
+        reference = "{UNSUPPORTED_REF}"
+        "#
+    ))?;
+    let registry =
+        SecretStoreRegistry::new().with_secret_store(EnvironmentSecretStore::from_present_refs([
+            AVAILABLE_REF.to_string(),
+        ]));
+    let report = secret_reference_store_report(&manifest, &registry)?;
+    let serialized = serde_json::to_string(&report)?;
+    let debug = format!("{manifest:?} {registry:?} {report:?}");
+
+    Ok(SecretRefStoreReportSmokeReport {
+        available_count: report.available_count,
+        missing_count: report.missing_count,
+        unsupported_provider_count: report.unsupported_provider_count,
+        raw_provider_logged: serialized.contains(EnvironmentSecretStore::PROVIDER)
+            || serialized.contains(UNSUPPORTED_PROVIDER)
+            || debug.contains(EnvironmentSecretStore::PROVIDER)
+            || debug.contains(UNSUPPORTED_PROVIDER),
+        raw_reference_logged: serialized.contains(AVAILABLE_REF)
+            || serialized.contains(MISSING_REF)
+            || serialized.contains(UNSUPPORTED_REF)
+            || debug.contains(AVAILABLE_REF)
+            || debug.contains(MISSING_REF)
+            || debug.contains(UNSUPPORTED_REF),
     })
 }
 
@@ -5108,6 +5312,62 @@ mod tests {
     }
 
     #[test]
+    fn secret_reference_store_report_counts_availability_without_logging_refs() {
+        let available_ref = "AGENTK_STORE_AVAILABLE";
+        let missing_ref = "AGENTK_STORE_MISSING";
+        let unsupported_provider = "vault";
+        let unsupported_ref = "team/demo-token";
+        let manifest = SecretReferenceManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://available-token"
+            provider = "env"
+            reference = "{available_ref}"
+
+            [[secrets]]
+            target = "secret://missing-token"
+            provider = "env"
+            reference = "{missing_ref}"
+
+            [[secrets]]
+            target = "secret://unsupported-token"
+            provider = "{unsupported_provider}"
+            reference = "{unsupported_ref}"
+            "#
+        ))
+        .expect("manifest should parse");
+        let registry = SecretStoreRegistry::new().with_secret_store(
+            EnvironmentSecretStore::from_present_refs([available_ref.to_string()]),
+        );
+
+        let report =
+            secret_reference_store_report(&manifest, &registry).expect("store report should build");
+
+        assert_eq!(report.version, 1);
+        assert_eq!(report.secret_count, 3);
+        assert_eq!(report.store_count, 1);
+        assert_eq!(report.available_count, 1);
+        assert_eq!(report.missing_count, 1);
+        assert_eq!(report.unsupported_provider_count, 1);
+        assert!(!report.all_available());
+
+        let json = serde_json::to_string(&report).expect("report should serialize");
+        let debug = format!("{manifest:?} {registry:?} {report:?}");
+        for raw in [
+            EnvironmentSecretStore::PROVIDER,
+            available_ref,
+            missing_ref,
+            unsupported_provider,
+            unsupported_ref,
+        ] {
+            assert!(!json.contains(raw));
+            assert!(!debug.contains(raw));
+        }
+    }
+
+    #[test]
     fn secret_fd_handle_binds_scope_expiry_and_receipt() {
         let mut broker = SecretBroker::new();
         broker.register_dummy("secret://github-token");
@@ -5589,6 +5849,18 @@ mod tests {
 
         assert!(report.invalid_provider_rejected);
         assert!(report.invalid_env_reference_rejected);
+        assert!(!report.raw_provider_logged);
+        assert!(!report.raw_reference_logged);
+    }
+
+    #[test]
+    fn release_audit_secret_ref_store_report_smoke_redacts_refs() {
+        let report =
+            secret_ref_store_report_smoke().expect("secret ref store report smoke should run");
+
+        assert_eq!(report.available_count, 1);
+        assert_eq!(report.missing_count, 1);
+        assert_eq!(report.unsupported_provider_count, 1);
         assert!(!report.raw_provider_logged);
         assert!(!report.raw_reference_logged);
     }
