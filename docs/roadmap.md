@@ -44,6 +44,7 @@ Status: in progress.
 - [x] Attach labels to tool outputs.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
+- [x] Add release-audit smoke coverage for MCP taint flow.
 
 ## Milestone 4: Deterministic Replay
 

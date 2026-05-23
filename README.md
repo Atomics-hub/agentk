@@ -248,7 +248,7 @@ Implemented today:
 - tainted tool-input blocking at `tool.invoke` boundaries,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, inspect, and MCP smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, MCP taint-flow, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
