@@ -202,7 +202,7 @@ pub struct SecretHandle {
 
 #[derive(Debug, Clone, Default)]
 pub struct SecretBroker {
-    secrets: BTreeMap<String, String>,
+    targets: BTreeSet<String>,
 }
 
 impl SecretBroker {
@@ -210,8 +210,17 @@ impl SecretBroker {
         Self::default()
     }
 
-    pub fn register(&mut self, target: impl Into<String>, secret: impl Into<String>) {
-        self.secrets.insert(target.into(), secret.into());
+    pub fn register(&mut self, target: impl Into<String>, _secret: impl Into<String>) {
+        self.targets.insert(target.into());
+    }
+
+    pub fn register_external(
+        &mut self,
+        target: impl Into<String>,
+        _provider: impl Into<String>,
+        _reference: impl Into<String>,
+    ) {
+        self.targets.insert(target.into());
     }
 
     fn open(
@@ -222,7 +231,9 @@ impl SecretBroker {
         previous_hash: &str,
         receipt: &CapabilityReceipt,
     ) -> Option<SecretHandle> {
-        self.secrets.get(target)?;
+        if !self.targets.contains(target) {
+            return None;
+        }
 
         let labels = labels(&[Label::Secret, Label::Private]);
         let proof = hash_json(&SecretHandleProofInput {
@@ -2430,10 +2441,14 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
 }
 
 fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> {
-    const DUMMY_SECRET_VALUE: &str = "DUMMY_VALUE_DO_NOT_LOG";
+    const EXTERNAL_SECRET_REFERENCE: &str = "release-audit-external-reference";
 
     let mut broker = SecretBroker::new();
-    broker.register("secret://release-audit-token", DUMMY_SECRET_VALUE);
+    broker.register_external(
+        "secret://release-audit-token",
+        "release-audit-provider",
+        EXTERNAL_SECRET_REFERENCE,
+    );
 
     let mut kernel = AgentKernel::new("agent://release-audit").with_secret_broker(broker);
     kernel.grant("secret.open:secret://release-audit-token");
@@ -2446,9 +2461,9 @@ fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> 
     });
 
     let serialized = serde_json::to_string(kernel.events())?;
-    if serialized.contains(DUMMY_SECRET_VALUE) {
+    if serialized.contains(EXTERNAL_SECRET_REFERENCE) {
         return Err(AgentKError::InvalidLog(
-            "brokered secret smoke serialized raw secret material".to_string(),
+            "brokered secret smoke serialized external secret reference".to_string(),
         ));
     }
 
@@ -3982,6 +3997,32 @@ mod tests {
 
         let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
         assert!(!serialized.contains(raw_secret));
+        assert!(serialized.contains("secret_fd_"));
+    }
+
+    #[test]
+    fn secret_fd_handle_can_use_external_secret_reference_without_logging_it() {
+        let external_reference = "external-store-reference-should-not-log";
+        let mut broker = SecretBroker::new();
+        broker.register_external("secret://github-token", "test-provider", external_reference);
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open externally brokered GitHub token".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Allow);
+        assert!(event.decision.secret_handle.is_some());
+
+        let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
+        assert!(!serialized.contains(external_reference));
+        assert!(!serialized.contains("test-provider"));
         assert!(serialized.contains("secret_fd_"));
     }
 

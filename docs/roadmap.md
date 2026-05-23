@@ -32,6 +32,7 @@ Status: in progress.
 - [x] Add Ed25519 development signatures for secret handles.
 - [x] Add expiry, scope, and receipt binding.
 - [x] Add release-audit smoke coverage for brokered secret handles.
+- [x] Add external secret reference registration without logging provider refs.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
