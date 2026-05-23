@@ -14,6 +14,7 @@ Current guarantees are intentionally narrow:
 - local dummy secret registrations are target-only and do not accept raw secret material,
 - brokered external secret references do not serialize provider refs into flight logs,
 - external secret reference debug output prints provider/reference hashes, not raw provider/reference values,
+- external secret references require a configured store before minting handles by default,
 - configured secret store adapters can check external reference availability without returning raw secret bytes,
 - the local `env` secret store adapter checks safe environment variable names for presence without exposing values,
 - secret reference manifests can register external refs without containing or logging secret values,
