@@ -216,7 +216,7 @@ This repo currently includes:
 - redacted external secret reference records that require a configured store before minting handles by default,
 - a metadata-only secret store registry that checks provider support and external reference availability without returning secret bytes,
 - an env-backed local secret store presence adapter for `env` references,
-- a versioned secret-reference manifest parser for registering external refs without secret values,
+- a versioned secret-reference manifest parser with provider-id validation for registering external refs without secret values,
 - a redacted secret-reference manifest validation command,
 - a hash-chained flight recorder,
 - log verification,

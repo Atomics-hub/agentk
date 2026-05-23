@@ -42,6 +42,7 @@ Status: in progress.
 - [x] Require a configured store before external refs mint handles by default.
 - [x] Scope secret store adapters to explicitly supported providers.
 - [x] Allow multiple provider-scoped secret stores to coexist.
+- [x] Validate secret-reference provider ids before registration.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
