@@ -279,6 +279,7 @@ impl fmt::Debug for SecretStoreLookup<'_> {
 }
 
 pub trait SecretStore: Send + Sync {
+    fn supports_provider(&self, provider: &str) -> bool;
     fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool;
 }
 
@@ -516,8 +517,12 @@ impl fmt::Debug for EnvironmentSecretStore {
 }
 
 impl SecretStore for EnvironmentSecretStore {
+    fn supports_provider(&self, provider: &str) -> bool {
+        provider == Self::PROVIDER
+    }
+
     fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool {
-        lookup.provider() == Self::PROVIDER
+        self.supports_provider(lookup.provider())
             && valid_env_secret_reference(lookup.reference())
             && self.value_is_present(lookup.reference())
     }
@@ -653,6 +658,9 @@ impl SecretBroker {
                 .secret_store
                 .as_ref()
                 .map(|store| {
+                    if !store.supports_provider(reference.provider()) {
+                        return false;
+                    }
                     let lookup = SecretStoreLookup::new(target, reference);
                     store.contains_external_reference(&lookup)
                 })
@@ -4133,12 +4141,40 @@ mod tests {
     }
 
     impl SecretStore for AllowListSecretStore {
+        fn supports_provider(&self, provider: &str) -> bool {
+            self.allowed
+                .iter()
+                .any(|(_, allowed_provider, _)| allowed_provider == provider)
+        }
+
         fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool {
             self.allowed.contains(&(
                 lookup.target().to_string(),
                 lookup.provider().to_string(),
                 lookup.reference().to_string(),
             ))
+        }
+    }
+
+    struct UnsupportedProviderSecretStore {
+        provider: String,
+    }
+
+    impl UnsupportedProviderSecretStore {
+        fn new(provider: &str) -> Self {
+            Self {
+                provider: provider.to_string(),
+            }
+        }
+    }
+
+    impl SecretStore for UnsupportedProviderSecretStore {
+        fn supports_provider(&self, provider: &str) -> bool {
+            self.provider == provider
+        }
+
+        fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool {
+            panic!("unsupported provider lookup should not reach availability check: {lookup:?}");
         }
     }
 
@@ -4630,7 +4666,12 @@ mod tests {
     fn secret_store_adapter_blocks_missing_external_reference_without_logging_it() {
         let external_provider = "test-provider";
         let external_reference = "missing-external-store-reference-should-not-log";
-        let mut broker = SecretBroker::new().with_secret_store(AllowListSecretStore::default());
+        let store = AllowListSecretStore::default().allow(
+            "secret://other-token",
+            external_provider,
+            "different-external-reference",
+        );
+        let mut broker = SecretBroker::new().with_secret_store(store);
         broker.register_external(
             "secret://github-token",
             external_provider,
@@ -4654,6 +4695,38 @@ mod tests {
 
         let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
         assert!(!serialized.contains(external_provider));
+        assert!(!serialized.contains(external_reference));
+    }
+
+    #[test]
+    fn secret_store_adapter_ignores_unsupported_provider_without_lookup_or_logging_it() {
+        let unsupported_provider = "unsupported-provider";
+        let external_reference = "external-store-reference-should-not-log";
+        let store = UnsupportedProviderSecretStore::new("supported-provider");
+        let mut broker = SecretBroker::new().with_secret_store(store);
+        broker.register_external(
+            "secret://github-token",
+            unsupported_provider,
+            external_reference,
+        );
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open externally brokered GitHub token through the wrong store".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Deny);
+        assert_eq!(event.decision.rule, "secret-fd-unavailable");
+        assert!(event.decision.secret_handle.is_none());
+
+        let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
+        assert!(!serialized.contains(unsupported_provider));
         assert!(!serialized.contains(external_reference));
     }
 
