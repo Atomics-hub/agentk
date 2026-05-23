@@ -266,7 +266,7 @@ Not implemented yet:
 - real sandboxing,
 - eBPF/cgroup enforcement.
 
-By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_FILE` to a private key file created by `agentk keygen`, or set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. The CLI only prints the public key.
+By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_FILE` to a private key file created by `agentk keygen`, or set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. On Unix, readiness also fails if the configured key file is readable by group or other users. The CLI only prints the public key.
 
 See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md), and [docs/public-readiness.md](docs/public-readiness.md).
 

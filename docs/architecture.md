@@ -101,6 +101,8 @@ invalid                      -> readiness failure
 AGENTK_REQUIRE_SIGNING_KEY=1 -> readiness failure unless AGENTK_SIGNING_KEY_HEX or AGENTK_SIGNING_KEY_FILE is valid
 ```
 
+On Unix, readiness also verifies that an `AGENTK_SIGNING_KEY_FILE` path is owner-only, so loose group/other permissions block release gates without printing the local path.
+
 ### Secret FDs
 
 Agents should not receive raw secrets.

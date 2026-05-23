@@ -62,6 +62,7 @@ Status: in progress.
 - [x] Add tamper-failure tests for signed proofs.
 - [x] Add configurable signing key via `AGENTK_SIGNING_KEY_HEX`.
 - [x] Add signing-key file source for release gates.
+- [x] Validate signing-key file permissions in readiness.
 - [x] Add release gate for requiring a configured signing key.
 - [x] Add local key generation command.
 - [x] Add signature verification CLI output.

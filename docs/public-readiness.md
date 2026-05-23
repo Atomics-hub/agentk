@@ -11,6 +11,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] No API keys, tokens, certs, private keys, or `.env` files.
 - [ ] `cargo run -- readiness` passes.
 - [ ] Signing key file, if generated, lives outside the repo.
+- [ ] Signing key file, if configured on Unix, is owner-only.
 - [ ] Rotated signing key files, if generated, live outside the repo.
 - [ ] License files present and intentional.
 - [ ] `Cargo.lock` is present for reproducible application builds.
