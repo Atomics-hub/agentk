@@ -337,6 +337,12 @@ fn replay(path: PathBuf) -> Result<(), AgentKError> {
     println!("events    {}", report.events_replayed);
     println!("blocked   {}", report.blocked);
     println!("stubbed   {}", report.side_effects_stubbed);
+    for output in &report.stub_outputs {
+        println!(
+            "stub      #{} {} {} -> {}",
+            output.step, output.syscall, output.target, output.output_ref
+        );
+    }
     println!("final     {}", report.final_hash);
     Ok(())
 }

@@ -79,6 +79,8 @@ Replay the latest flight log without side effects:
 cargo run -- replay .agentk/runs/latest.jsonl
 ```
 
+Replay records synthetic `stub_output_sha256` refs for allowed model, tool, and network side-effect syscalls. It does not execute those syscalls or invent raw outputs.
+
 Fork-replay the latest flight log against another policy:
 
 ```sh

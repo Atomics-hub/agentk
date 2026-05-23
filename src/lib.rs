@@ -1517,7 +1517,24 @@ pub struct ReplayReport {
     pub events_replayed: u64,
     pub blocked: usize,
     pub side_effects_stubbed: usize,
+    pub stub_outputs: Vec<ReplayStubOutput>,
     pub final_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayStubOutput {
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub output_ref: String,
+}
+
+#[derive(Serialize)]
+struct ReplayStubOutputProofInput<'a> {
+    step: u64,
+    syscall: &'a str,
+    target: &'a str,
+    event_hash: &'a str,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1642,13 +1659,18 @@ fn inspect_event_summary(event: &Event) -> FlightLogEventSummary {
 }
 
 fn is_safe_evidence_ref(input: &str) -> bool {
-    ["args_sha256:", "descriptor_sha256:", "response_sha256:"]
-        .iter()
-        .any(|prefix| {
-            input.strip_prefix(prefix).is_some_and(|hash| {
-                hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit())
-            })
+    [
+        "args_sha256:",
+        "descriptor_sha256:",
+        "response_sha256:",
+        "stub_output_sha256:",
+    ]
+    .iter()
+    .any(|prefix| {
+        input.strip_prefix(prefix).is_some_and(|hash| {
+            hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit())
         })
+    })
 }
 
 pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError> {
@@ -1658,20 +1680,39 @@ pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError>
         .iter()
         .filter(|event| event.decision.verdict == Verdict::Deny)
         .count();
-    let side_effects_stubbed = events
+    let stub_outputs = events
         .iter()
         .filter(|event| {
             event.decision.verdict == Verdict::Allow
                 && is_side_effecting_syscall(&event.syscall.kind)
         })
-        .count();
+        .map(replay_stub_output)
+        .collect::<Vec<_>>();
 
     Ok(ReplayReport {
         events_replayed: verify.events_checked,
         blocked,
-        side_effects_stubbed,
+        side_effects_stubbed: stub_outputs.len(),
+        stub_outputs,
         final_hash: verify.final_hash,
     })
+}
+
+fn replay_stub_output(event: &Event) -> ReplayStubOutput {
+    let syscall = event.syscall.kind.to_string();
+    let output_hash = hash_json(&ReplayStubOutputProofInput {
+        step: event.step,
+        syscall: &syscall,
+        target: &event.syscall.target,
+        event_hash: &event.event_hash,
+    });
+
+    ReplayStubOutput {
+        step: event.step,
+        syscall,
+        target: event.syscall.target.clone(),
+        output_ref: format!("stub_output_sha256:{output_hash}"),
+    }
 }
 
 fn is_side_effecting_syscall(kind: &SyscallKind) -> bool {
@@ -2116,6 +2157,12 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
+    let replay_stub_outputs_ok = replay.side_effects_stubbed == replay.stub_outputs.len()
+        && !replay.stub_outputs.is_empty()
+        && replay
+            .stub_outputs
+            .iter()
+            .all(|output| is_safe_evidence_ref(&output.output_ref));
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
     let mcp_session = fs::read_to_string(root.join("examples/mcp-server-session.jsonl"))?;
     let mcp_output = mcp_server_json_lines(&mcp_session)?;
@@ -2202,10 +2249,17 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "replay latest",
-            ReadinessStatus::Pass,
+            if replay_stub_outputs_ok {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
             format!(
-                "{} events, {} blocked, {} stubbed",
-                replay.events_replayed, replay.blocked, replay.side_effects_stubbed
+                "{} events, {} blocked, {} stubbed, {} stub outputs",
+                replay.events_replayed,
+                replay.blocked,
+                replay.side_effects_stubbed,
+                replay.stub_outputs.len()
             ),
         ),
         release_audit_check(
@@ -3939,7 +3993,73 @@ mod tests {
         assert_eq!(replay.events_replayed, 4);
         assert_eq!(replay.blocked, 2);
         assert_eq!(replay.side_effects_stubbed, 1);
+        assert_eq!(replay.stub_outputs.len(), 1);
+        assert_eq!(replay.stub_outputs[0].step, 2);
+        assert_eq!(replay.stub_outputs[0].syscall, "model.call");
+        assert_eq!(replay.stub_outputs[0].target, "local-or-remote-llm");
+        assert!(
+            replay.stub_outputs[0]
+                .output_ref
+                .starts_with("stub_output_sha256:")
+        );
+        assert!(
+            !replay.stub_outputs[0]
+                .output_ref
+                .contains("local-or-remote-llm")
+        );
         assert_eq!(replay.final_hash, demo.final_hash);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_records_stub_outputs_for_allowed_side_effect_kinds() {
+        let path = temp_path("agentk-replay-stub-outputs", "jsonl");
+        let network_target = "https://api.example.invalid/upload";
+        let tool_target = "demo.echo";
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant(format!("network.send:{network_target}"));
+        kernel.grant(format!("tool.invoke:{tool_target}"));
+
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ModelCall,
+            target: "local-llm".to_string(),
+            intent: "summarize trusted context".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["ctx_trusted_001".to_string()],
+        });
+        kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: network_target.to_string(),
+            intent: "send public telemetry".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["payload_sha256:public".to_string()],
+        });
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: tool_target.to_string(),
+            intent: "invoke trusted local tool".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![format!(
+                "args_sha256:{}",
+                hash_json(&serde_json::json!({ "ok": true }))
+            )],
+        });
+        kernel.write_jsonl(&path).expect("log should write");
+
+        let replay = replay_jsonl(&path).expect("replay should verify");
+
+        assert_eq!(replay.events_replayed, 3);
+        assert_eq!(replay.blocked, 0);
+        assert_eq!(replay.side_effects_stubbed, 3);
+        assert_eq!(replay.stub_outputs.len(), 3);
+        assert_eq!(replay.stub_outputs[0].syscall, "model.call");
+        assert_eq!(replay.stub_outputs[1].syscall, "network.send");
+        assert_eq!(replay.stub_outputs[2].syscall, "tool.invoke");
+        for output in replay.stub_outputs {
+            assert!(output.output_ref.starts_with("stub_output_sha256:"));
+            assert_eq!(output.output_ref.len(), "stub_output_sha256:".len() + 64);
+        }
 
         let _ = fs::remove_file(path);
     }
