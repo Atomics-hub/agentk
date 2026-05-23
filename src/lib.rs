@@ -970,11 +970,13 @@ fn record_mcp_tool_response_in_session(
     kernel: &mut Option<AgentKernel>,
 ) -> McpToolResponseRecordReport {
     let response_hash = hash_json(&request.response);
+    let is_error = request.is_error || mcp_response_is_error(&request.response);
+    let labels = derive_mcp_tool_response_labels(&request.labels, is_error);
     let syscall = Syscall {
         kind: SyscallKind::ToolResponse,
         target: request.tool,
         intent: "record MCP tool response hash without storing raw response content".to_string(),
-        labels: request.labels,
+        labels,
         inputs: vec![format!("response_sha256:{response_hash}")],
     };
     let kernel = kernel.get_or_insert_with(|| AgentKernel::new(request.agent_id));
@@ -984,8 +986,15 @@ fn record_mcp_tool_response_in_session(
         recorded: event.decision.verdict == Verdict::Allow,
         event,
         response_hash,
-        is_error: request.is_error,
+        is_error,
     }
+}
+
+fn mcp_response_is_error(response: &serde_json::Value) -> bool {
+    response
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn mediate_mcp_json_lines(input: &str) -> Result<String, AgentKError> {
@@ -2688,6 +2697,19 @@ pub fn derive_tool_output_labels(
     union_labels([input_labels, &declared])
 }
 
+pub fn derive_mcp_tool_response_labels(
+    declared_labels: &BTreeSet<Label>,
+    is_error: bool,
+) -> BTreeSet<Label> {
+    let mut labels = declared_labels.clone();
+    labels.insert(Label::Untrusted);
+    labels.insert(Label::External);
+    if is_error {
+        labels.insert(Label::PoisonedSuspect);
+    }
+    labels
+}
+
 fn hash_json<T: Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).expect("hash input should serialize");
     let mut hasher = Sha256::new();
@@ -3714,6 +3736,8 @@ mod tests {
         assert!(report.recorded);
         assert_eq!(report.event.syscall.kind, SyscallKind::ToolResponse);
         assert_eq!(report.event.decision.rule, "tool-response-record");
+        assert!(report.event.syscall.labels.contains(&Label::Untrusted));
+        assert!(report.event.syscall.labels.contains(&Label::External));
         assert!(report.event.syscall.inputs[0].starts_with("response_sha256:"));
         assert_eq!(
             report.event.syscall.inputs[0],
@@ -3721,6 +3745,35 @@ mod tests {
         );
         assert!(!serialized.contains("raw tool output"));
         assert!(!serialized.contains("structuredContent"));
+    }
+
+    #[test]
+    fn mcp_response_record_derives_untrusted_output_labels() {
+        let request = McpToolResponseRecordRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            labels: labels(&[Label::Trusted]),
+            response: serde_json::json!({
+                "content": [{ "type": "text", "text": "public" }],
+                "isError": true
+            }),
+            is_error: false,
+        };
+
+        let report = record_mcp_tool_response(request);
+
+        assert!(report.recorded);
+        assert!(report.is_error);
+        assert!(report.event.syscall.labels.contains(&Label::Trusted));
+        assert!(report.event.syscall.labels.contains(&Label::Untrusted));
+        assert!(report.event.syscall.labels.contains(&Label::External));
+        assert!(
+            report
+                .event
+                .syscall
+                .labels
+                .contains(&Label::PoisonedSuspect)
+        );
     }
 
     #[test]

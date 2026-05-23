@@ -244,6 +244,7 @@ Implemented today:
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
+- conservative MCP tool-output labels for recorded responses,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
 - a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, inspect, and MCP smoke checks.
