@@ -3,8 +3,9 @@ use agentk::{
     fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, inspect_jsonl,
     mcp_proxy_from_path, mcp_server_json_lines, readiness_report, release_audit_report,
     replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
-    secret_reference_manifest_report_from_path, signing_key_status, verify_jsonl,
-    verify_signatures_jsonl, verify_signing_key_rotation_manifest_file, write_latest_copy,
+    secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
+    signing_key_status, verify_jsonl, verify_signatures_jsonl,
+    verify_signing_key_rotation_manifest_file, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
@@ -145,6 +146,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check secret-reference availability through the env store without printing refs.
+    SecretRefsStoreCheck {
+        /// Path to an AgentK secret-reference TOML manifest.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Emit only availability counts as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run local public-release readiness checks.
     Readiness {
         /// Emit the full report as JSON.
@@ -200,6 +210,7 @@ fn run() -> Result<(), AgentKError> {
         Command::KeyRotateVerify { manifest, json } => key_rotate_verify(manifest, json),
         Command::PolicyCheck { path } => policy_check(path),
         Command::SecretRefsCheck { manifest, json } => secret_refs_check(manifest, json),
+        Command::SecretRefsStoreCheck { manifest, json } => secret_refs_store_check(manifest, json),
         Command::Readiness { json } => readiness(json),
         Command::ReleaseAudit { json, strict } => release_audit(json, strict),
     }
@@ -579,6 +590,29 @@ fn secret_refs_check(manifest: PathBuf, json: bool) -> Result<(), AgentKError> {
     println!("version   {}", report.version);
     println!("secrets   {}", report.secret_count);
     println!("redacted  provider refs were not printed");
+    Ok(())
+}
+
+fn secret_refs_store_check(manifest: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = secret_reference_env_store_report_from_path(manifest)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK secret refs store check");
+        println!("version     {}", report.version);
+        println!("secrets     {}", report.secret_count);
+        println!("stores      {}", report.store_count);
+        println!("available   {}", report.available_count);
+        println!("missing     {}", report.missing_count);
+        println!("unsupported {}", report.unsupported_provider_count);
+        println!("redacted    provider refs were not printed");
+    }
+
+    if !report.all_available() {
+        std::process::exit(2);
+    }
+
     Ok(())
 }
 

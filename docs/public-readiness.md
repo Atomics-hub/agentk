@@ -35,9 +35,11 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret store adapter tests prove unsupported providers are not looked up.
 - [ ] Secret store adapter tests prove multiple provider-scoped stores can coexist.
 - [ ] Secret store adapter tests prove unavailable external refs do not mint secret handles.
+- [ ] Secret store availability reports expose only counts and no provider refs.
 - [ ] Env secret store tests prove env values and references are not logged.
 - [ ] Secret reference manifest tests prove invalid provider ids are rejected without logging refs.
 - [ ] Release audit checks secret-reference validation rejects invalid refs without logging them.
+- [ ] Release audit checks secret-store availability reporting does not log refs.
 - [ ] Secret reference manifest tests prove provider refs are redacted from debug output.
 - [ ] Secret reference manifest CLI reports only version and count.
 - [ ] Flight-log inspect tests prove raw input refs are redacted.

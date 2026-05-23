@@ -105,6 +105,13 @@ Validate a secret-reference manifest without printing provider refs:
 cargo run -- secret-refs-check --manifest examples/secret-refs.toml
 ```
 
+Check whether secret references are available through the local env store without
+printing refs:
+
+```sh
+AGENTK_DEMO_REF=present cargo run -- secret-refs-store-check --manifest examples/secret-refs.toml
+```
+
 Example profiles live in:
 
 ```txt
@@ -218,6 +225,7 @@ This repo currently includes:
 - an env-backed local secret store presence adapter for `env` references,
 - a versioned secret-reference manifest parser with provider-id validation for registering external refs without secret values,
 - a redacted secret-reference manifest validation command,
+- a redacted secret-reference store availability command,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,
@@ -269,7 +277,7 @@ Implemented today:
 - tainted tool-input blocking at `tool.invoke` boundaries,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, secret-reference validation, MCP taint-flow, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
