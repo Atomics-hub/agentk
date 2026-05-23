@@ -1634,6 +1634,7 @@ where
         {
             serde_json::to_writer(&mut writer, &report)?;
             writer.write_all(b"\n")?;
+            writer.flush()?;
         }
     }
 
@@ -1709,6 +1710,7 @@ where
         if let Some(response) = handle_mcp_json_rpc_line(&line.bytes, line.too_long, &mut session) {
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
+            writer.flush()?;
         }
     }
 
@@ -5242,6 +5244,24 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct FlushCountingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl std::io::Write for FlushCountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct AllowListSecretStore {
         allowed: BTreeSet<(String, String, String)>,
     }
@@ -7149,6 +7169,29 @@ effect = "allow""#,
     }
 
     #[test]
+    fn mcp_json_stream_flushes_each_response_line() {
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "streamed",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": { "message": "streamed" }
+        });
+        let input = format!("{request}\n\n{request}\n");
+        let mut output = FlushCountingWriter::default();
+
+        mediate_mcp_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("stream mediation should work");
+
+        assert_eq!(
+            output.bytes.iter().filter(|byte| **byte == b'\n').count(),
+            2
+        );
+        assert_eq!(output.flushes, 2);
+    }
+
+    #[test]
     fn mcp_json_stream_rejects_oversized_lines_without_reflecting_payload() {
         let raw_payload = "MCP_LINES_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
         let request = serde_json::json!({
@@ -7507,6 +7550,25 @@ effect = "allow""#,
             String::from_utf8(output).expect("stream output should be UTF-8"),
             expected
         );
+    }
+
+    #[test]
+    fn mcp_server_json_stream_flushes_each_response_line() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+"#;
+        let mut output = FlushCountingWriter::default();
+
+        mcp_server_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("stream helper should respond");
+
+        assert_eq!(
+            output.bytes.iter().filter(|byte| **byte == b'\n').count(),
+            2
+        );
+        assert_eq!(output.flushes, 2);
     }
 
     #[test]
