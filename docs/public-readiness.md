@@ -16,6 +16,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] License files present and intentional.
 - [ ] `Cargo.lock` is present for reproducible application builds.
 - [ ] README claims match implemented behavior.
+- [ ] `docs/key-lifecycle.md` covers signing-key generation, custody, rotation, retirement, revocation, and incident response.
 
 ## Code Quality
 

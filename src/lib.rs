@@ -2182,6 +2182,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "SECURITY.md"),
         check_required_file(&root, "Cargo.lock"),
         check_required_file(&root, "docs/threat-model.md"),
+        check_required_file(&root, "docs/key-lifecycle.md"),
         check_required_file(&root, "docs/public-readiness.md"),
         check_required_file(&root, "docs/roadmap.md"),
         check_required_file(&root, "examples/mcp-tool-request.json"),
@@ -2193,6 +2194,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_policy(&root),
         check_policy_profiles(&root),
         check_security_disclosure(&root),
+        check_key_lifecycle_runbook(&root),
         check_signing_key_source(),
         check_signing_key_file_permissions(),
         check_signing_key_disclaimer(&root),
@@ -2709,6 +2711,57 @@ fn check_security_disclosure(root: &Path) -> ReadinessCheck {
             "security disclosure",
             ReadinessStatus::Fail,
             format!("could not read SECURITY.md: {error}"),
+        ),
+    }
+}
+
+fn check_key_lifecycle_runbook(root: &Path) -> ReadinessCheck {
+    let path = root.join("docs/key-lifecycle.md");
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            let lower = content.to_ascii_lowercase();
+            let required = [
+                "generation",
+                "custody",
+                "activation",
+                "rotation",
+                "retirement",
+                "revocation",
+                "incident response",
+                "production requirements",
+            ];
+            let missing = required
+                .iter()
+                .filter(|section| !lower.contains(**section))
+                .copied()
+                .collect::<Vec<_>>();
+
+            if missing.is_empty()
+                && content.contains(REQUIRE_SIGNING_KEY_ENV)
+                && content.contains(SIGNING_KEY_FILE_ENV)
+            {
+                readiness_check(
+                    "key lifecycle runbook",
+                    ReadinessStatus::Pass,
+                    "generation, custody, rotation, retirement, revocation, and incident response documented",
+                )
+            } else {
+                readiness_check(
+                    "key lifecycle runbook",
+                    ReadinessStatus::Fail,
+                    if missing.is_empty() {
+                        "key lifecycle runbook must document release-gate signer env vars"
+                            .to_string()
+                    } else {
+                        format!("missing sections: {}", missing.join(", "))
+                    },
+                )
+            }
+        }
+        Err(error) => readiness_check(
+            "key lifecycle runbook",
+            ReadinessStatus::Fail,
+            format!("could not read docs/key-lifecycle.md: {error}"),
         ),
     }
 }
@@ -4512,6 +4565,36 @@ mod tests {
         assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn key_lifecycle_runbook_check_requires_operational_sections() {
+        let root = temp_path("agentk-key-lifecycle", "dir");
+        let docs = root.join("docs");
+        fs::create_dir_all(&docs).expect("docs dir should create");
+        fs::write(
+            docs.join("key-lifecycle.md"),
+            format!(
+                "generation custody activation rotation retirement revocation incident response production requirements {REQUIRE_SIGNING_KEY_ENV} {SIGNING_KEY_FILE_ENV}"
+            ),
+        )
+        .expect("runbook should write");
+
+        let check = check_key_lifecycle_runbook(&root);
+
+        assert_eq!(check.status, ReadinessStatus::Pass);
+
+        fs::write(
+            docs.join("key-lifecycle.md"),
+            format!("generation custody rotation {REQUIRE_SIGNING_KEY_ENV} {SIGNING_KEY_FILE_ENV}"),
+        )
+        .expect("runbook should write");
+        let check = check_key_lifecycle_runbook(&root);
+
+        assert_eq!(check.status, ReadinessStatus::Fail);
+        assert!(check.detail.contains("activation"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
