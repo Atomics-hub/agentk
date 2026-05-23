@@ -17,6 +17,7 @@ Current guarantees are intentionally narrow:
 - configured secret store adapters can check external reference availability without returning raw secret bytes,
 - the local `env` secret store adapter checks safe environment variable names for presence without exposing values,
 - secret reference manifests can register external refs without containing or logging secret values,
+- secret reference manifest validation reports only version and count, not provider refs,
 - brokered secret handles bind scope and expiry to their signed capability receipt,
 - unknown syscalls are denied by default,
 - receipts and secret handles carry Ed25519 development signatures,

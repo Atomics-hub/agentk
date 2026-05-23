@@ -355,6 +355,22 @@ impl fmt::Debug for SecretReferenceManifest {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SecretReferenceManifestReport {
+    pub version: u64,
+    pub secret_count: usize,
+}
+
+pub fn secret_reference_manifest_report_from_path(
+    path: impl AsRef<Path>,
+) -> Result<SecretReferenceManifestReport, AgentKError> {
+    let manifest = SecretReferenceManifest::from_path(path)?;
+    Ok(SecretReferenceManifestReport {
+        version: manifest.version(),
+        secret_count: manifest.secrets().len(),
+    })
+}
+
 #[derive(Clone, Deserialize)]
 pub struct SecretReferenceEntry {
     target: String,
@@ -2604,6 +2620,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-tool-response.json"),
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
+        check_required_file(&root, "examples/secret-refs.toml"),
         check_policy(&root),
         check_policy_profiles(&root),
         check_security_disclosure(&root),
@@ -2692,6 +2709,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let verify = verify_jsonl(&latest)?;
     let signatures = verify_signatures_jsonl(&latest)?;
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
+    let secret_refs =
+        secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
@@ -2749,6 +2768,20 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "{} receipts, {} handles",
                 secret_handle_smoke.receipts_checked, secret_handle_smoke.secret_handles_checked
+            ),
+        ),
+        release_audit_check(
+            "secret refs manifest",
+            if secret_refs.version == default_secret_reference_manifest_version()
+                && secret_refs.secret_count > 0
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "version {}, {} refs",
+                secret_refs.version, secret_refs.secret_count
             ),
         ),
         release_audit_check(
@@ -4751,6 +4784,33 @@ mod tests {
         )
         .expect_err("unsupported manifest version should fail");
         assert!(unsupported.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn secret_reference_manifest_report_serializes_only_metadata() {
+        let env_reference = "AGENTK_TOKEN";
+        let manifest = SecretReferenceManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "{env_reference}"
+            "#
+        ))
+        .expect("manifest should parse");
+        let report = SecretReferenceManifestReport {
+            version: manifest.version(),
+            secret_count: manifest.secrets().len(),
+        };
+
+        let json = serde_json::to_string(&report).expect("report should serialize");
+        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"secret_count\":1"));
+        assert!(!json.contains("secret://github-token"));
+        assert!(!json.contains(EnvironmentSecretStore::PROVIDER));
+        assert!(!json.contains(env_reference));
     }
 
     #[test]

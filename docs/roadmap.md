@@ -38,6 +38,7 @@ Status: in progress.
 - [x] Add a metadata-only secret store adapter boundary for external refs.
 - [x] Add an env-backed local secret store presence adapter.
 - [x] Add a secret-reference manifest parser for external refs.
+- [x] Add redacted CLI validation for secret-reference manifests.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
