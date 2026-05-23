@@ -7,7 +7,7 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1625,40 +1625,117 @@ pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
     let mut kernel = None::<AgentKernel>;
 
     for line in input.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let response = if line.len() > MCP_JSON_RPC_MAX_LINE_BYTES {
-            Some(jsonrpc_error(
-                serde_json::Value::Null,
-                -32600,
-                "Invalid Request",
-                Some(serde_json::json!({
-                    "detail": format!(
-                        "message exceeds {MCP_JSON_RPC_MAX_LINE_BYTES} byte JSON-RPC line limit"
-                    )
-                })),
-            ))
-        } else {
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(message) => handle_mcp_json_rpc_message(message, &mut kernel),
-                Err(error) => Some(jsonrpc_error(
-                    serde_json::Value::Null,
-                    -32700,
-                    "Parse error",
-                    Some(serde_json::json!({ "detail": error.to_string() })),
-                )),
-            }
-        };
-
-        if let Some(response) = response {
+        if let Some(response) = handle_mcp_json_rpc_line(
+            line.as_bytes(),
+            line.len() > MCP_JSON_RPC_MAX_LINE_BYTES,
+            &mut kernel,
+        ) {
             out.push_str(&serde_json::to_string(&response)?);
             out.push('\n');
         }
     }
 
     Ok(out)
+}
+
+pub fn mcp_server_json_stream<R, W>(mut reader: R, mut writer: W) -> Result<(), AgentKError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut kernel = None::<AgentKernel>;
+
+    while let Some(line) = read_mcp_json_rpc_line(&mut reader)? {
+        if let Some(response) = handle_mcp_json_rpc_line(&line.bytes, line.too_long, &mut kernel) {
+            serde_json::to_writer(&mut writer, &response)?;
+            writer.write_all(b"\n")?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct McpJsonRpcLine {
+    bytes: Vec<u8>,
+    too_long: bool,
+}
+
+fn read_mcp_json_rpc_line<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<McpJsonRpcLine>, AgentKError> {
+    let mut bytes = Vec::new();
+    let mut too_long = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if bytes.is_empty() && !too_long {
+                return Ok(None);
+            }
+            return Ok(Some(McpJsonRpcLine { bytes, too_long }));
+        }
+
+        let newline_at = available.iter().position(|byte| *byte == b'\n');
+        let consume = newline_at.map_or(available.len(), |index| index + 1);
+        let content_len = newline_at.unwrap_or(consume);
+
+        if !too_long {
+            let remaining = MCP_JSON_RPC_MAX_LINE_BYTES.saturating_sub(bytes.len());
+            if content_len <= remaining {
+                bytes.extend_from_slice(&available[..content_len]);
+            } else {
+                bytes.extend_from_slice(&available[..remaining]);
+                too_long = true;
+            }
+        }
+
+        reader.consume(consume);
+
+        if newline_at.is_some() {
+            if bytes.ends_with(b"\r") {
+                bytes.pop();
+            }
+            return Ok(Some(McpJsonRpcLine { bytes, too_long }));
+        }
+    }
+}
+
+fn handle_mcp_json_rpc_line(
+    line: &[u8],
+    too_long: bool,
+    kernel: &mut Option<AgentKernel>,
+) -> Option<serde_json::Value> {
+    if too_long {
+        return Some(jsonrpc_line_limit_error());
+    }
+
+    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return None;
+    }
+
+    match serde_json::from_slice::<serde_json::Value>(line) {
+        Ok(message) => handle_mcp_json_rpc_message(message, kernel),
+        Err(error) => Some(jsonrpc_error(
+            serde_json::Value::Null,
+            -32700,
+            "Parse error",
+            Some(serde_json::json!({ "detail": error.to_string() })),
+        )),
+    }
+}
+
+fn jsonrpc_line_limit_error() -> serde_json::Value {
+    jsonrpc_error(
+        serde_json::Value::Null,
+        -32600,
+        "Invalid Request",
+        Some(serde_json::json!({
+            "detail": format!(
+                "message exceeds {MCP_JSON_RPC_MAX_LINE_BYTES} byte JSON-RPC line limit"
+            )
+        })),
+    )
 }
 
 fn handle_mcp_json_rpc_message(
@@ -3600,7 +3677,10 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     );
     let input = format!("{invalid_id}\n{batch}\n{oversized}\n");
 
-    let output = mcp_server_json_lines(&input)?;
+    let mut output = Vec::new();
+    mcp_server_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)?;
+    let output = String::from_utf8(output)
+        .map_err(|error| AgentKError::InvalidMcpRequest(error.to_string()))?;
     let responses = output
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
@@ -6785,6 +6865,51 @@ effect = "allow""#,
                 .expect("second receipt")
                 .id
         );
+    }
+
+    #[test]
+    fn mcp_server_json_stream_matches_json_lines_session() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}
+"#;
+        let expected = mcp_server_json_lines(input).expect("line helper should respond");
+        let mut output = Vec::new();
+
+        mcp_server_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("stream helper should respond");
+
+        assert_eq!(
+            String::from_utf8(output).expect("stream output should be UTF-8"),
+            expected
+        );
+    }
+
+    #[test]
+    fn mcp_server_json_stream_rejects_oversized_line_incrementally() {
+        let raw_payload = "MCP_STREAM_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"ping","params":{{"pad":"{}","secret":"{raw_payload}"}}}}"#,
+            "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES)
+        );
+        let mut output = Vec::new();
+
+        mcp_server_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("stream helper should respond");
+        let output = String::from_utf8(output).expect("stream output should be UTF-8");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::Value::Null);
+        assert_eq!(response["error"]["code"], serde_json::json!(-32600));
+        assert!(
+            response["error"]["data"]["detail"]
+                .as_str()
+                .expect("detail should be a string")
+                .contains("JSON-RPC line limit")
+        );
+        assert!(!output.contains(raw_payload));
     }
 
     #[test]
