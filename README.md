@@ -246,7 +246,7 @@ Implemented today:
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, inspect, and MCP smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, inspect, and MCP smoke checks.
 
 Not implemented yet:
 

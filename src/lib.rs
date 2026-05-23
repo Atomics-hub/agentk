@@ -2102,6 +2102,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
 
     let verify = verify_jsonl(&latest)?;
     let signatures = verify_signatures_jsonl(&latest)?;
+    let secret_handle_smoke = brokered_secret_handle_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
@@ -2136,6 +2137,18 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "{} receipts, {} handles",
                 signatures.receipts_checked, signatures.secret_handles_checked
+            ),
+        ),
+        release_audit_check(
+            "secret handle smoke",
+            if secret_handle_smoke.ok && secret_handle_smoke.secret_handles_checked == 1 {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} receipts, {} handles",
+                secret_handle_smoke.receipts_checked, secret_handle_smoke.secret_handles_checked
             ),
         ),
         release_audit_check(
@@ -2185,6 +2198,32 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!("{mcp_responses} JSON-RPC responses"),
         ),
     ])
+}
+
+fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> {
+    const DUMMY_SECRET_VALUE: &str = "DUMMY_VALUE_DO_NOT_LOG";
+
+    let mut broker = SecretBroker::new();
+    broker.register("secret://release-audit-token", DUMMY_SECRET_VALUE);
+
+    let mut kernel = AgentKernel::new("agent://release-audit").with_secret_broker(broker);
+    kernel.grant("secret.open:secret://release-audit-token");
+    kernel.syscall(Syscall {
+        kind: SyscallKind::SecretOpen,
+        target: "secret://release-audit-token".to_string(),
+        intent: "open brokered release-audit dummy secret".to_string(),
+        labels: labels(&[Label::Trusted]),
+        inputs: vec!["release_audit_smoke".to_string()],
+    });
+
+    let serialized = serde_json::to_string(kernel.events())?;
+    if serialized.contains(DUMMY_SECRET_VALUE) {
+        return Err(AgentKError::InvalidLog(
+            "brokered secret smoke serialized raw secret material".to_string(),
+        ));
+    }
+
+    verify_event_signatures(kernel.events())
 }
 
 fn check_git_worktree(root: &Path) -> ReleaseAuditCheck {
@@ -3766,6 +3805,17 @@ mod tests {
         assert!(report.failures.is_empty());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn release_audit_secret_handle_smoke_covers_brokered_handle() {
+        let report = brokered_secret_handle_smoke().expect("secret handle smoke should run");
+
+        assert!(report.ok, "{:?}", report.failures);
+        assert_eq!(report.events_checked, 1);
+        assert_eq!(report.receipts_checked, 1);
+        assert_eq!(report.secret_handles_checked, 1);
+        assert!(report.failures.is_empty());
     }
 
     #[test]

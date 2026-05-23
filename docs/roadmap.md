@@ -31,6 +31,7 @@ Status: in progress.
 - [x] Add tests proving raw secret bytes never appear in flight logs.
 - [x] Add Ed25519 development signatures for secret handles.
 - [x] Add expiry, scope, and receipt binding.
+- [x] Add release-audit smoke coverage for brokered secret handles.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
