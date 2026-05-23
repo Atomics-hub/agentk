@@ -14,6 +14,7 @@ Current guarantees are intentionally narrow:
 - local dummy secret registrations are target-only and do not accept raw secret material,
 - brokered external secret references do not serialize provider refs into flight logs,
 - external secret reference debug output prints provider/reference hashes, not raw provider/reference values,
+- configured secret store adapters can check external reference availability without returning raw secret bytes,
 - brokered secret handles bind scope and expiry to their signed capability receipt,
 - unknown syscalls are denied by default,
 - receipts and secret handles carry Ed25519 development signatures,
@@ -40,7 +41,7 @@ Non-guarantees:
 - no eBPF/cgroup enforcement yet,
 - no formal verification,
 - no protection against malicious local users,
-- no production-grade storage for real secrets yet.
+- no concrete production secret provider implementation yet.
 
 For non-demo runs, prefer `AGENTK_SIGNING_KEY_FILE` pointing to a private key file outside the repository, or configure `AGENTK_SIGNING_KEY_HEX` with a 32-byte hex Ed25519 signing key. Do not commit either value or file. On Unix, readiness fails if the configured key file is readable by group or other users. AgentK prints only the derived public key through `agentk signing-key`.
 
