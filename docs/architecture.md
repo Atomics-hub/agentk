@@ -139,7 +139,7 @@ Replay modes:
 
 `agentk fork-replay-behavior` accepts a JSON array of changed hashed output refs and emits a divergence report. Overrides are bound to the recorded step, syscall, and target, and raw output strings are rejected.
 
-`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, a brokered secret-handle smoke test, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
+`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, brokered secret-handle and secret-reference validation smoke tests, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
 
 ### MCP Proxy MVP
 
