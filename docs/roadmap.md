@@ -43,7 +43,7 @@ Status: in progress.
 - [x] Record MCP response hashes.
 - [x] Attach labels to tool outputs.
 - [ ] Build a complete production MCP proxy/server transport.
-- [ ] Block tainted flows at tool-call boundaries.
+- [x] Block tainted flows at tool-call boundaries.
 
 ## Milestone 4: Deterministic Replay
 
