@@ -162,8 +162,9 @@ and tests.
 oversized JSON-RPC lines, and invalid request ids without reflecting raw id
 payloads; streams stdin with bounded per-line reads; requires `initialize`
 with the supported protocol version followed by `notifications/initialized`
-before tool listing or calls; ignores other JSON-RPC notifications without
-advancing readiness; and exposes three AgentK tools:
+before operation requests; only handles `initialize` and `ping` before
+readiness; ignores other JSON-RPC notifications without advancing readiness;
+and exposes three AgentK tools:
 
 ```txt
 agentk.mediate
