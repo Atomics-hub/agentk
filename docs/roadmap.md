@@ -76,6 +76,7 @@ Status: in progress.
 - [x] Add configurable signing key via `AGENTK_SIGNING_KEY_HEX`.
 - [x] Add signing-key file source for release gates.
 - [x] Validate signing-key file permissions in readiness.
+- [x] Validate signing-key parent directory custody in readiness.
 - [x] Add signing-key lifecycle runbook and readiness coverage.
 - [x] Add release gate for requiring a configured signing key.
 - [x] Add local key generation command.

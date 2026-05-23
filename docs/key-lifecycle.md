@@ -23,8 +23,10 @@ Generate private signing keys outside the repository:
 cargo run -- keygen --out ../agentk-release-signing-key
 ```
 
-On Unix, readiness requires `AGENTK_SIGNING_KEY_FILE` to be owner-only. Use
-`chmod 600 <path>` if a key file is too broadly readable.
+On Unix, readiness requires `AGENTK_SIGNING_KEY_FILE` to be owner-only and its
+parent directory to block group/other writes. Use `chmod 600 <path>` if a key
+file is too broadly readable, and `chmod go-w <directory>` if the containing
+directory is writable by other accounts.
 
 ## Custody
 

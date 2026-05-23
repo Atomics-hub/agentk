@@ -12,6 +12,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run -- readiness` passes.
 - [ ] Signing key file, if generated, lives outside the repo.
 - [ ] Signing key file, if configured on Unix, is owner-only.
+- [ ] Signing key parent directory, if configured on Unix, blocks group/other writes.
 - [ ] Rotated signing key files, if generated, live outside the repo.
 - [ ] License files present and intentional.
 - [ ] `Cargo.lock` is present for reproducible application builds.
