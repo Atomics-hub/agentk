@@ -177,7 +177,9 @@ Mediate newline-delimited MCP-shaped requests over stdin:
 cargo run -- mcp-lines < examples/mcp-tool-requests.jsonl
 ```
 
-Run the minimal MCP JSON-RPC stdio server:
+Run the minimal MCP JSON-RPC stdio server. The prototype accepts
+newline-delimited JSON-RPC messages, rejects batches, enforces bounded request
+ids and per-line message size, and does not execute the underlying tool:
 
 ```sh
 cargo run -- mcp-server < examples/mcp-server-session.jsonl
