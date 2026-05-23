@@ -2757,6 +2757,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
     let secret_refs =
         secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
+    let secret_refs_validation = secret_ref_validation_smoke()?;
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
@@ -2828,6 +2829,33 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "version {}, {} refs",
                 secret_refs.version, secret_refs.secret_count
+            ),
+        ),
+        release_audit_check(
+            "secret refs validation",
+            if secret_refs_validation.invalid_provider_rejected
+                && secret_refs_validation.invalid_env_reference_rejected
+                && !secret_refs_validation.raw_provider_logged
+                && !secret_refs_validation.raw_reference_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "provider {}, env ref {}, redacted {}",
+                if secret_refs_validation.invalid_provider_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                if secret_refs_validation.invalid_env_reference_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                !secret_refs_validation.raw_provider_logged
+                    && !secret_refs_validation.raw_reference_logged
             ),
         ),
         release_audit_check(
@@ -2950,6 +2978,55 @@ fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> 
     }
 
     verify_event_signatures(kernel.events())
+}
+
+#[derive(Debug)]
+struct SecretRefValidationSmokeReport {
+    invalid_provider_rejected: bool,
+    invalid_env_reference_rejected: bool,
+    raw_provider_logged: bool,
+    raw_reference_logged: bool,
+}
+
+fn secret_ref_validation_smoke() -> Result<SecretRefValidationSmokeReport, AgentKError> {
+    const RAW_PROVIDER: &str = "Cloud Provider/secret";
+    const RAW_PROVIDER_REF: &str = "AGENTK_PROVIDER_REF";
+    const RAW_ENV_REF: &str = "invalid-reference-name";
+
+    let invalid_provider = SecretReferenceManifest::parse_toml(&format!(
+        r#"
+        version = 1
+
+        [[secrets]]
+        target = "secret://release-audit-provider"
+        provider = "{RAW_PROVIDER}"
+        reference = "{RAW_PROVIDER_REF}"
+        "#
+    ))
+    .expect_err("invalid provider id should fail");
+    let invalid_provider_error = invalid_provider.to_string();
+
+    let invalid_env_reference = SecretReferenceManifest::parse_toml(&format!(
+        r#"
+        version = 1
+
+        [[secrets]]
+        target = "secret://release-audit-env"
+        provider = "env"
+        reference = "{RAW_ENV_REF}"
+        "#
+    ))
+    .expect_err("invalid env reference should fail");
+    let invalid_env_error = invalid_env_reference.to_string();
+
+    Ok(SecretRefValidationSmokeReport {
+        invalid_provider_rejected: invalid_provider_error.contains("safe provider id"),
+        invalid_env_reference_rejected: invalid_env_error
+            .contains("safe environment variable name"),
+        raw_provider_logged: invalid_provider_error.contains(RAW_PROVIDER),
+        raw_reference_logged: invalid_provider_error.contains(RAW_PROVIDER_REF)
+            || invalid_env_error.contains(RAW_ENV_REF),
+    })
 }
 
 #[derive(Debug)]
@@ -5504,6 +5581,16 @@ mod tests {
         assert_eq!(report.receipts_checked, 1);
         assert_eq!(report.secret_handles_checked, 1);
         assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn release_audit_secret_ref_validation_smoke_redacts_invalid_refs() {
+        let report = secret_ref_validation_smoke().expect("secret ref validation smoke should run");
+
+        assert!(report.invalid_provider_rejected);
+        assert!(report.invalid_env_reference_rejected);
+        assert!(!report.raw_provider_logged);
+        assert!(!report.raw_reference_logged);
     }
 
     #[test]
