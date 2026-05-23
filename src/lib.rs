@@ -3609,29 +3609,59 @@ fn check_signing_key_file_permissions() -> ReadinessCheck {
 fn check_signing_key_file_permissions_path(path: &Path) -> ReadinessCheck {
     use std::os::unix::fs::PermissionsExt;
 
-    match fs::metadata(path) {
-        Ok(metadata) => {
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode & 0o077 == 0 {
-                readiness_check(
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    match (fs::metadata(path), fs::metadata(parent)) {
+        (Ok(metadata), Ok(parent_metadata)) => {
+            let file_mode = metadata.permissions().mode() & 0o777;
+            if !metadata.is_file() {
+                return readiness_check(
                     "signing key file mode",
-                    ReadinessStatus::Pass,
-                    format!("configured signing key file mode {mode:03o} is owner-only"),
-                )
-            } else {
-                readiness_check(
+                    ReadinessStatus::Fail,
+                    "configured signing key path is not a file",
+                );
+            }
+            if file_mode & 0o077 != 0 {
+                return readiness_check(
                     "signing key file mode",
                     ReadinessStatus::Fail,
                     format!(
-                        "configured signing key file mode {mode:03o} allows group/other access"
+                        "configured signing key file mode {file_mode:03o} allows group/other access"
                     ),
-                )
+                );
             }
+
+            let parent_mode = parent_metadata.permissions().mode() & 0o777;
+            if parent_mode & 0o022 != 0 {
+                return readiness_check(
+                    "signing key file mode",
+                    ReadinessStatus::Fail,
+                    format!(
+                        "configured signing key parent directory mode {parent_mode:03o} allows group/other writes"
+                    ),
+                );
+            }
+
+            readiness_check(
+                "signing key file mode",
+                ReadinessStatus::Pass,
+                format!(
+                    "configured signing key file mode {file_mode:03o} and parent directory mode {parent_mode:03o} are custody-safe"
+                ),
+            )
         }
-        Err(_) => readiness_check(
+        (Err(_), _) => readiness_check(
             "signing key file mode",
             ReadinessStatus::Fail,
             "configured signing key file is not readable",
+        ),
+        (Ok(_), Err(_)) => readiness_check(
+            "signing key file mode",
+            ReadinessStatus::Fail,
+            "configured signing key parent directory is not readable",
         ),
     }
 }
@@ -5951,7 +5981,10 @@ mod tests {
     fn signing_key_file_mode_check_requires_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = temp_path("agentk-key-mode", "key");
+        let dir = temp_path("agentk-key-mode", "dir");
+        fs::create_dir(&dir).expect("key dir should create");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("dir mode should set");
+        let path = dir.join("key");
         fs::write(&path, format!("{}\n", hex::encode([0x43_u8; 32]))).expect("key should write");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode should set");
 
@@ -5959,7 +5992,9 @@ mod tests {
 
         assert_eq!(check.status, ReadinessStatus::Pass);
         assert!(check.detail.contains("600"));
+        assert!(check.detail.contains("700"));
         assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
+        assert!(!check.detail.contains(dir.to_string_lossy().as_ref()));
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("mode should set");
         let check = check_signing_key_file_permissions_path(&path);
@@ -5967,8 +6002,20 @@ mod tests {
         assert_eq!(check.status, ReadinessStatus::Fail);
         assert!(check.detail.contains("644"));
         assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
+        assert!(!check.detail.contains(dir.to_string_lossy().as_ref()));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode should set");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).expect("dir mode should set");
+        let check = check_signing_key_file_permissions_path(&path);
+
+        assert_eq!(check.status, ReadinessStatus::Fail);
+        assert!(check.detail.contains("parent directory"));
+        assert!(check.detail.contains("777"));
+        assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
+        assert!(!check.detail.contains(dir.to_string_lossy().as_ref()));
 
         let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(dir);
     }
 
     #[test]
