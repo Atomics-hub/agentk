@@ -2194,6 +2194,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_policy_profiles(&root),
         check_security_disclosure(&root),
         check_signing_key_source(),
+        check_signing_key_file_permissions(),
         check_signing_key_disclaimer(&root),
         check_sensitive_patterns(&root),
     ];
@@ -2760,6 +2761,57 @@ fn env_flag_enabled(value: Option<&str>) -> bool {
     value
         .map(str::trim)
         .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
+}
+
+fn check_signing_key_file_permissions() -> ReadinessCheck {
+    match env::var(SIGNING_KEY_FILE_ENV) {
+        Ok(path) => check_signing_key_file_permissions_path(Path::new(&path)),
+        Err(_) => readiness_check(
+            "signing key file mode",
+            ReadinessStatus::Pass,
+            "no signing key file configured",
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn check_signing_key_file_permissions_path(path: &Path) -> ReadinessCheck {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode & 0o077 == 0 {
+                readiness_check(
+                    "signing key file mode",
+                    ReadinessStatus::Pass,
+                    format!("configured signing key file mode {mode:03o} is owner-only"),
+                )
+            } else {
+                readiness_check(
+                    "signing key file mode",
+                    ReadinessStatus::Fail,
+                    format!(
+                        "configured signing key file mode {mode:03o} allows group/other access"
+                    ),
+                )
+            }
+        }
+        Err(_) => readiness_check(
+            "signing key file mode",
+            ReadinessStatus::Fail,
+            "configured signing key file is not readable",
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+fn check_signing_key_file_permissions_path(_path: &Path) -> ReadinessCheck {
+    readiness_check(
+        "signing key file mode",
+        ReadinessStatus::Warn,
+        "signing key file permissions are not checked on this platform",
+    )
 }
 
 fn check_signing_key_disclaimer(root: &Path) -> ReadinessCheck {
@@ -4435,6 +4487,31 @@ mod tests {
         assert_eq!(active.source, SigningKeySource::InvalidFileFallback);
         assert_eq!(check.status, ReadinessStatus::Fail);
         assert!(check.detail.contains(SIGNING_KEY_FILE_ENV));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signing_key_file_mode_check_requires_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("agentk-key-mode", "key");
+        fs::write(&path, format!("{}\n", hex::encode([0x43_u8; 32]))).expect("key should write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode should set");
+
+        let check = check_signing_key_file_permissions_path(&path);
+
+        assert_eq!(check.status, ReadinessStatus::Pass);
+        assert!(check.detail.contains("600"));
+        assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("mode should set");
+        let check = check_signing_key_file_permissions_path(&path);
+
+        assert_eq!(check.status, ReadinessStatus::Fail);
+        assert!(check.detail.contains("644"));
+        assert!(!check.detail.contains(path.to_string_lossy().as_ref()));
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
