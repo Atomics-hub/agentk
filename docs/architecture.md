@@ -130,7 +130,7 @@ Replay modes:
 
 `agentk trace-inspect` is the human review path. It verifies the hash chain, summarizes signature status, and prints one compact row per event. Known hash evidence refs such as `args_sha256`, `descriptor_sha256`, and `response_sha256` are preserved. Any raw input ref is replaced with a fresh `input_sha256` ref in the inspection report.
 
-`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, a brokered secret-handle smoke test, redacted inspect, replay, fork replay, and an MCP server smoke test. It does not configure remotes or push.
+`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, a brokered secret-handle smoke test, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, and an MCP server smoke test. It does not configure remotes or push.
 
 ### MCP Proxy MVP
 

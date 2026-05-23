@@ -2113,6 +2113,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let verify = verify_jsonl(&latest)?;
     let signatures = verify_signatures_jsonl(&latest)?;
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
+    let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
@@ -2159,6 +2160,27 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "{} receipts, {} handles",
                 secret_handle_smoke.receipts_checked, secret_handle_smoke.secret_handles_checked
+            ),
+        ),
+        release_audit_check(
+            "mcp taint flow smoke",
+            if mcp_taint_flow.response_recorded
+                && mcp_taint_flow.response_untrusted
+                && mcp_taint_flow.invoke_blocked
+                && !mcp_taint_flow.raw_response_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "response {}, invoke {}",
+                if mcp_taint_flow.response_untrusted {
+                    "tainted"
+                } else {
+                    "untainted"
+                },
+                mcp_taint_flow.invoke_rule
             ),
         ),
         release_audit_check(
@@ -2234,6 +2256,53 @@ fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> 
     }
 
     verify_event_signatures(kernel.events())
+}
+
+#[derive(Debug)]
+struct McpTaintFlowSmokeReport {
+    response_recorded: bool,
+    response_untrusted: bool,
+    invoke_blocked: bool,
+    invoke_rule: String,
+    raw_response_logged: bool,
+}
+
+fn mcp_taint_flow_smoke() -> Result<McpTaintFlowSmokeReport, AgentKError> {
+    const RAW_TOOL_OUTPUT: &str = "RELEASE_AUDIT_MCP_OUTPUT_SHOULD_NOT_LOG";
+
+    let response = record_mcp_tool_response(McpToolResponseRecordRequest {
+        agent_id: "agent://release-audit".to_string(),
+        tool: "demo.echo".to_string(),
+        labels: BTreeSet::new(),
+        response: serde_json::json!({
+            "content": [{ "type": "text", "text": RAW_TOOL_OUTPUT }],
+            "structuredContent": { "message": RAW_TOOL_OUTPUT },
+            "isError": false
+        }),
+        is_error: false,
+    });
+    let response_labels = response.event.syscall.labels.clone();
+    let invoke = mediate_mcp_tool_request(McpToolRequest {
+        agent_id: "agent://release-audit".to_string(),
+        tool: "demo.echo".to_string(),
+        intent: "attempt to reuse recorded MCP output as tool input".to_string(),
+        labels: response_labels.clone(),
+        capabilities: vec!["tool.invoke:demo.echo".to_string()],
+        arguments: serde_json::json!({
+            "from_response": format!("response_sha256:{}", response.response_hash)
+        }),
+    });
+
+    let serialized = serde_json::to_string(&[response.event.clone(), invoke.event.clone()])?;
+
+    Ok(McpTaintFlowSmokeReport {
+        response_recorded: response.recorded,
+        response_untrusted: response_labels.contains(&Label::Untrusted)
+            && response_labels.contains(&Label::External),
+        invoke_blocked: invoke.event.decision.verdict == Verdict::Deny,
+        invoke_rule: invoke.event.decision.rule,
+        raw_response_logged: serialized.contains(RAW_TOOL_OUTPUT),
+    })
 }
 
 fn check_git_worktree(root: &Path) -> ReleaseAuditCheck {
@@ -3899,6 +3968,17 @@ mod tests {
         assert_eq!(report.receipts_checked, 1);
         assert_eq!(report.secret_handles_checked, 1);
         assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn release_audit_mcp_taint_flow_smoke_blocks_laundered_output() {
+        let report = mcp_taint_flow_smoke().expect("MCP taint flow smoke should run");
+
+        assert!(report.response_recorded);
+        assert!(report.response_untrusted);
+        assert!(report.invoke_blocked);
+        assert_eq!(report.invoke_rule, "tool-tainted-input");
+        assert!(!report.raw_response_logged);
     }
 
     #[test]
