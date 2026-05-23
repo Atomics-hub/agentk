@@ -2497,6 +2497,9 @@ pub struct SignatureVerifyReport {
     pub events_checked: u64,
     pub receipts_checked: u64,
     pub secret_handles_checked: u64,
+    pub public_keys_seen: Vec<String>,
+    pub trusted_public_keys: usize,
+    pub signer_identity_pinned: bool,
     pub ok: bool,
     pub failures: Vec<String>,
 }
@@ -2504,20 +2507,54 @@ pub struct SignatureVerifyReport {
 pub fn verify_signatures_jsonl(
     path: impl AsRef<Path>,
 ) -> Result<SignatureVerifyReport, AgentKError> {
+    verify_signatures_jsonl_with_trusted_keys(path, &[])
+}
+
+pub fn verify_signatures_jsonl_with_trusted_keys(
+    path: impl AsRef<Path>,
+    trusted_public_keys: &[String],
+) -> Result<SignatureVerifyReport, AgentKError> {
     let events = read_events_jsonl(path)?;
-    verify_event_signatures(&events)
+    verify_event_signatures_with_trusted_keys(&events, trusted_public_keys)
 }
 
 pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport, AgentKError> {
+    verify_event_signatures_with_trusted_keys(events, &[])
+}
+
+pub fn verify_event_signatures_with_trusted_keys(
+    events: &[Event],
+    trusted_public_keys: &[String],
+) -> Result<SignatureVerifyReport, AgentKError> {
     verify_events(events)?;
 
+    let mut trusted_key_set = BTreeSet::new();
     let mut receipts_checked = 0_u64;
     let mut secret_handles_checked = 0_u64;
+    let mut public_keys_seen = BTreeSet::new();
     let mut failures = Vec::new();
+
+    for trusted_key in trusted_public_keys {
+        match normalized_public_key_hex(trusted_key) {
+            Some(public_key) => {
+                trusted_key_set.insert(public_key);
+            }
+            None => failures
+                .push("trusted public key must be a 32-byte hex Ed25519 public key".to_string()),
+        }
+    }
 
     for event in events {
         if let Some(receipt) = &event.decision.receipt {
             receipts_checked += 1;
+            public_keys_seen.insert(receipt.public_key.clone());
+            failures.extend(validate_trusted_public_key(
+                event.step,
+                "receipt",
+                &receipt.id,
+                &receipt.public_key,
+                &trusted_key_set,
+            ));
             failures.extend(validate_receipt_binding(event, receipt));
             if receipt.algorithm != PROOF_ALGORITHM {
                 failures.push(format!(
@@ -2535,6 +2572,14 @@ pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport
 
         if let Some(handle) = &event.decision.secret_handle {
             secret_handles_checked += 1;
+            public_keys_seen.insert(handle.public_key.clone());
+            failures.extend(validate_trusted_public_key(
+                event.step,
+                "secret handle",
+                &handle.id,
+                &handle.public_key,
+                &trusted_key_set,
+            ));
             failures.extend(validate_secret_handle_binding(
                 event,
                 handle,
@@ -2558,9 +2603,35 @@ pub fn verify_event_signatures(events: &[Event]) -> Result<SignatureVerifyReport
         events_checked: events.len() as u64,
         receipts_checked,
         secret_handles_checked,
+        public_keys_seen: public_keys_seen.into_iter().collect(),
+        trusted_public_keys: trusted_key_set.len(),
+        signer_identity_pinned: !trusted_key_set.is_empty(),
         ok: failures.is_empty(),
         failures,
     })
+}
+
+fn validate_trusted_public_key(
+    step: u64,
+    proof_kind: &str,
+    proof_id: &str,
+    public_key: &str,
+    trusted_public_keys: &BTreeSet<String>,
+) -> Vec<String> {
+    if trusted_public_keys.is_empty() {
+        return Vec::new();
+    }
+
+    match normalized_public_key_hex(public_key) {
+        Some(public_key) if trusted_public_keys.contains(&public_key) => Vec::new(),
+        Some(public_key) => vec![format!(
+            "step {step} {proof_kind} {proof_id} uses untrusted public key {}",
+            &public_key[..16]
+        )],
+        None => vec![format!(
+            "step {step} {proof_kind} {proof_id} uses malformed public key"
+        )],
+    }
 }
 
 fn validate_receipt_binding(event: &Event, receipt: &CapabilityReceipt) -> Vec<String> {
@@ -2877,6 +2948,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
 
     let verify = verify_jsonl(&latest)?;
     let signatures = verify_signatures_jsonl(&latest)?;
+    let pinned_signatures =
+        verify_signatures_jsonl_with_trusted_keys(&latest, &signatures.public_keys_seen)?;
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
     let secret_refs =
         secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
@@ -2927,6 +3000,22 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "{} receipts, {} handles",
                 signatures.receipts_checked, signatures.secret_handles_checked
+            ),
+        ),
+        release_audit_check(
+            "verify signer pinning",
+            if pinned_signatures.ok
+                && pinned_signatures.signer_identity_pinned
+                && !pinned_signatures.public_keys_seen.is_empty()
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} signers, {} trusted",
+                pinned_signatures.public_keys_seen.len(),
+                pinned_signatures.trusted_public_keys
             ),
         ),
         release_audit_check(
@@ -4330,6 +4419,13 @@ fn signing_key_from_hex(value: &str) -> Option<SigningKey> {
     let decoded = hex::decode(value.trim()).ok()?;
     let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
     Some(SigningKey::from_bytes(&bytes))
+}
+
+fn normalized_public_key_hex(value: &str) -> Option<String> {
+    let decoded = hex::decode(value.trim()).ok()?;
+    let bytes: [u8; 32] = decoded.as_slice().try_into().ok()?;
+    VerifyingKey::from_bytes(&bytes).ok()?;
+    Some(hex::encode(bytes))
 }
 
 pub fn verify_signed_proof(proof: &str, signature: &str, public_key: &str) -> bool {
@@ -5857,7 +5953,60 @@ mod tests {
         assert_eq!(report.events_checked, 4);
         assert_eq!(report.receipts_checked, 2);
         assert_eq!(report.secret_handles_checked, 0);
+        assert_eq!(report.public_keys_seen.len(), 1);
+        assert_eq!(report.trusted_public_keys, 0);
+        assert!(!report.signer_identity_pinned);
         assert!(report.failures.is_empty());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn signature_report_can_pin_trusted_public_keys() {
+        let path = temp_path("agentk-signature-pinning", "jsonl");
+        run_poisoned_webpage_demo(&path).expect("demo should run");
+        let unpinned = verify_signatures_jsonl(&path).expect("signatures should verify");
+        let trusted_key = unpinned.public_keys_seen[0].clone();
+
+        let pinned =
+            verify_signatures_jsonl_with_trusted_keys(&path, std::slice::from_ref(&trusted_key))
+                .expect("pinned verification should run");
+
+        assert!(pinned.ok, "{:?}", pinned.failures);
+        assert_eq!(pinned.public_keys_seen, vec![trusted_key]);
+        assert_eq!(pinned.trusted_public_keys, 1);
+        assert!(pinned.signer_identity_pinned);
+
+        let wrong_key = hex::encode(
+            SigningKey::from_bytes(&[0x44_u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let rejected = verify_signatures_jsonl_with_trusted_keys(&path, &[wrong_key])
+            .expect("pinned verification should run");
+
+        assert!(!rejected.ok);
+        assert_eq!(rejected.trusted_public_keys, 1);
+        assert!(rejected.signer_identity_pinned);
+        assert!(
+            rejected
+                .failures
+                .iter()
+                .any(|failure| failure.contains("untrusted public key"))
+        );
+
+        let malformed = verify_signatures_jsonl_with_trusted_keys(&path, &["not-hex".to_string()])
+            .expect("pinned verification should run");
+
+        assert!(!malformed.ok);
+        assert_eq!(malformed.trusted_public_keys, 0);
+        assert!(!malformed.signer_identity_pinned);
+        assert!(
+            malformed
+                .failures
+                .iter()
+                .any(|failure| failure.contains("trusted public key must be"))
+        );
 
         let _ = fs::remove_file(path);
     }

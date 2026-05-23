@@ -5,7 +5,8 @@ use agentk::{
     replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
     signing_key_status, verify_jsonl, verify_signatures_jsonl,
-    verify_signing_key_rotation_manifest_file, write_latest_copy,
+    verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
+    write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
@@ -36,6 +37,9 @@ enum Command {
     VerifySignatures {
         /// Path to a JSONL flight log.
         path: PathBuf,
+        /// Expected Ed25519 public signing key hex. Repeat to allow rotated keys.
+        #[arg(long)]
+        trusted_public_key: Vec<String>,
     },
     /// Inspect a flight log with redacted hash-first evidence summaries.
     TraceInspect {
@@ -185,7 +189,10 @@ fn run() -> Result<(), AgentKError> {
     match cli.command.unwrap_or(Command::Demo { json: false }) {
         Command::Demo { json } => demo(json),
         Command::Verify { path } => verify(path),
-        Command::VerifySignatures { path } => verify_signatures(path),
+        Command::VerifySignatures {
+            path,
+            trusted_public_key,
+        } => verify_signatures(path, trusted_public_key),
         Command::TraceInspect { path, json } => trace_inspect(path, json),
         Command::Replay { path } => replay(path),
         Command::ForkReplay { path, policy, json } => fork_replay(path, policy, json),
@@ -283,12 +290,19 @@ fn verify(path: PathBuf) -> Result<(), AgentKError> {
     Ok(())
 }
 
-fn verify_signatures(path: PathBuf) -> Result<(), AgentKError> {
-    let report = verify_signatures_jsonl(&path)?;
+fn verify_signatures(path: PathBuf, trusted_public_keys: Vec<String>) -> Result<(), AgentKError> {
+    let report = if trusted_public_keys.is_empty() {
+        verify_signatures_jsonl(&path)?
+    } else {
+        verify_signatures_jsonl_with_trusted_keys(&path, &trusted_public_keys)?
+    };
     println!("AgentK signature verification complete");
     println!("events    {}", report.events_checked);
     println!("receipts  {}", report.receipts_checked);
     println!("handles   {}", report.secret_handles_checked);
+    println!("signers   {}", report.public_keys_seen.len());
+    println!("trusted   {}", report.trusted_public_keys);
+    println!("pinned    {}", report.signer_identity_pinned);
     println!("ok        {}", report.ok);
 
     for failure in &report.failures {

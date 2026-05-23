@@ -67,6 +67,12 @@ Verify receipt and secret-handle signatures:
 cargo run -- verify-signatures .agentk/runs/latest.jsonl
 ```
 
+Pin verification to an expected public signing key:
+
+```sh
+cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
+```
+
 Inspect the latest flight log without printing raw input refs:
 
 ```sh
@@ -228,7 +234,7 @@ This repo currently includes:
 - a redacted secret-reference store availability command,
 - a hash-chained flight recorder,
 - log verification,
-- receipt and secret-handle signature verification,
+- receipt and secret-handle signature verification with optional trusted-key pinning,
 - redacted flight-log inspection for human review,
 - deterministic side-effect-free replay,
 - fork replay with policy comparison,
@@ -277,7 +283,7 @@ Implemented today:
 - tainted tool-input blocking at `tool.invoke` boundaries,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
