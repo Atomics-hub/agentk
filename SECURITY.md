@@ -49,6 +49,8 @@ Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates or production-like checks to
 
 `agentk key-rotate-verify --manifest <path>` verifies the manifest payload hash and signature.
 
+The current signing-key lifecycle runbook lives in `docs/key-lifecycle.md`.
+
 ## Maintainer Rules
 
 For every public change:

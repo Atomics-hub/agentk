@@ -187,6 +187,8 @@ signer_public_key
 
 The manifest does not include private key material. It is a local prototype for auditability, not a full production key-management system.
 
+Operational signing-key generation, custody, activation, rotation, retirement, revocation, and incident response rules live in `docs/key-lifecycle.md`.
+
 `agentk key-rotate-verify` recomputes the manifest payload hash and verifies the Ed25519 signature against the previous public key.
 
 ## First Demo
