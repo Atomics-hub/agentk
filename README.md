@@ -208,6 +208,7 @@ This repo currently includes:
 - Ed25519-signed development secret handles with expiry and receipt binding,
 - target-only dummy secret registrations for local tests,
 - redacted external secret reference records that can issue handles without serializing provider refs,
+- a metadata-only secret store adapter boundary that checks external reference availability without returning secret bytes,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,
