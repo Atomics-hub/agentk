@@ -59,6 +59,7 @@ Status: in progress.
 - [x] Stream MCP JSON-RPC stdin with bounded per-line reads.
 - [x] Bound `mcp-stdio` and `mcp-lines` stdin handling.
 - [x] Enforce MCP initialize-before-tool lifecycle ordering.
+- [x] Validate MCP `initialize` protocol version before exposing tools.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.

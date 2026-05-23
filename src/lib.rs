@@ -1881,8 +1881,17 @@ fn handle_mcp_json_rpc_message(
                     Some(serde_json::json!({ "detail": "server is already initialized" })),
                 ))
             } else {
-                session.initialized = true;
-                Some(jsonrpc_success(id, mcp_initialize_result()))
+                let params = object
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                match validate_mcp_initialize_params(&params) {
+                    Ok(()) => {
+                        session.initialized = true;
+                        Some(jsonrpc_success(id, mcp_initialize_result()))
+                    }
+                    Err(detail) => Some(jsonrpc_invalid_params(id, detail)),
+                }
             }
         }
         "ping" => Some(jsonrpc_success(id, serde_json::json!({}))),
@@ -1904,6 +1913,25 @@ fn handle_mcp_json_rpc_message(
             Some(handle_mcp_tool_call(id, params, &mut session.kernel))
         }
         _ => Some(jsonrpc_error(id, -32601, "Method not found", None)),
+    }
+}
+
+fn validate_mcp_initialize_params(params: &serde_json::Value) -> Result<(), String> {
+    let Some(params) = params.as_object() else {
+        return Err("params must be an object".to_string());
+    };
+
+    match params
+        .get("protocolVersion")
+        .and_then(|value| value.as_str())
+    {
+        Some(MCP_PROTOCOL_VERSION) => Ok(()),
+        Some(_) => Err(format!(
+            "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+        )),
+        None => Err(format!(
+            "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+        )),
     }
 }
 
@@ -3505,15 +3533,17 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_transport_guard.mcp_lines_oversized_rejected
                 && mcp_transport_guard.mcp_stdio_oversized_rejected
                 && mcp_transport_guard.preinit_tool_rejected
+                && mcp_transport_guard.bad_protocol_rejected
                 && mcp_transport_guard.bounded_stdin_not_reflected
                 && mcp_transport_guard.preinit_payload_not_reflected
+                && mcp_transport_guard.bad_protocol_not_reflected
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, preinit {}, redacted {}",
+                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, preinit {}, protocol {}, redacted {}",
                 if mcp_transport_guard.invalid_id_rejected {
                     "rejected"
                 } else {
@@ -3536,9 +3566,15 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 } else {
                     "accepted"
                 },
+                if mcp_transport_guard.bad_protocol_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
                 mcp_transport_guard.invalid_id_not_reflected
                     && mcp_transport_guard.bounded_stdin_not_reflected
                     && mcp_transport_guard.preinit_payload_not_reflected
+                    && mcp_transport_guard.bad_protocol_not_reflected
             ),
         ),
         release_audit_check(
@@ -3769,8 +3805,10 @@ struct McpTransportGuardSmokeReport {
     mcp_lines_oversized_rejected: bool,
     mcp_stdio_oversized_rejected: bool,
     preinit_tool_rejected: bool,
+    bad_protocol_rejected: bool,
     bounded_stdin_not_reflected: bool,
     preinit_payload_not_reflected: bool,
+    bad_protocol_not_reflected: bool,
 }
 
 fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKError> {
@@ -3778,6 +3816,7 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     const RAW_LINES_PAYLOAD: &str = "RELEASE_AUDIT_MCP_LINES_SHOULD_NOT_REFLECT";
     const RAW_STDIO_PAYLOAD: &str = "RELEASE_AUDIT_MCP_STDIO_SHOULD_NOT_REFLECT";
     const RAW_PREINIT_PAYLOAD: &str = "RELEASE_AUDIT_MCP_PREINIT_SHOULD_NOT_REFLECT";
+    const RAW_PROTOCOL_PAYLOAD: &str = "RELEASE_AUDIT_MCP_PROTOCOL_SHOULD_NOT_REFLECT";
 
     let batch = serde_json::json!([
         { "jsonrpc": "2.0", "id": 1, "method": "ping" }
@@ -3853,6 +3892,17 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     });
     let preinit_output = mcp_server_json_lines(&preinit_tool_call.to_string())?;
     let preinit_response: serde_json::Value = serde_json::from_str(preinit_output.trim())?;
+    let bad_protocol_initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": RAW_PROTOCOL_PAYLOAD
+        }
+    });
+    let bad_protocol_output = mcp_server_json_lines(&bad_protocol_initialize.to_string())?;
+    let bad_protocol_response: serde_json::Value =
+        serde_json::from_str(bad_protocol_output.trim())?;
 
     Ok(McpTransportGuardSmokeReport {
         invalid_id_rejected: responses.first().is_some_and(|response| {
@@ -3876,10 +3926,16 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
         mcp_stdio_oversized_rejected: stdio_error.contains("MCP request limit"),
         preinit_tool_rejected: preinit_response["error"]["code"] == serde_json::json!(-32002)
             && preinit_response["error"]["message"] == "Server not initialized",
+        bad_protocol_rejected: bad_protocol_response["error"]["code"] == serde_json::json!(-32602)
+            && bad_protocol_response["error"]["data"]["detail"]
+                == serde_json::json!(format!(
+                    "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+                )),
         bounded_stdin_not_reflected: !lines_error.contains(RAW_LINES_PAYLOAD)
             && !String::from_utf8_lossy(&lines_output).contains(RAW_LINES_PAYLOAD)
             && !stdio_error.contains(RAW_STDIO_PAYLOAD),
         preinit_payload_not_reflected: !preinit_output.contains(RAW_PREINIT_PAYLOAD),
+        bad_protocol_not_reflected: !bad_protocol_output.contains(RAW_PROTOCOL_PAYLOAD),
     })
 }
 
@@ -7195,6 +7251,71 @@ effect = "allow""#,
     }
 
     #[test]
+    fn mcp_server_rejects_initialize_without_protocol_version() {
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32602));
+        assert_eq!(
+            response["error"]["data"]["detail"],
+            serde_json::json!(format!(
+                "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+            ))
+        );
+    }
+
+    #[test]
+    fn mcp_server_rejects_unsupported_protocol_without_reflecting_value() {
+        let raw_protocol = "MCP_PROTOCOL_PAYLOAD_SHOULD_NOT_REFLECT";
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{raw_protocol}"}}}}"#
+        );
+        let output = mcp_server_json_lines(&input).expect("server should respond");
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be JSON");
+
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32602));
+        assert_eq!(
+            response["error"]["data"]["detail"],
+            serde_json::json!(format!(
+                "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+            ))
+        );
+        assert!(!output.contains(raw_protocol));
+    }
+
+    #[test]
+    fn mcp_server_failed_initialize_does_not_mark_session_initialized() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"unsupported"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}
+"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 4);
+        assert_eq!(responses[0]["error"]["code"], serde_json::json!(-32602));
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            responses[2]["result"]["protocolVersion"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            responses[3]["result"]["tools"][0]["name"],
+            serde_json::json!(MCP_MEDIATE_TOOL)
+        );
+    }
+
+    #[test]
     fn mcp_server_json_stream_matches_json_lines_session() {
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
@@ -7328,8 +7449,10 @@ effect = "allow""#,
         assert!(report.mcp_lines_oversized_rejected);
         assert!(report.mcp_stdio_oversized_rejected);
         assert!(report.preinit_tool_rejected);
+        assert!(report.bad_protocol_rejected);
         assert!(report.bounded_stdin_not_reflected);
         assert!(report.preinit_payload_not_reflected);
+        assert!(report.bad_protocol_not_reflected);
     }
 
     #[test]

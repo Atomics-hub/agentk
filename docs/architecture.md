@@ -161,7 +161,8 @@ and tests.
 `initialize`, `ping`, `tools/list`, and `tools/call`; rejects batches,
 oversized JSON-RPC lines, and invalid request ids without reflecting raw id
 payloads; streams stdin with bounded per-line reads; requires `initialize`
-before tool listing or calls; and exposes three AgentK tools:
+with the supported protocol version before tool listing or calls; and exposes
+three AgentK tools:
 
 ```txt
 agentk.mediate
