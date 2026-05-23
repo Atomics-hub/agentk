@@ -152,7 +152,7 @@ agentk.record_response
 
 `agentk.mediate_descriptor` converts an MCP `Tool` descriptor into a `tool.describe` syscall. AgentK hashes the full descriptor, hashes input/output schemas separately, marks suspicious descriptor text as `poisoned-suspect`, and does not put raw descriptor text into event inputs.
 
-`agentk.record_response` converts an MCP tool result into a `tool.response` syscall. AgentK records a response hash and labels, but does not serialize raw tool output into event inputs.
+`agentk.record_response` converts an MCP tool result into a `tool.response` syscall. AgentK records a response hash, marks MCP tool output as `untrusted` and `external`, preserves caller-supplied labels, marks error responses as `poisoned-suspect`, and does not serialize raw tool output into event inputs.
 
 This is useful for integration experiments, but it is not a full MCP proxy and it still never executes the underlying tool.
 

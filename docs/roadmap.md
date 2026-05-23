@@ -41,8 +41,8 @@ Status: in progress.
 - [x] Expose AgentK as a minimal MCP JSON-RPC stdio server.
 - [x] Mediate tool descriptors.
 - [x] Record MCP response hashes.
+- [x] Attach labels to tool outputs.
 - [ ] Build a complete production MCP proxy/server transport.
-- [ ] Attach labels to tool outputs.
 - [ ] Block tainted flows at tool-call boundaries.
 
 ## Milestone 4: Deterministic Replay
