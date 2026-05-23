@@ -7,7 +7,7 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ const MCP_MEDIATE_TOOL: &str = "agentk.mediate";
 const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const MCP_JSON_RPC_MAX_ID_BYTES: usize = 128;
-const MCP_JSON_RPC_MAX_LINE_BYTES: usize = 64 * 1024;
+const MCP_STDIN_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -1605,19 +1605,79 @@ pub fn mediate_mcp_json_lines(input: &str) -> Result<String, AgentKError> {
     let mut kernel = None::<AgentKernel>;
 
     for (index, line) in input.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+        if let Some(report) = handle_mcp_tool_request_line(
+            line.as_bytes(),
+            line.len() > MCP_STDIN_MAX_MESSAGE_BYTES,
+            index + 1,
+            &mut kernel,
+        )? {
+            out.push_str(&serde_json::to_string(&report)?);
+            out.push('\n');
         }
-
-        let request: McpToolRequest = serde_json::from_str(line).map_err(|error| {
-            AgentKError::InvalidMcpRequest(format!("line {}: {error}", index + 1))
-        })?;
-        let report = mediate_mcp_tool_request_in_session(request, &mut kernel);
-        out.push_str(&serde_json::to_string(&report)?);
-        out.push('\n');
     }
 
     Ok(out)
+}
+
+pub fn mediate_mcp_json_stream<R, W>(mut reader: R, mut writer: W) -> Result<(), AgentKError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut kernel = None::<AgentKernel>;
+    let mut line_number = 0usize;
+
+    while let Some(line) = read_mcp_bounded_line(&mut reader)? {
+        line_number += 1;
+        if let Some(report) =
+            handle_mcp_tool_request_line(&line.bytes, line.too_long, line_number, &mut kernel)?
+        {
+            serde_json::to_writer(&mut writer, &report)?;
+            writer.write_all(b"\n")?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn mediate_mcp_json_reader<R: Read>(reader: R) -> Result<McpProxyReport, AgentKError> {
+    let request = read_bounded_mcp_tool_request(reader)?;
+    Ok(mediate_mcp_tool_request(request))
+}
+
+fn read_bounded_mcp_tool_request<R: Read>(reader: R) -> Result<McpToolRequest, AgentKError> {
+    let mut input = Vec::new();
+    let mut limited = reader.take((MCP_STDIN_MAX_MESSAGE_BYTES + 1) as u64);
+    limited.read_to_end(&mut input)?;
+
+    if input.len() > MCP_STDIN_MAX_MESSAGE_BYTES {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "stdin request exceeds {MCP_STDIN_MAX_MESSAGE_BYTES} byte MCP request limit"
+        )));
+    }
+
+    serde_json::from_slice(&input).map_err(AgentKError::Json)
+}
+
+fn handle_mcp_tool_request_line(
+    line: &[u8],
+    too_long: bool,
+    line_number: usize,
+    kernel: &mut Option<AgentKernel>,
+) -> Result<Option<McpProxyReport>, AgentKError> {
+    if too_long {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "line {line_number}: message exceeds {MCP_STDIN_MAX_MESSAGE_BYTES} byte MCP line limit"
+        )));
+    }
+
+    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+
+    let request: McpToolRequest = serde_json::from_slice(line)
+        .map_err(|error| AgentKError::InvalidMcpRequest(format!("line {line_number}: {error}")))?;
+    Ok(Some(mediate_mcp_tool_request_in_session(request, kernel)))
 }
 
 pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
@@ -1627,7 +1687,7 @@ pub fn mcp_server_json_lines(input: &str) -> Result<String, AgentKError> {
     for line in input.lines() {
         if let Some(response) = handle_mcp_json_rpc_line(
             line.as_bytes(),
-            line.len() > MCP_JSON_RPC_MAX_LINE_BYTES,
+            line.len() > MCP_STDIN_MAX_MESSAGE_BYTES,
             &mut kernel,
         ) {
             out.push_str(&serde_json::to_string(&response)?);
@@ -1645,7 +1705,7 @@ where
 {
     let mut kernel = None::<AgentKernel>;
 
-    while let Some(line) = read_mcp_json_rpc_line(&mut reader)? {
+    while let Some(line) = read_mcp_bounded_line(&mut reader)? {
         if let Some(response) = handle_mcp_json_rpc_line(&line.bytes, line.too_long, &mut kernel) {
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
@@ -1656,14 +1716,14 @@ where
 }
 
 #[derive(Debug)]
-struct McpJsonRpcLine {
+struct McpBoundedLine {
     bytes: Vec<u8>,
     too_long: bool,
 }
 
-fn read_mcp_json_rpc_line<R: BufRead>(
+fn read_mcp_bounded_line<R: BufRead>(
     reader: &mut R,
-) -> Result<Option<McpJsonRpcLine>, AgentKError> {
+) -> Result<Option<McpBoundedLine>, AgentKError> {
     let mut bytes = Vec::new();
     let mut too_long = false;
 
@@ -1673,7 +1733,7 @@ fn read_mcp_json_rpc_line<R: BufRead>(
             if bytes.is_empty() && !too_long {
                 return Ok(None);
             }
-            return Ok(Some(McpJsonRpcLine { bytes, too_long }));
+            return Ok(Some(McpBoundedLine { bytes, too_long }));
         }
 
         let newline_at = available.iter().position(|byte| *byte == b'\n');
@@ -1681,7 +1741,7 @@ fn read_mcp_json_rpc_line<R: BufRead>(
         let content_len = newline_at.unwrap_or(consume);
 
         if !too_long {
-            let remaining = MCP_JSON_RPC_MAX_LINE_BYTES.saturating_sub(bytes.len());
+            let remaining = MCP_STDIN_MAX_MESSAGE_BYTES.saturating_sub(bytes.len());
             if content_len <= remaining {
                 bytes.extend_from_slice(&available[..content_len]);
             } else {
@@ -1696,7 +1756,7 @@ fn read_mcp_json_rpc_line<R: BufRead>(
             if bytes.ends_with(b"\r") {
                 bytes.pop();
             }
-            return Ok(Some(McpJsonRpcLine { bytes, too_long }));
+            return Ok(Some(McpBoundedLine { bytes, too_long }));
         }
     }
 }
@@ -1732,7 +1792,7 @@ fn jsonrpc_line_limit_error() -> serde_json::Value {
         "Invalid Request",
         Some(serde_json::json!({
             "detail": format!(
-                "message exceeds {MCP_JSON_RPC_MAX_LINE_BYTES} byte JSON-RPC line limit"
+                "message exceeds {MCP_STDIN_MAX_MESSAGE_BYTES} byte JSON-RPC line limit"
             )
         })),
     )
@@ -3408,13 +3468,16 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_transport_guard.invalid_id_not_reflected
                 && mcp_transport_guard.batch_rejected
                 && mcp_transport_guard.oversized_line_rejected
+                && mcp_transport_guard.mcp_lines_oversized_rejected
+                && mcp_transport_guard.mcp_stdio_oversized_rejected
+                && mcp_transport_guard.bounded_stdin_not_reflected
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "invalid id {}, batch {}, oversized {}, redacted {}",
+                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, redacted {}",
                 if mcp_transport_guard.invalid_id_rejected {
                     "rejected"
                 } else {
@@ -3430,7 +3493,10 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 } else {
                     "accepted"
                 },
+                mcp_transport_guard.mcp_lines_oversized_rejected
+                    && mcp_transport_guard.mcp_stdio_oversized_rejected,
                 mcp_transport_guard.invalid_id_not_reflected
+                    && mcp_transport_guard.bounded_stdin_not_reflected
             ),
         ),
         release_audit_check(
@@ -3658,10 +3724,15 @@ struct McpTransportGuardSmokeReport {
     invalid_id_not_reflected: bool,
     batch_rejected: bool,
     oversized_line_rejected: bool,
+    mcp_lines_oversized_rejected: bool,
+    mcp_stdio_oversized_rejected: bool,
+    bounded_stdin_not_reflected: bool,
 }
 
 fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKError> {
     const RAW_ID_PAYLOAD: &str = "RELEASE_AUDIT_MCP_ID_SHOULD_NOT_REFLECT";
+    const RAW_LINES_PAYLOAD: &str = "RELEASE_AUDIT_MCP_LINES_SHOULD_NOT_REFLECT";
+    const RAW_STDIO_PAYLOAD: &str = "RELEASE_AUDIT_MCP_STDIO_SHOULD_NOT_REFLECT";
 
     let batch = serde_json::json!([
         { "jsonrpc": "2.0", "id": 1, "method": "ping" }
@@ -3673,7 +3744,7 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     });
     let oversized = format!(
         r#"{{"jsonrpc":"2.0","id":2,"method":"ping","params":{{"pad":"{}"}}}}"#,
-        "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES)
+        "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES)
     );
     let input = format!("{invalid_id}\n{batch}\n{oversized}\n");
 
@@ -3685,6 +3756,40 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
+    let lines_request = serde_json::json!({
+        "agent_id": "agent://release-audit",
+        "tool": "demo.echo",
+        "intent": "oversized MCP lines guard",
+        "labels": ["trusted"],
+        "capabilities": ["tool.invoke:demo.echo"],
+        "arguments": {
+            "pad": "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES),
+            "secret": RAW_LINES_PAYLOAD
+        }
+    })
+    .to_string();
+    let mut lines_output = Vec::new();
+    let lines_error = mediate_mcp_json_stream(
+        std::io::Cursor::new(lines_request.as_bytes()),
+        &mut lines_output,
+    )
+    .expect_err("oversized MCP lines smoke should fail")
+    .to_string();
+    let stdio_request = serde_json::json!({
+        "agent_id": "agent://release-audit",
+        "tool": "demo.echo",
+        "intent": "oversized MCP stdio guard",
+        "labels": ["trusted"],
+        "capabilities": ["tool.invoke:demo.echo"],
+        "arguments": {
+            "pad": "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES),
+            "secret": RAW_STDIO_PAYLOAD
+        }
+    })
+    .to_string();
+    let stdio_error = mediate_mcp_json_reader(std::io::Cursor::new(stdio_request))
+        .expect_err("oversized MCP stdio smoke should fail")
+        .to_string();
 
     Ok(McpTransportGuardSmokeReport {
         invalid_id_rejected: responses.first().is_some_and(|response| {
@@ -3703,6 +3808,12 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
                     .as_str()
                     .is_some_and(|detail| detail.contains("JSON-RPC line limit"))
         }),
+        mcp_lines_oversized_rejected: lines_error.contains("MCP line limit")
+            && lines_output.is_empty(),
+        mcp_stdio_oversized_rejected: stdio_error.contains("MCP request limit"),
+        bounded_stdin_not_reflected: !lines_error.contains(RAW_LINES_PAYLOAD)
+            && !String::from_utf8_lossy(&lines_output).contains(RAW_LINES_PAYLOAD)
+            && !stdio_error.contains(RAW_STDIO_PAYLOAD),
     })
 }
 
@@ -6813,6 +6924,97 @@ effect = "allow""#,
     }
 
     #[test]
+    fn mcp_json_stream_matches_line_mediation() {
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "streamed",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": { "message": "streamed" }
+        });
+        let input = format!("{request}\n\n{request}\n");
+        let expected = mediate_mcp_json_lines(&input).expect("line mediation should work");
+        let mut output = Vec::new();
+
+        mediate_mcp_json_stream(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("stream mediation should work");
+
+        assert_eq!(
+            String::from_utf8(output).expect("stream output should be UTF-8"),
+            expected
+        );
+    }
+
+    #[test]
+    fn mcp_json_stream_rejects_oversized_lines_without_reflecting_payload() {
+        let raw_payload = "MCP_LINES_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "oversized",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": {
+                "pad": "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES),
+                "secret": raw_payload
+            }
+        })
+        .to_string();
+        let mut output = Vec::new();
+
+        let error = mediate_mcp_json_stream(std::io::Cursor::new(request.as_bytes()), &mut output)
+            .expect_err("oversized MCP line should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("MCP line limit"));
+        assert!(!message.contains(raw_payload));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn mcp_stdio_reader_mediates_one_bounded_request() {
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "single stdin request",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": { "message": "bounded" }
+        });
+
+        let report = mediate_mcp_json_reader(std::io::Cursor::new(request.to_string()))
+            .expect("bounded stdin request should mediate");
+
+        assert!(!report.executed);
+        assert_eq!(report.event.decision.verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn mcp_stdio_reader_rejects_oversized_request_without_reflecting_payload() {
+        let raw_payload = "MCP_STDIO_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
+        let request = serde_json::json!({
+            "agent_id": "agent://test",
+            "tool": "demo.echo",
+            "intent": "oversized stdin",
+            "labels": ["trusted"],
+            "capabilities": ["tool.invoke:demo.echo"],
+            "arguments": {
+                "pad": "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES),
+                "secret": raw_payload
+            }
+        })
+        .to_string();
+
+        let error = mediate_mcp_json_reader(std::io::Cursor::new(request))
+            .expect_err("oversized stdin request should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("MCP request limit"));
+        assert!(!message.contains(raw_payload));
+    }
+
+    #[test]
     fn mcp_server_json_rpc_lists_and_calls_agentk_tool() {
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
@@ -6891,7 +7093,7 @@ effect = "allow""#,
         let raw_payload = "MCP_STREAM_OVERSIZED_PAYLOAD_SHOULD_NOT_REFLECT";
         let input = format!(
             r#"{{"jsonrpc":"2.0","id":7,"method":"ping","params":{{"pad":"{}","secret":"{raw_payload}"}}}}"#,
-            "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES)
+            "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES)
         );
         let mut output = Vec::new();
 
@@ -6967,13 +7169,13 @@ effect = "allow""#,
             "id": 7,
             "method": "ping",
             "params": {
-                "pad": "x".repeat(MCP_JSON_RPC_MAX_LINE_BYTES),
+                "pad": "x".repeat(MCP_STDIN_MAX_MESSAGE_BYTES),
                 "secret": raw_payload
             }
         })
         .to_string();
 
-        assert!(line.len() > MCP_JSON_RPC_MAX_LINE_BYTES);
+        assert!(line.len() > MCP_STDIN_MAX_MESSAGE_BYTES);
 
         let output = mcp_server_json_lines(&line).expect("server should respond");
         let response: serde_json::Value =
@@ -6998,6 +7200,9 @@ effect = "allow""#,
         assert!(report.invalid_id_not_reflected);
         assert!(report.batch_rejected);
         assert!(report.oversized_line_rejected);
+        assert!(report.mcp_lines_oversized_rejected);
+        assert!(report.mcp_stdio_oversized_rejected);
+        assert!(report.bounded_stdin_not_reflected);
     }
 
     #[test]

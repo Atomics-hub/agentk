@@ -149,9 +149,13 @@ The current MCP proxy command reads one MCP-shaped JSON request, converts it to 
 
 It does not execute the tool.
 
-`agentk mcp-stdio` performs the same mediation over stdin/stdout for a single JSON request. This is still a prototype transport, not a complete MCP server.
+`agentk mcp-stdio` performs the same mediation over stdin/stdout for a single
+bounded JSON request. This is still a prototype transport, not a complete MCP
+server.
 
-`agentk mcp-lines` accepts newline-delimited JSON requests on stdin and emits newline-delimited mediation reports. This is useful for simple adapters and tests.
+`agentk mcp-lines` streams bounded newline-delimited JSON requests on stdin and
+emits newline-delimited mediation reports. This is useful for simple adapters
+and tests.
 
 `agentk mcp-server` is a minimal MCP JSON-RPC stdio server. It handles
 `initialize`, `ping`, `tools/list`, and `tools/call`; rejects batches,
