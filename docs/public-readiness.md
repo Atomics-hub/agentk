@@ -33,6 +33,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret FD tests prove external secret provider refs are redacted from broker debug output.
 - [ ] Secret FD tests prove external refs without a configured store do not mint handles by default.
 - [ ] Secret store adapter tests prove unsupported providers are not looked up.
+- [ ] Secret store adapter tests prove multiple provider-scoped stores can coexist.
 - [ ] Secret store adapter tests prove unavailable external refs do not mint secret handles.
 - [ ] Env secret store tests prove env values and references are not logged.
 - [ ] Secret reference manifest tests prove provider refs are redacted from debug output.

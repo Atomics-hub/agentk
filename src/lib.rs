@@ -568,7 +568,7 @@ impl fmt::Debug for SecretTarget {
 #[derive(Clone)]
 pub struct SecretBroker {
     targets: BTreeMap<String, SecretTarget>,
-    secret_store: Option<Arc<dyn SecretStore>>,
+    secret_stores: Vec<Arc<dyn SecretStore>>,
     external_refs_require_store: bool,
 }
 
@@ -576,7 +576,7 @@ impl Default for SecretBroker {
     fn default() -> Self {
         Self {
             targets: BTreeMap::new(),
-            secret_store: None,
+            secret_stores: Vec::new(),
             external_refs_require_store: true,
         }
     }
@@ -586,7 +586,7 @@ impl fmt::Debug for SecretBroker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretBroker")
             .field("targets", &self.targets)
-            .field("secret_store_configured", &self.secret_store.is_some())
+            .field("secret_store_count", &self.secret_stores.len())
             .field(
                 "external_refs_require_store",
                 &self.external_refs_require_store,
@@ -601,7 +601,7 @@ impl SecretBroker {
     }
 
     pub fn with_secret_store(mut self, secret_store: impl SecretStore + 'static) -> Self {
-        self.secret_store = Some(Arc::new(secret_store));
+        self.secret_stores.push(Arc::new(secret_store));
         self
     }
 
@@ -654,17 +654,18 @@ impl SecretBroker {
     fn can_open_target(&self, target: &str) -> bool {
         match self.targets.get(target) {
             Some(SecretTarget::Dummy) => true,
-            Some(SecretTarget::ExternalReference(reference)) => self
-                .secret_store
-                .as_ref()
-                .map(|store| {
-                    if !store.supports_provider(reference.provider()) {
-                        return false;
+            Some(SecretTarget::ExternalReference(reference)) => {
+                if self.secret_stores.is_empty() {
+                    return !self.external_refs_require_store;
+                }
+
+                self.secret_stores.iter().any(|store| {
+                    store.supports_provider(reference.provider()) && {
+                        let lookup = SecretStoreLookup::new(target, reference);
+                        store.contains_external_reference(&lookup)
                     }
-                    let lookup = SecretStoreLookup::new(target, reference);
-                    store.contains_external_reference(&lookup)
                 })
-                .unwrap_or(!self.external_refs_require_store),
+            }
             None => false,
         }
     }
@@ -4649,6 +4650,50 @@ mod tests {
             kind: SyscallKind::SecretOpen,
             target: "secret://github-token".to_string(),
             intent: "open externally brokered GitHub token through a store adapter".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Allow);
+        assert!(event.decision.secret_handle.is_some());
+
+        let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
+        assert!(!serialized.contains(external_provider));
+        assert!(!serialized.contains(external_reference));
+        assert!(serialized.contains("secret_fd_"));
+    }
+
+    #[test]
+    fn secret_broker_can_use_multiple_provider_scoped_stores_without_logging_refs() {
+        let external_provider = "test-provider";
+        let external_reference = "external-store-reference-should-not-log";
+        let unsupported_store = UnsupportedProviderSecretStore::new("other-provider");
+        let matching_store = AllowListSecretStore::default().allow(
+            "secret://github-token",
+            external_provider,
+            external_reference,
+        );
+        let mut broker = SecretBroker::new()
+            .with_secret_store(unsupported_store)
+            .with_secret_store(matching_store);
+        broker.register_external(
+            "secret://github-token",
+            external_provider,
+            external_reference,
+        );
+
+        let broker_debug = format!("{broker:?}");
+        assert!(broker_debug.contains("secret_store_count: 2"));
+        assert!(!broker_debug.contains(external_provider));
+        assert!(!broker_debug.contains(external_reference));
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open externally brokered GitHub token through a store registry".to_string(),
             labels: labels(&[Label::Trusted]),
             inputs: vec!["user_goal".to_string()],
         });

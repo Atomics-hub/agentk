@@ -214,7 +214,7 @@ This repo currently includes:
 - Ed25519-signed development secret handles with expiry and receipt binding,
 - target-only dummy secret registrations for local tests,
 - redacted external secret reference records that require a configured store before minting handles by default,
-- a metadata-only secret store adapter boundary that checks provider support and external reference availability without returning secret bytes,
+- a metadata-only secret store registry that checks provider support and external reference availability without returning secret bytes,
 - an env-backed local secret store presence adapter for `env` references,
 - a versioned secret-reference manifest parser for registering external refs without secret values,
 - a redacted secret-reference manifest validation command,
