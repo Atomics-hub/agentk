@@ -37,6 +37,7 @@ Status: in progress.
 - [x] Retain external secret reference metadata behind redacted broker records.
 - [x] Add a metadata-only secret store adapter boundary for external refs.
 - [x] Add an env-backed local secret store presence adapter.
+- [x] Add a secret-reference manifest parser for external refs.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
