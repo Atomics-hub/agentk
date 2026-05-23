@@ -11,6 +11,7 @@ Current guarantees are intentionally narrow:
 - the demo policy blocks secret/private data flowing to `network.send`,
 - the demo policy blocks raw `secret.open` without an explicit scoped capability,
 - brokered secret handles do not serialize raw secret material into flight logs,
+- local dummy secret registrations are target-only and do not accept raw secret material,
 - brokered external secret references do not serialize provider refs into flight logs,
 - brokered secret handles bind scope and expiry to their signed capability receipt,
 - unknown syscalls are denied by default,

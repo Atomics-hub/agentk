@@ -206,6 +206,7 @@ This repo currently includes:
 - Ed25519-signed development capability receipts,
 - opaque secret FD handles scoped to signed receipts,
 - Ed25519-signed development secret handles with expiry and receipt binding,
+- target-only dummy secret registrations for local tests,
 - external secret references that can issue handles without storing raw secret bytes,
 - a hash-chained flight recorder,
 - log verification,

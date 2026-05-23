@@ -200,9 +200,15 @@ pub struct SecretHandle {
     pub key_source: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SecretTargetSource {
+    Dummy,
+    ExternalReference,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SecretBroker {
-    targets: BTreeSet<String>,
+    targets: BTreeMap<String, SecretTargetSource>,
 }
 
 impl SecretBroker {
@@ -210,8 +216,9 @@ impl SecretBroker {
         Self::default()
     }
 
-    pub fn register(&mut self, target: impl Into<String>, _secret: impl Into<String>) {
-        self.targets.insert(target.into());
+    pub fn register_dummy(&mut self, target: impl Into<String>) {
+        self.targets
+            .insert(target.into(), SecretTargetSource::Dummy);
     }
 
     pub fn register_external(
@@ -220,7 +227,12 @@ impl SecretBroker {
         _provider: impl Into<String>,
         _reference: impl Into<String>,
     ) {
-        self.targets.insert(target.into());
+        self.targets
+            .insert(target.into(), SecretTargetSource::ExternalReference);
+    }
+
+    pub fn target_source(&self, target: &str) -> Option<SecretTargetSource> {
+        self.targets.get(target).copied()
     }
 
     fn open(
@@ -231,7 +243,7 @@ impl SecretBroker {
         previous_hash: &str,
         receipt: &CapabilityReceipt,
     ) -> Option<SecretHandle> {
-        if !self.targets.contains(target) {
+        if !self.targets.contains_key(target) {
             return None;
         }
 
@@ -3685,7 +3697,7 @@ mod tests {
         );
 
         let mut broker = SecretBroker::new();
-        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+        broker.register_dummy("secret://github-token");
         let mut secret_kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         secret_kernel.grant("secret.open:secret://github-token");
         covered.insert(
@@ -3968,9 +3980,8 @@ mod tests {
 
     #[test]
     fn secret_fd_handle_does_not_log_raw_secret_material() {
-        let raw_secret = "RAW_SECRET_VALUE_DO_NOT_LOG";
         let mut broker = SecretBroker::new();
-        broker.register("secret://github-token", raw_secret);
+        broker.register_dummy("secret://github-token");
 
         let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         kernel.grant("secret.open:secret://github-token");
@@ -3996,8 +4007,23 @@ mod tests {
         ));
 
         let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
-        assert!(!serialized.contains(raw_secret));
         assert!(serialized.contains("secret_fd_"));
+    }
+
+    #[test]
+    fn secret_broker_dummy_registration_is_target_only() {
+        let raw_secret = "RAW_SECRET_VALUE_DO_NOT_LOG";
+        let mut broker = SecretBroker::new();
+        broker.register_dummy("secret://github-token");
+
+        assert_eq!(
+            broker.target_source("secret://github-token"),
+            Some(SecretTargetSource::Dummy)
+        );
+
+        let debug = format!("{broker:?}");
+        assert!(!debug.contains(raw_secret));
+        assert!(debug.contains("Dummy"));
     }
 
     #[test]
@@ -4005,6 +4031,11 @@ mod tests {
         let external_reference = "external-store-reference-should-not-log";
         let mut broker = SecretBroker::new();
         broker.register_external("secret://github-token", "test-provider", external_reference);
+
+        assert_eq!(
+            broker.target_source("secret://github-token"),
+            Some(SecretTargetSource::ExternalReference)
+        );
 
         let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         kernel.grant("secret.open:secret://github-token");
@@ -4029,7 +4060,7 @@ mod tests {
     #[test]
     fn secret_fd_handle_binds_scope_expiry_and_receipt() {
         let mut broker = SecretBroker::new();
-        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+        broker.register_dummy("secret://github-token");
 
         let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         kernel.grant("secret.open:secret://github-token");
@@ -4121,7 +4152,7 @@ mod tests {
     #[test]
     fn tampered_secret_handle_receipt_binding_fails_signature_report() {
         let mut broker = SecretBroker::new();
-        broker.register("secret://github-token", "RAW_SECRET_VALUE_DO_NOT_LOG");
+        broker.register_dummy("secret://github-token");
 
         let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         kernel.grant("secret.open:secret://github-token");
