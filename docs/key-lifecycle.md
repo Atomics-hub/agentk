@@ -48,6 +48,18 @@ AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-release-signing-k
 The static development signer is acceptable only for demos and CI smoke checks.
 It must not be used for tagged releases or production-like deployments.
 
+## Verification
+
+Reviewers should pin evidence verification to the expected public release key:
+
+```sh
+cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
+```
+
+Multiple `--trusted-public-key` values are allowed during rotation windows. If
+pinning is enabled, AgentK rejects otherwise-valid receipts or secret handles
+signed by an unknown public key.
+
 ## Rotation
 
 Rotate from the active private key to a new private key kept outside the repo.

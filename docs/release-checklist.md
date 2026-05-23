@@ -45,7 +45,8 @@ Run the strict audit with the local release key:
 AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-release-signing-key cargo run --locked -- release-audit --strict
 ```
 
-On Unix, the audit fails if the release key file is group- or world-readable.
+On Unix, the audit fails if the release key file is group- or world-readable or
+if its parent directory allows group/other writes.
 
 Then run the explicit command set used by reviewers:
 

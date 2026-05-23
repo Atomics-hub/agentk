@@ -81,6 +81,7 @@ Status: in progress.
 - [x] Add release gate for requiring a configured signing key.
 - [x] Add local key generation command.
 - [x] Add signature verification CLI output.
+- [x] Add trusted public-key pinning for signature verification.
 - [x] Add signed key rotation manifest.
 - [x] Add key rotation manifest verification.
 - [ ] Add production key storage and operational lifecycle.
