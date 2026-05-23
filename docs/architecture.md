@@ -95,9 +95,10 @@ Signer source:
 
 ```txt
 AGENTK_SIGNING_KEY_HEX set   -> environment signing key
+AGENTK_SIGNING_KEY_FILE set  -> file signing key
 unset                        -> static development key
 invalid                      -> readiness failure
-AGENTK_REQUIRE_SIGNING_KEY=1 -> readiness failure unless AGENTK_SIGNING_KEY_HEX is valid
+AGENTK_REQUIRE_SIGNING_KEY=1 -> readiness failure unless AGENTK_SIGNING_KEY_HEX or AGENTK_SIGNING_KEY_FILE is valid
 ```
 
 ### Secret FDs

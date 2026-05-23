@@ -92,7 +92,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Generate a local Ed25519 signing key file for AGENTK_SIGNING_KEY_HEX.
+    /// Generate a local Ed25519 signing key file for AGENTK_SIGNING_KEY_FILE.
     Keygen {
         /// Output path for the private signing key hex. Keep this outside git.
         #[arg(long)]
@@ -491,7 +491,7 @@ fn keygen(path: PathBuf, force: bool, json: bool) -> Result<(), AgentKError> {
     println!("algorithm {}", generated.algorithm);
     println!("public    {}", generated.public_key);
     println!(
-        "env       {}=$(cat {})",
+        "env       {}={}",
         generated.env_var,
         generated.path.display()
     );
