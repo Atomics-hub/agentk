@@ -207,7 +207,7 @@ This repo currently includes:
 - opaque secret FD handles scoped to signed receipts,
 - Ed25519-signed development secret handles with expiry and receipt binding,
 - target-only dummy secret registrations for local tests,
-- external secret references that can issue handles without storing raw secret bytes,
+- redacted external secret reference records that can issue handles without serializing provider refs,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,

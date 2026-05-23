@@ -115,7 +115,7 @@ secret.open github_token -> secret_fd:github_read_15min
 
 The agent can use the handle through a broker, but cannot print, copy, or send the secret itself.
 
-The current prototype can register either target-only dummy secret entries for tests or external secret references for adapter experiments. The dummy path deliberately does not accept secret bytes. AgentK only needs to know that a brokered target exists before issuing a handle; it serializes the handle, proof, signature, public key, and labels, not raw secret bytes or external provider references.
+The current prototype can register either target-only dummy secret entries for tests or external secret references for adapter experiments. The dummy path deliberately does not accept secret bytes. External references are retained with private fields and explicit accessors for future adapters, while broker debug output prints provider/reference hashes instead of raw values. AgentK only needs to know that a brokered target exists before issuing a handle; it serializes the handle, proof, signature, public key, and labels, not raw secret bytes or external provider references.
 
 Secret handles are scoped to the same capability string as the `secret.open`
 receipt, share the receipt expiry step, and carry the receipt id and proof hash.

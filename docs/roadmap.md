@@ -34,6 +34,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for brokered secret handles.
 - [x] Replace raw dummy secret registration with target-only broker registration.
 - [x] Add external secret reference registration without logging provider refs.
+- [x] Retain external secret reference metadata behind redacted broker records.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy

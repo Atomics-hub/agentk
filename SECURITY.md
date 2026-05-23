@@ -13,6 +13,7 @@ Current guarantees are intentionally narrow:
 - brokered secret handles do not serialize raw secret material into flight logs,
 - local dummy secret registrations are target-only and do not accept raw secret material,
 - brokered external secret references do not serialize provider refs into flight logs,
+- external secret reference debug output prints provider/reference hashes, not raw provider/reference values,
 - brokered secret handles bind scope and expiry to their signed capability receipt,
 - unknown syscalls are denied by default,
 - receipts and secret handles carry Ed25519 development signatures,
