@@ -127,12 +127,15 @@ Replay modes:
 - trace inspect: verify the log and emit a redacted human-review summary,
 - deterministic replay: verify the log and stub model/tool/network side effects with synthetic output refs,
 - fork replay: compare recorded decisions against a different policy.
+- behavior fork replay: compare recorded stub output refs against changed hashed output refs.
 
 `agentk trace-inspect` is the human review path. It verifies the hash chain, summarizes signature status, and prints one compact row per event. Known hash evidence refs such as `args_sha256`, `descriptor_sha256`, and `response_sha256` are preserved. Any raw input ref is replaced with a fresh `input_sha256` ref in the inspection report.
 
 `agentk replay` records deterministic `stub_output_sha256` evidence refs for allowed `model.call`, `tool.invoke`, and `network.send` events. Blocked side effects stay blocked and do not get stub outputs.
 
-`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, a brokered secret-handle smoke test, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, and an MCP server smoke test. It does not configure remotes or push.
+`agentk fork-replay-behavior` accepts a JSON array of changed hashed output refs and emits a divergence report. Overrides are bound to the recorded step, syscall, and target, and raw output strings are rejected.
+
+`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, a brokered secret-handle smoke test, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
 
 ### MCP Proxy MVP
 

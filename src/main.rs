@@ -1,9 +1,10 @@
 use agentk::{
     AgentKError, McpToolRequest, Policy, ReadinessStatus, Verdict, default_log_path,
-    fork_replay_jsonl, generate_signing_key_file, inspect_jsonl, mcp_proxy_from_path,
-    mcp_server_json_lines, readiness_report, release_audit_report, replay_jsonl,
-    rotate_signing_key_file, run_poisoned_webpage_demo, signing_key_status, verify_jsonl,
-    verify_signatures_jsonl, verify_signing_key_rotation_manifest_file, write_latest_copy,
+    fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, inspect_jsonl,
+    mcp_proxy_from_path, mcp_server_json_lines, readiness_report, release_audit_report,
+    replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo, signing_key_status,
+    verify_jsonl, verify_signatures_jsonl, verify_signing_key_rotation_manifest_file,
+    write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
@@ -56,6 +57,17 @@ enum Command {
         #[arg(long)]
         policy: PathBuf,
         /// Emit the comparison report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replay with changed model/tool/network output refs and report divergences.
+    ForkReplayBehavior {
+        /// Path to a JSONL flight log.
+        path: PathBuf,
+        /// JSON array of changed hashed output refs.
+        #[arg(long)]
+        behavior: PathBuf,
+        /// Emit the behavior divergence report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -158,6 +170,11 @@ fn run() -> Result<(), AgentKError> {
         Command::TraceInspect { path, json } => trace_inspect(path, json),
         Command::Replay { path } => replay(path),
         Command::ForkReplay { path, policy, json } => fork_replay(path, policy, json),
+        Command::ForkReplayBehavior {
+            path,
+            behavior,
+            json,
+        } => fork_replay_behavior(path, behavior, json),
         Command::McpProxy { request, json } => mcp_proxy(request, json),
         Command::McpStdio => mcp_stdio(),
         Command::McpLines => mcp_lines(),
@@ -368,6 +385,32 @@ fn fork_replay(path: PathBuf, policy: PathBuf, json: bool) -> Result<(), AgentKE
             change.original_rule,
             change.fork_verdict,
             change.fork_rule
+        );
+    }
+    Ok(())
+}
+
+fn fork_replay_behavior(path: PathBuf, behavior: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = fork_replay_behavior_jsonl(path, behavior)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK behavior fork replay complete");
+    println!("events      {}", report.events_replayed);
+    println!("baseline    {}", report.baseline_outputs);
+    println!("overrides   {}", report.override_outputs);
+    println!("divergences {}", report.divergences);
+    for change in report.changes {
+        println!(
+            "divergence  #{} {} {}: {} -> {}",
+            change.step,
+            change.syscall,
+            change.target,
+            change.original_output_ref,
+            change.fork_output_ref
         );
     }
     Ok(())

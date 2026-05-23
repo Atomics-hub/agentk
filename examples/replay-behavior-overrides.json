@@ -1,0 +1,8 @@
+[
+  {
+    "step": 2,
+    "syscall": "model.call",
+    "target": "local-or-remote-llm",
+    "output_ref": "stub_output_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]
