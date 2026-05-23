@@ -99,6 +99,12 @@ Check the prototype policy:
 cargo run -- policy-check examples/agentk.policy.toml
 ```
 
+Validate a secret-reference manifest without printing provider refs:
+
+```sh
+cargo run -- secret-refs-check --manifest examples/secret-refs.toml
+```
+
 Example profiles live in:
 
 ```txt
@@ -211,6 +217,7 @@ This repo currently includes:
 - a metadata-only secret store adapter boundary that checks external reference availability without returning secret bytes,
 - an env-backed local secret store presence adapter for `env` references,
 - a versioned secret-reference manifest parser for registering external refs without secret values,
+- a redacted secret-reference manifest validation command,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,
