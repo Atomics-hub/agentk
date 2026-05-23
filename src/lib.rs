@@ -625,6 +625,7 @@ impl Policy {
             "capability-receipt",
             "tool-descriptor-read",
             "tool-sensitive-input",
+            "tool-tainted-input",
             "tool-invoke-receipt",
             "tool-invoke-capability-missing",
             "tool-response-record",
@@ -3343,6 +3344,16 @@ mod tests {
             .rule,
         );
 
+        let mut tainted_tool_kernel = AgentKernel::new("agent://test");
+        tainted_tool_kernel.grant("tool.invoke:demo.echo");
+        covered.insert(
+            decision(
+                tainted_tool_kernel,
+                syscall(SyscallKind::ToolInvoke, "demo.echo", &[Label::Untrusted]),
+            )
+            .rule,
+        );
+
         let mut tool_kernel = AgentKernel::new("agent://test");
         tool_kernel.grant("tool.invoke:demo.echo");
         covered.insert(
@@ -3479,6 +3490,25 @@ mod tests {
 
         assert_eq!(event.decision.verdict, Verdict::Deny);
         assert_eq!(event.decision.rule, "default-deny");
+        assert!(event.verify_hash());
+    }
+
+    #[test]
+    fn tainted_tool_input_is_blocked_even_with_capability() {
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("tool.invoke:demo.echo");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "demo.echo".to_string(),
+            intent: "reuse untrusted MCP output as another tool input".to_string(),
+            labels: labels(&[Label::Untrusted, Label::External]),
+            inputs: vec!["response_sha256:abc123".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Deny);
+        assert_eq!(event.decision.rule, "tool-tainted-input");
+        assert!(event.decision.receipt.is_none());
         assert!(event.verify_hash());
     }
 

@@ -245,6 +245,7 @@ Implemented today:
 - MCP-shaped tool mediation without execution,
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
 - conservative MCP tool-output labels for recorded responses,
+- tainted tool-input blocking at `tool.invoke` boundaries,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
 - a local release audit that runs formatting, tests, clippy, readiness, replay, signature, secret-handle, inspect, and MCP smoke checks.

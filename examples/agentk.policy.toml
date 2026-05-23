@@ -102,13 +102,22 @@ syscalls = ["tool.invoke"]
 labels_any = ["secret", "private"]
 
 [[rules]]
+id = "tool-tainted-input"
+effect = "deny"
+reason = "untrusted or poisoned labels cannot be passed into agent tools"
+
+[rules.when]
+syscalls = ["tool.invoke"]
+labels_any = ["untrusted", "poisoned-suspect"]
+
+[[rules]]
 id = "tool-invoke-receipt"
 effect = "allow"
 reason = "tool invocation covered by a scoped receipt"
 
 [rules.when]
 syscalls = ["tool.invoke"]
-labels_none = ["secret", "private"]
+labels_none = ["secret", "private", "untrusted", "poisoned-suspect"]
 capability = "present"
 
 [[rules]]

@@ -154,6 +154,10 @@ agentk.record_response
 
 `agentk.record_response` converts an MCP tool result into a `tool.response` syscall. AgentK records a response hash, marks MCP tool output as `untrusted` and `external`, preserves caller-supplied labels, marks error responses as `poisoned-suspect`, and does not serialize raw tool output into event inputs.
 
+Later `tool.invoke` calls deny `secret`, `private`, `untrusted`, or `poisoned-suspect`
+inputs before capability receipts can allow the call. This keeps recorded tool output
+from being laundered into another tool boundary as trusted input.
+
 This is useful for integration experiments, but it is not a full MCP proxy and it still never executes the underlying tool.
 
 ### Key Rotation Manifests
