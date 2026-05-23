@@ -87,6 +87,12 @@ Fork-replay the latest flight log against another policy:
 cargo run -- fork-replay .agentk/runs/latest.jsonl --policy examples/policies/research-agent.toml
 ```
 
+Fork-replay with changed hashed behavior outputs:
+
+```sh
+cargo run -- fork-replay-behavior .agentk/runs/latest.jsonl --behavior examples/replay-behavior-overrides.json
+```
+
 Check the prototype policy:
 
 ```sh

@@ -1673,6 +1673,16 @@ fn is_safe_evidence_ref(input: &str) -> bool {
     })
 }
 
+fn is_safe_output_ref(input: &str) -> bool {
+    ["response_sha256:", "stub_output_sha256:"]
+        .iter()
+        .any(|prefix| {
+            input.strip_prefix(prefix).is_some_and(|hash| {
+                hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit())
+            })
+        })
+}
+
 pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError> {
     let events = read_events_jsonl(path)?;
     let verify = verify_events(&events)?;
@@ -1740,6 +1750,32 @@ pub struct ForkReplayChange {
     pub fork_rule: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayBehaviorOverride {
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub output_ref: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BehaviorForkReplayReport {
+    pub events_replayed: u64,
+    pub baseline_outputs: usize,
+    pub override_outputs: usize,
+    pub divergences: usize,
+    pub changes: Vec<BehaviorDivergence>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BehaviorDivergence {
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub original_output_ref: String,
+    pub fork_output_ref: String,
+}
+
 pub fn fork_replay_jsonl(
     log_path: impl AsRef<Path>,
     policy_path: impl AsRef<Path>,
@@ -1769,6 +1805,89 @@ pub fn fork_replay_jsonl(
     Ok(ForkReplayReport {
         events_replayed: events.len() as u64,
         changed: changes.len(),
+        changes,
+    })
+}
+
+pub fn fork_replay_behavior_jsonl(
+    log_path: impl AsRef<Path>,
+    behavior_path: impl AsRef<Path>,
+) -> Result<BehaviorForkReplayReport, AgentKError> {
+    let overrides: Vec<ReplayBehaviorOverride> =
+        serde_json::from_str(&fs::read_to_string(behavior_path)?)?;
+    fork_replay_behavior_jsonl_with_overrides(log_path, &overrides)
+}
+
+pub fn fork_replay_behavior_jsonl_with_overrides(
+    log_path: impl AsRef<Path>,
+    overrides: &[ReplayBehaviorOverride],
+) -> Result<BehaviorForkReplayReport, AgentKError> {
+    let replay = replay_jsonl(log_path)?;
+    let mut overrides_by_step = BTreeMap::new();
+
+    for override_output in overrides {
+        if !is_safe_output_ref(&override_output.output_ref) {
+            return Err(AgentKError::InvalidLog(format!(
+                "behavior override step {} has unsafe output ref",
+                override_output.step
+            )));
+        }
+        if overrides_by_step
+            .insert(override_output.step, override_output)
+            .is_some()
+        {
+            return Err(AgentKError::InvalidLog(format!(
+                "behavior override step {} is duplicated",
+                override_output.step
+            )));
+        }
+    }
+
+    let mut changes = Vec::new();
+    let mut matched_steps = BTreeSet::new();
+
+    for baseline in &replay.stub_outputs {
+        let Some(override_output) = overrides_by_step.get(&baseline.step) else {
+            continue;
+        };
+        matched_steps.insert(baseline.step);
+
+        if override_output.syscall != baseline.syscall || override_output.target != baseline.target
+        {
+            return Err(AgentKError::InvalidLog(format!(
+                "behavior override step {} targets {} {}, expected {} {}",
+                override_output.step,
+                override_output.syscall,
+                override_output.target,
+                baseline.syscall,
+                baseline.target
+            )));
+        }
+
+        if override_output.output_ref != baseline.output_ref {
+            changes.push(BehaviorDivergence {
+                step: baseline.step,
+                syscall: baseline.syscall.clone(),
+                target: baseline.target.clone(),
+                original_output_ref: baseline.output_ref.clone(),
+                fork_output_ref: override_output.output_ref.clone(),
+            });
+        }
+    }
+
+    for override_step in overrides_by_step.keys() {
+        if !matched_steps.contains(override_step) {
+            return Err(AgentKError::InvalidLog(format!(
+                "behavior override step {override_step} has no replay stub output"
+            )));
+        }
+    }
+
+    Ok(BehaviorForkReplayReport {
+        events_replayed: replay.events_replayed,
+        baseline_outputs: replay.stub_outputs.len(),
+        override_outputs: overrides.len(),
+        divergences: changes.len(),
         changes,
     })
 }
@@ -2068,6 +2187,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-tool-descriptor.json"),
         check_required_file(&root, "examples/mcp-tool-response.json"),
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
+        check_required_file(&root, "examples/replay-behavior-overrides.json"),
         check_policy(&root),
         check_policy_profiles(&root),
         check_security_disclosure(&root),
@@ -2164,6 +2284,10 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             .iter()
             .all(|output| is_safe_evidence_ref(&output.output_ref));
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
+    let behavior_fork = fork_replay_behavior_jsonl(
+        &latest,
+        root.join("examples/replay-behavior-overrides.json"),
+    )?;
     let mcp_session = fs::read_to_string(root.join("examples/mcp-server-session.jsonl"))?;
     let mcp_output = mcp_server_json_lines(&mcp_session)?;
     let mcp_responses = mcp_output
@@ -2272,6 +2396,20 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             format!(
                 "{} events, {} decision changes",
                 fork.events_replayed, fork.changed
+            ),
+        ),
+        release_audit_check(
+            "behavior fork replay",
+            if behavior_fork.divergences == 1 && behavior_fork.changes[0].step == 2 {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} events, {} overrides, {} divergences",
+                behavior_fork.events_replayed,
+                behavior_fork.override_outputs,
+                behavior_fork.divergences
             ),
         ),
         release_audit_check(
@@ -4060,6 +4198,61 @@ mod tests {
             assert!(output.output_ref.starts_with("stub_output_sha256:"));
             assert_eq!(output.output_ref.len(), "stub_output_sha256:".len() + 64);
         }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn behavior_fork_replay_reports_changed_output_refs() {
+        let path = temp_path("agentk-behavior-fork", "jsonl");
+        run_poisoned_webpage_demo(&path).expect("demo should run");
+        let overrides = vec![ReplayBehaviorOverride {
+            step: 2,
+            syscall: "model.call".to_string(),
+            target: "local-or-remote-llm".to_string(),
+            output_ref:
+                "stub_output_sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .to_string(),
+        }];
+
+        let report = fork_replay_behavior_jsonl_with_overrides(&path, &overrides)
+            .expect("behavior fork replay should run");
+
+        assert_eq!(report.events_replayed, 4);
+        assert_eq!(report.baseline_outputs, 1);
+        assert_eq!(report.override_outputs, 1);
+        assert_eq!(report.divergences, 1);
+        assert_eq!(report.changes[0].step, 2);
+        assert_eq!(report.changes[0].syscall, "model.call");
+        assert!(
+            report.changes[0]
+                .original_output_ref
+                .starts_with("stub_output_sha256:")
+        );
+        assert_eq!(report.changes[0].fork_output_ref, overrides[0].output_ref);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn behavior_fork_replay_rejects_raw_output_overrides() {
+        let path = temp_path("agentk-behavior-fork-raw", "jsonl");
+        run_poisoned_webpage_demo(&path).expect("demo should run");
+        let overrides = vec![ReplayBehaviorOverride {
+            step: 2,
+            syscall: "model.call".to_string(),
+            target: "local-or-remote-llm".to_string(),
+            output_ref: "raw model output should not be accepted".to_string(),
+        }];
+
+        let error = fork_replay_behavior_jsonl_with_overrides(&path, &overrides)
+            .expect_err("raw behavior override should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("behavior override step 2 has unsafe output ref")
+        );
 
         let _ = fs::remove_file(path);
     }

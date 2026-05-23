@@ -53,8 +53,8 @@ Status: in progress.
 - [x] Fork replay with changed policy.
 - [x] Add redacted flight-log inspect output for human review.
 - [x] Record stub outputs for model/tool/network syscalls.
-- [ ] Fork replay with changed model/tool behavior.
-- [ ] Emit divergence reports.
+- [x] Fork replay with changed model/tool behavior.
+- [x] Emit divergence reports.
 
 ## Milestone 4.5: Signed Evidence
 

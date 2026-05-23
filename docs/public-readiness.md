@@ -28,6 +28,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret FD tests prove raw secret material is not logged.
 - [ ] Flight-log inspect tests prove raw input refs are redacted.
 - [ ] Replay tests prove allowed model/tool/network side effects get synthetic stub output refs.
+- [ ] Behavior fork replay tests prove raw output overrides are rejected.
 - [ ] MCP proxy tests prove tools are mediated without execution.
 - [ ] MCP descriptor/response tests prove raw descriptor and response content are not logged into event inputs.
 - [ ] Receipt and handle signatures verify, and tampered proofs fail.
@@ -70,6 +71,7 @@ cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl
 cargo run -- trace-inspect .agentk/runs/latest.jsonl
 cargo run -- fork-replay .agentk/runs/latest.jsonl --policy examples/policies/research-agent.toml
+cargo run -- fork-replay-behavior .agentk/runs/latest.jsonl --behavior examples/replay-behavior-overrides.json
 cargo run -- mcp-server < examples/mcp-server-session.jsonl
 ```
 
