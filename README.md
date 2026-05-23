@@ -165,13 +165,13 @@ Mediate a demo MCP-shaped tool request without executing it:
 cargo run -- mcp-proxy --request examples/mcp-tool-request.json
 ```
 
-Mediate one MCP-shaped request over stdin:
+Mediate one bounded MCP-shaped request over stdin:
 
 ```sh
 cargo run -- mcp-stdio < examples/mcp-tool-request.json
 ```
 
-Mediate newline-delimited MCP-shaped requests over stdin:
+Mediate newline-delimited MCP-shaped requests over bounded stdin:
 
 ```sh
 cargo run -- mcp-lines < examples/mcp-tool-requests.jsonl

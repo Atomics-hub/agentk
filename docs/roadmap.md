@@ -57,6 +57,7 @@ Status: in progress.
 - [x] Attach labels to tool outputs.
 - [x] Reject oversized MCP JSON-RPC lines and invalid request ids without reflecting raw payloads.
 - [x] Stream MCP JSON-RPC stdin with bounded per-line reads.
+- [x] Bound `mcp-stdio` and `mcp-lines` stdin handling.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
