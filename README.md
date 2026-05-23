@@ -181,7 +181,8 @@ Run the minimal MCP JSON-RPC stdio server. The prototype accepts
 newline-delimited JSON-RPC messages, rejects batches, enforces bounded request
 ids, streams stdin with a per-line message size cap, and does not execute the
 underlying tool. Tool listing and calls require a prior `initialize` request
-with the supported protocol version:
+with the supported protocol version followed by the `notifications/initialized`
+notification:
 
 ```sh
 cargo run -- mcp-server < examples/mcp-server-session.jsonl

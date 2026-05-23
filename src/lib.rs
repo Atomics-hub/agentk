@@ -1725,6 +1725,7 @@ struct McpBoundedLine {
 struct McpJsonRpcSession {
     kernel: Option<AgentKernel>,
     initialized: bool,
+    ready: bool,
 }
 
 fn read_mcp_bounded_line<R: BufRead>(
@@ -1864,10 +1865,11 @@ fn handle_mcp_json_rpc_message(
     };
 
     if is_notification {
+        handle_mcp_json_rpc_notification(method, session);
         return None;
     }
 
-    if !session.initialized && matches!(method, "tools/list" | "tools/call") {
+    if !session.ready && matches!(method, "tools/list" | "tools/call") {
         return Some(jsonrpc_not_initialized(id));
     }
 
@@ -1888,6 +1890,7 @@ fn handle_mcp_json_rpc_message(
                 match validate_mcp_initialize_params(&params) {
                     Ok(()) => {
                         session.initialized = true;
+                        session.ready = false;
                         Some(jsonrpc_success(id, mcp_initialize_result()))
                     }
                     Err(detail) => Some(jsonrpc_invalid_params(id, detail)),
@@ -1916,6 +1919,12 @@ fn handle_mcp_json_rpc_message(
     }
 }
 
+fn handle_mcp_json_rpc_notification(method: &str, session: &mut McpJsonRpcSession) {
+    if method == "notifications/initialized" && session.initialized {
+        session.ready = true;
+    }
+}
+
 fn validate_mcp_initialize_params(params: &serde_json::Value) -> Result<(), String> {
     let Some(params) = params.as_object() else {
         return Err("params must be an object".to_string());
@@ -1941,7 +1950,7 @@ fn jsonrpc_not_initialized(id: serde_json::Value) -> serde_json::Value {
         -32002,
         "Server not initialized",
         Some(serde_json::json!({
-            "detail": "initialize must complete before tool requests"
+            "detail": "initialize and notifications/initialized must complete before tool requests"
         })),
     )
 }
@@ -3533,6 +3542,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_transport_guard.mcp_lines_oversized_rejected
                 && mcp_transport_guard.mcp_stdio_oversized_rejected
                 && mcp_transport_guard.preinit_tool_rejected
+                && mcp_transport_guard.initialized_notification_required
                 && mcp_transport_guard.bad_protocol_rejected
                 && mcp_transport_guard.bounded_stdin_not_reflected
                 && mcp_transport_guard.preinit_payload_not_reflected
@@ -3543,7 +3553,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, preinit {}, protocol {}, redacted {}",
+                "invalid id {}, batch {}, json-rpc oversized {}, mcp stdin bounded {}, preinit {}, initialized notification {}, protocol {}, redacted {}",
                 if mcp_transport_guard.invalid_id_rejected {
                     "rejected"
                 } else {
@@ -3565,6 +3575,11 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                     "rejected"
                 } else {
                     "accepted"
+                },
+                if mcp_transport_guard.initialized_notification_required {
+                    "required"
+                } else {
+                    "bypassed"
                 },
                 if mcp_transport_guard.bad_protocol_rejected {
                     "rejected"
@@ -3805,6 +3820,7 @@ struct McpTransportGuardSmokeReport {
     mcp_lines_oversized_rejected: bool,
     mcp_stdio_oversized_rejected: bool,
     preinit_tool_rejected: bool,
+    initialized_notification_required: bool,
     bad_protocol_rejected: bool,
     bounded_stdin_not_reflected: bool,
     preinit_payload_not_reflected: bool,
@@ -3903,6 +3919,40 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
     let bad_protocol_output = mcp_server_json_lines(&bad_protocol_initialize.to_string())?;
     let bad_protocol_response: serde_json::Value =
         serde_json::from_str(bad_protocol_output.trim())?;
+    let lifecycle_input = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+    );
+    let initialized_list = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/list",
+        "params": {}
+    });
+    let lifecycle_output =
+        mcp_server_json_lines(&format!("{lifecycle_input}{initialized_list}\n"))?;
+    let lifecycle_responses = lifecycle_output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(McpTransportGuardSmokeReport {
         invalid_id_rejected: responses.first().is_some_and(|response| {
@@ -3926,6 +3976,12 @@ fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKErr
         mcp_stdio_oversized_rejected: stdio_error.contains("MCP request limit"),
         preinit_tool_rejected: preinit_response["error"]["code"] == serde_json::json!(-32002)
             && preinit_response["error"]["message"] == "Server not initialized",
+        initialized_notification_required: lifecycle_responses
+            .get(1)
+            .is_some_and(|response| response["error"]["code"] == serde_json::json!(-32002))
+            && lifecycle_responses.get(2).is_some_and(|response| {
+                response["result"]["tools"][0]["name"] == serde_json::json!(MCP_MEDIATE_TOOL)
+            }),
         bad_protocol_rejected: bad_protocol_response["error"]["code"] == serde_json::json!(-32602)
             && bad_protocol_response["error"]["data"]["detail"]
                 == serde_json::json!(format!(
@@ -7220,9 +7276,66 @@ effect = "allow""#,
         assert_eq!(response["error"]["code"], serde_json::json!(-32002));
         assert_eq!(
             response["error"]["data"]["detail"],
-            serde_json::json!("initialize must complete before tool requests")
+            serde_json::json!(
+                "initialize and notifications/initialized must complete before tool requests"
+            )
         );
         assert!(!output.contains(raw_payload));
+    }
+
+    #[test]
+    fn mcp_server_requires_initialized_notification_before_tools() {
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}
+"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(
+            responses[0]["result"]["protocolVersion"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            responses[2]["result"]["tools"][0]["name"],
+            serde_json::json!(MCP_MEDIATE_TOOL)
+        );
+    }
+
+    #[test]
+    fn mcp_server_ignores_initialized_notification_before_initialize() {
+        let input = r#"
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}
+"#;
+        let output = mcp_server_json_lines(input).expect("server should respond");
+        let responses = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 4);
+        assert_eq!(responses[0]["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            responses[1]["result"]["protocolVersion"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(responses[2]["error"]["code"], serde_json::json!(-32002));
+        assert_eq!(
+            responses[3]["result"]["tools"][0]["name"],
+            serde_json::json!(MCP_MEDIATE_TOOL)
+        );
     }
 
     #[test]
@@ -7295,6 +7408,8 @@ effect = "allow""#,
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 {"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}
 "#;
         let output = mcp_server_json_lines(input).expect("server should respond");
         let responses = output
@@ -7302,15 +7417,16 @@ effect = "allow""#,
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
             .collect::<Vec<_>>();
 
-        assert_eq!(responses.len(), 4);
+        assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["error"]["code"], serde_json::json!(-32602));
         assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32002));
         assert_eq!(
             responses[2]["result"]["protocolVersion"],
             serde_json::json!(MCP_PROTOCOL_VERSION)
         );
+        assert_eq!(responses[3]["error"]["code"], serde_json::json!(-32002));
         assert_eq!(
-            responses[3]["result"]["tools"][0]["name"],
+            responses[4]["result"]["tools"][0]["name"],
             serde_json::json!(MCP_MEDIATE_TOOL)
         );
     }
@@ -7449,6 +7565,7 @@ effect = "allow""#,
         assert!(report.mcp_lines_oversized_rejected);
         assert!(report.mcp_stdio_oversized_rejected);
         assert!(report.preinit_tool_rejected);
+        assert!(report.initialized_notification_required);
         assert!(report.bad_protocol_rejected);
         assert!(report.bounded_stdin_not_reflected);
         assert!(report.preinit_payload_not_reflected);
@@ -7459,6 +7576,7 @@ effect = "allow""#,
     fn mcp_server_records_descriptor_and_response_hashes() {
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agentk.mediate_descriptor","arguments":{"agent_id":"agent://test","server":"demo-server","labels":["untrusted","external"],"descriptor":{"name":"demo.echo","description":"Echo public demo payloads.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}}}}}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentk.record_response","arguments":{"agent_id":"agent://test","tool":"demo.echo","labels":["untrusted","external"],"response":{"content":[{"type":"text","text":"public demo payload"}],"structuredContent":{"ok":true},"isError":false},"is_error":false}}}
 "#;
