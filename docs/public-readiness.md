@@ -31,6 +31,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret FD dummy registration is target-only and does not accept raw secret material.
 - [ ] Secret FD tests prove external secret provider refs are not logged.
 - [ ] Secret FD tests prove external secret provider refs are redacted from broker debug output.
+- [ ] Secret FD tests prove external refs without a configured store do not mint handles by default.
 - [ ] Secret store adapter tests prove unavailable external refs do not mint secret handles.
 - [ ] Env secret store tests prove env values and references are not logged.
 - [ ] Secret reference manifest tests prove provider refs are redacted from debug output.
