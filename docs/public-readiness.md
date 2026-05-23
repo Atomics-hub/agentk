@@ -33,6 +33,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret FD tests prove external secret provider refs are redacted from broker debug output.
 - [ ] Secret store adapter tests prove unavailable external refs do not mint secret handles.
 - [ ] Env secret store tests prove env values and references are not logged.
+- [ ] Secret reference manifest tests prove provider refs are redacted from debug output.
 - [ ] Flight-log inspect tests prove raw input refs are redacted.
 - [ ] Replay tests prove allowed model/tool/network side effects get synthetic stub output refs.
 - [ ] Behavior fork replay tests prove raw output overrides are rejected.

@@ -210,6 +210,7 @@ This repo currently includes:
 - redacted external secret reference records that can issue handles without serializing provider refs,
 - a metadata-only secret store adapter boundary that checks external reference availability without returning secret bytes,
 - an env-backed local secret store presence adapter for `env` references,
+- a versioned secret-reference manifest parser for registering external refs without secret values,
 - a hash-chained flight recorder,
 - log verification,
 - receipt and secret-handle signature verification,

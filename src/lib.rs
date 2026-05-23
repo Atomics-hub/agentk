@@ -282,6 +282,162 @@ pub trait SecretStore: Send + Sync {
     fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool;
 }
 
+#[derive(Clone, Deserialize)]
+pub struct SecretReferenceManifest {
+    #[serde(default = "default_secret_reference_manifest_version")]
+    version: u64,
+    #[serde(default)]
+    secrets: Vec<SecretReferenceEntry>,
+}
+
+impl SecretReferenceManifest {
+    pub fn parse_toml(input: &str) -> Result<Self, AgentKError> {
+        let manifest: Self = toml::from_str(input)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, AgentKError> {
+        Self::parse_toml(&fs::read_to_string(path)?)
+    }
+
+    pub fn new(secrets: Vec<SecretReferenceEntry>) -> Result<Self, AgentKError> {
+        let manifest = Self {
+            version: default_secret_reference_manifest_version(),
+            secrets,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn secrets(&self) -> &[SecretReferenceEntry] {
+        &self.secrets
+    }
+
+    fn validate(&self) -> Result<(), AgentKError> {
+        if self.version != default_secret_reference_manifest_version() {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "unsupported secret reference manifest version {}",
+                self.version
+            )));
+        }
+        if self.secrets.is_empty() {
+            return Err(AgentKError::InvalidSecretManifest(
+                "secret reference manifest must include at least one secret".to_string(),
+            ));
+        }
+
+        let mut targets = BTreeSet::new();
+        for secret in &self.secrets {
+            secret.validate()?;
+            if !targets.insert(secret.target.clone()) {
+                return Err(AgentKError::InvalidSecretManifest(format!(
+                    "duplicate secret target {}",
+                    secret.target
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Debug for SecretReferenceManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretReferenceManifest")
+            .field("version", &self.version)
+            .field("secret_count", &self.secrets.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct SecretReferenceEntry {
+    target: String,
+    provider: String,
+    reference: String,
+}
+
+impl SecretReferenceEntry {
+    pub fn new(
+        target: impl Into<String>,
+        provider: impl Into<String>,
+        reference: impl Into<String>,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            provider: provider.into(),
+            reference: reference.into(),
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    fn validate(&self) -> Result<(), AgentKError> {
+        if self.target.trim().is_empty() {
+            return Err(AgentKError::InvalidSecretManifest(
+                "secret target must not be empty".to_string(),
+            ));
+        }
+        if !self.target.starts_with("secret://") {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} must start with secret://",
+                self.target
+            )));
+        }
+        if self.provider.trim().is_empty() {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} provider must not be empty",
+                self.target
+            )));
+        }
+        if self.reference.trim().is_empty() {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} reference must not be empty",
+                self.target
+            )));
+        }
+        if self.provider == EnvironmentSecretStore::PROVIDER
+            && !valid_env_secret_reference(&self.reference)
+        {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} env reference must be a safe environment variable name",
+                self.target
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Debug for SecretReferenceEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretReferenceEntry")
+            .field("target", &self.target)
+            .field("provider_sha256", &hash_json(&self.provider))
+            .field("reference_sha256", &hash_json(&self.reference))
+            .finish_non_exhaustive()
+    }
+}
+
+fn default_secret_reference_manifest_version() -> u64 {
+    1
+}
+
 #[derive(Clone)]
 pub struct EnvironmentSecretStore {
     source: EnvironmentSecretSource,
@@ -430,6 +586,17 @@ impl SecretBroker {
                 reference.into(),
             )),
         );
+    }
+
+    pub fn register_manifest(
+        &mut self,
+        manifest: &SecretReferenceManifest,
+    ) -> Result<(), AgentKError> {
+        manifest.validate()?;
+        for secret in manifest.secrets() {
+            self.register_external(secret.target(), secret.provider(), secret.reference());
+        }
+        Ok(())
     }
 
     pub fn target_source(&self, target: &str) -> Option<SecretTargetSource> {
@@ -3812,6 +3979,7 @@ pub enum AgentKError {
     InvalidMcpRequest(String),
     InvalidLog(String),
     InvalidPolicy(String),
+    InvalidSecretManifest(String),
     TomlDeserialize(toml::de::Error),
 }
 
@@ -3837,6 +4005,9 @@ impl fmt::Display for AgentKError {
             Self::InvalidMcpRequest(message) => write!(f, "invalid MCP request: {message}"),
             Self::InvalidLog(message) => write!(f, "invalid flight log: {message}"),
             Self::InvalidPolicy(message) => write!(f, "invalid policy: {message}"),
+            Self::InvalidSecretManifest(message) => {
+                write!(f, "invalid secret reference manifest: {message}")
+            }
             Self::TomlDeserialize(error) => write!(f, "TOML error: {error}"),
         }
     }
@@ -4471,6 +4642,115 @@ mod tests {
                 serde_json::to_string(kernel.events()).expect("events should serialize");
             assert!(!serialized.contains(reference));
         }
+    }
+
+    #[test]
+    fn secret_reference_manifest_registers_external_refs_without_logging_refs() {
+        let env_reference = "AGENTK_TEST_REF";
+        let manifest_toml = format!(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "{env_reference}"
+            "#
+        );
+        let path = temp_path("agentk-secret-refs", "toml");
+        fs::write(&path, &manifest_toml).expect("manifest fixture should write");
+
+        let manifest =
+            SecretReferenceManifest::from_path(&path).expect("manifest should parse from path");
+        fs::remove_file(&path).expect("manifest fixture should be removed");
+
+        assert_eq!(manifest.version(), 1);
+        assert_eq!(manifest.secrets().len(), 1);
+        assert_eq!(manifest.secrets()[0].target(), "secret://github-token");
+        assert_eq!(
+            manifest.secrets()[0].provider(),
+            EnvironmentSecretStore::PROVIDER
+        );
+        assert_eq!(manifest.secrets()[0].reference(), env_reference);
+
+        let manifest_debug = format!("{manifest:?}");
+        assert!(manifest_debug.contains("SecretReferenceManifest"));
+        assert!(manifest_debug.contains("secret_count"));
+        assert!(!manifest_debug.contains(env_reference));
+
+        let entry_debug = format!("{:?}", manifest.secrets()[0]);
+        assert!(entry_debug.contains("provider_sha256"));
+        assert!(entry_debug.contains("reference_sha256"));
+        assert!(!entry_debug.contains(EnvironmentSecretStore::PROVIDER));
+        assert!(!entry_debug.contains(env_reference));
+
+        let mut broker = SecretBroker::new();
+        broker
+            .register_manifest(&manifest)
+            .expect("manifest should register");
+        assert_eq!(
+            broker.target_source("secret://github-token"),
+            Some(SecretTargetSource::ExternalReference)
+        );
+
+        let broker_debug = format!("{broker:?}");
+        assert!(!broker_debug.contains(EnvironmentSecretStore::PROVIDER));
+        assert!(!broker_debug.contains(env_reference));
+    }
+
+    #[test]
+    fn secret_reference_manifest_rejects_invalid_entries_without_logging_refs() {
+        let duplicate = SecretReferenceManifest::parse_toml(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "AGENTK_ONE"
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "AGENTK_TWO"
+            "#,
+        )
+        .expect_err("duplicate targets should fail");
+        assert!(duplicate.to_string().contains("duplicate secret target"));
+        assert!(!duplicate.to_string().contains("AGENTK_ONE"));
+        assert!(!duplicate.to_string().contains("AGENTK_TWO"));
+
+        let invalid_reference = "invalid-reference-name";
+        let invalid = SecretReferenceManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "{invalid_reference}"
+            "#
+        ))
+        .expect_err("invalid env reference should fail");
+        assert!(
+            invalid
+                .to_string()
+                .contains("safe environment variable name")
+        );
+        assert!(!invalid.to_string().contains(invalid_reference));
+
+        let unsupported = SecretReferenceManifest::parse_toml(
+            r#"
+            version = 2
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "env"
+            reference = "AGENTK_TOKEN"
+            "#,
+        )
+        .expect_err("unsupported manifest version should fail");
+        assert!(unsupported.to_string().contains("unsupported"));
     }
 
     #[test]
