@@ -283,6 +283,86 @@ pub trait SecretStore: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct EnvironmentSecretStore {
+    source: EnvironmentSecretSource,
+}
+
+#[derive(Clone)]
+enum EnvironmentSecretSource {
+    Process,
+    PresentRefs(BTreeSet<String>),
+}
+
+impl Default for EnvironmentSecretStore {
+    fn default() -> Self {
+        Self::process()
+    }
+}
+
+impl EnvironmentSecretStore {
+    pub const PROVIDER: &'static str = "env";
+
+    pub fn process() -> Self {
+        Self {
+            source: EnvironmentSecretSource::Process,
+        }
+    }
+
+    pub fn from_present_refs(refs: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            source: EnvironmentSecretSource::PresentRefs(refs.into_iter().collect()),
+        }
+    }
+
+    fn value_is_present(&self, name: &str) -> bool {
+        match &self.source {
+            EnvironmentSecretSource::Process => env::var_os(name).is_some_and(|value| {
+                value
+                    .to_str()
+                    .map(|value| !value.is_empty())
+                    .unwrap_or(true)
+            }),
+            EnvironmentSecretSource::PresentRefs(refs) => refs.contains(name),
+        }
+    }
+}
+
+impl fmt::Debug for EnvironmentSecretStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("EnvironmentSecretStore");
+        match &self.source {
+            EnvironmentSecretSource::Process => {
+                debug.field("source", &"process");
+            }
+            EnvironmentSecretSource::PresentRefs(refs) => {
+                debug.field("source", &"present-refs");
+                debug.field("entries", &refs.len());
+            }
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
+impl SecretStore for EnvironmentSecretStore {
+    fn contains_external_reference(&self, lookup: &SecretStoreLookup<'_>) -> bool {
+        lookup.provider() == Self::PROVIDER
+            && valid_env_secret_reference(lookup.reference())
+            && self.value_is_present(lookup.reference())
+    }
+}
+
+fn valid_env_secret_reference(reference: &str) -> bool {
+    let mut chars = reference.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+#[derive(Clone)]
 enum SecretTarget {
     Dummy,
     ExternalReference(ExternalSecretReference),
@@ -4318,6 +4398,79 @@ mod tests {
         let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
         assert!(!serialized.contains(external_provider));
         assert!(!serialized.contains(external_reference));
+    }
+
+    #[test]
+    fn environment_secret_store_allows_present_reference_without_logging_it() {
+        let env_reference = "AGENTK_TEST_REF";
+        let store = EnvironmentSecretStore::from_present_refs([env_reference.to_string()]);
+
+        let store_debug = format!("{store:?}");
+        assert!(store_debug.contains("EnvironmentSecretStore"));
+        assert!(store_debug.contains("entries"));
+        assert!(!store_debug.contains(env_reference));
+
+        let mut broker = SecretBroker::new().with_secret_store(store);
+        broker.register_external(
+            "secret://github-token",
+            EnvironmentSecretStore::PROVIDER,
+            env_reference,
+        );
+
+        let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+        kernel.grant("secret.open:secret://github-token");
+
+        let event = kernel.syscall(Syscall {
+            kind: SyscallKind::SecretOpen,
+            target: "secret://github-token".to_string(),
+            intent: "open externally brokered GitHub token through env presence".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["user_goal".to_string()],
+        });
+
+        assert_eq!(event.decision.verdict, Verdict::Allow);
+        assert!(event.decision.secret_handle.is_some());
+
+        let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
+        assert!(!serialized.contains(env_reference));
+    }
+
+    #[test]
+    fn environment_secret_store_blocks_missing_or_invalid_reference_without_logging_it() {
+        let missing_reference = "AGENTK_MISSING_REF";
+        let invalid_reference = "invalid-reference-name";
+        let store = EnvironmentSecretStore::from_present_refs([invalid_reference.to_string()]);
+
+        assert!(!valid_env_secret_reference(invalid_reference));
+        assert!(valid_env_secret_reference(missing_reference));
+
+        for reference in [missing_reference, invalid_reference] {
+            let mut broker = SecretBroker::new().with_secret_store(store.clone());
+            broker.register_external(
+                "secret://github-token",
+                EnvironmentSecretStore::PROVIDER,
+                reference,
+            );
+
+            let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
+            kernel.grant("secret.open:secret://github-token");
+
+            let event = kernel.syscall(Syscall {
+                kind: SyscallKind::SecretOpen,
+                target: "secret://github-token".to_string(),
+                intent: "open unavailable env-backed GitHub token".to_string(),
+                labels: labels(&[Label::Trusted]),
+                inputs: vec!["user_goal".to_string()],
+            });
+
+            assert_eq!(event.decision.verdict, Verdict::Deny);
+            assert_eq!(event.decision.rule, "secret-fd-unavailable");
+            assert!(event.decision.secret_handle.is_none());
+
+            let serialized =
+                serde_json::to_string(kernel.events()).expect("events should serialize");
+            assert!(!serialized.contains(reference));
+        }
     }
 
     #[test]
