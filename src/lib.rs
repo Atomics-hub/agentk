@@ -422,6 +422,12 @@ impl SecretReferenceEntry {
                 self.target
             )));
         }
+        if !valid_secret_provider_id(&self.provider) {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} provider must be a safe provider id",
+                self.target
+            )));
+        }
         if self.reference.trim().is_empty() {
             return Err(AgentKError::InvalidSecretManifest(format!(
                 "secret target {} reference must not be empty",
@@ -453,6 +459,17 @@ impl fmt::Debug for SecretReferenceEntry {
 
 fn default_secret_reference_manifest_version() -> u64 {
     1
+}
+
+fn valid_secret_provider_id(provider: &str) -> bool {
+    let mut chars = provider.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
 }
 
 #[derive(Clone)]
@@ -4923,6 +4940,35 @@ mod tests {
         assert!(duplicate.to_string().contains("duplicate secret target"));
         assert!(!duplicate.to_string().contains("AGENTK_ONE"));
         assert!(!duplicate.to_string().contains("AGENTK_TWO"));
+
+        let invalid_provider = "Cloud Provider/secret";
+        let invalid_provider_reference = "AGENTK_PROVIDER_REF";
+        let invalid_provider_error = SecretReferenceManifest::parse_toml(&format!(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://github-token"
+            provider = "{invalid_provider}"
+            reference = "{invalid_provider_reference}"
+            "#
+        ))
+        .expect_err("invalid provider id should fail");
+        assert!(
+            invalid_provider_error
+                .to_string()
+                .contains("safe provider id")
+        );
+        assert!(
+            !invalid_provider_error
+                .to_string()
+                .contains(invalid_provider)
+        );
+        assert!(
+            !invalid_provider_error
+                .to_string()
+                .contains(invalid_provider_reference)
+        );
 
         let invalid_reference = "invalid-reference-name";
         let invalid = SecretReferenceManifest::parse_toml(&format!(
