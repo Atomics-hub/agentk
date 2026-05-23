@@ -40,6 +40,7 @@ Status: in progress.
 - [x] Add a secret-reference manifest parser for external refs.
 - [x] Add redacted CLI validation for secret-reference manifests.
 - [x] Require a configured store before external refs mint handles by default.
+- [x] Scope secret store adapters to explicitly supported providers.
 - [ ] Add production secret storage integration.
 
 ## Milestone 3: MCP Proxy
