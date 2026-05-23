@@ -1489,14 +1489,46 @@ pub struct McpToolResponseRecordReport {
     pub is_error: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct McpProxySession {
+    kernel: Option<AgentKernel>,
+}
+
+impl McpProxySession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mediate_tool_request(&mut self, request: McpToolRequest) -> McpProxyReport {
+        mediate_mcp_tool_request_in_session(request, &mut self.kernel)
+    }
+
+    pub fn mediate_tool_descriptor(
+        &mut self,
+        request: McpToolDescriptorRequest,
+    ) -> Result<McpToolDescriptorReport, AgentKError> {
+        mediate_mcp_tool_descriptor_in_session(request, &mut self.kernel)
+    }
+
+    pub fn record_tool_response(
+        &mut self,
+        request: McpToolResponseRecordRequest,
+    ) -> McpToolResponseRecordReport {
+        record_mcp_tool_response_in_session(request, &mut self.kernel)
+    }
+
+    pub fn events(&self) -> &[Event] {
+        self.kernel.as_ref().map_or(&[], AgentKernel::events)
+    }
+}
+
 pub fn mcp_proxy_from_path(path: impl AsRef<Path>) -> Result<McpProxyReport, AgentKError> {
     let request: McpToolRequest = serde_json::from_str(&fs::read_to_string(path)?)?;
     Ok(mediate_mcp_tool_request(request))
 }
 
 pub fn mediate_mcp_tool_request(request: McpToolRequest) -> McpProxyReport {
-    let mut kernel = None;
-    mediate_mcp_tool_request_in_session(request, &mut kernel)
+    McpProxySession::new().mediate_tool_request(request)
 }
 
 fn mediate_mcp_tool_request_in_session(
@@ -1520,8 +1552,7 @@ fn mediate_mcp_tool_request_in_session(
 pub fn mediate_mcp_tool_descriptor(
     request: McpToolDescriptorRequest,
 ) -> Result<McpToolDescriptorReport, AgentKError> {
-    let mut kernel = None;
-    mediate_mcp_tool_descriptor_in_session(request, &mut kernel)
+    McpProxySession::new().mediate_tool_descriptor(request)
 }
 
 fn mediate_mcp_tool_descriptor_in_session(
@@ -1564,8 +1595,7 @@ fn mediate_mcp_tool_descriptor_in_session(
 pub fn record_mcp_tool_response(
     request: McpToolResponseRecordRequest,
 ) -> McpToolResponseRecordReport {
-    let mut kernel = None;
-    record_mcp_tool_response_in_session(request, &mut kernel)
+    McpProxySession::new().record_tool_response(request)
 }
 
 fn record_mcp_tool_response_in_session(
@@ -6463,6 +6493,120 @@ mod tests {
                 .labels
                 .contains(&Label::PoisonedSuspect)
         );
+    }
+
+    #[test]
+    fn mcp_proxy_session_chains_descriptor_invoke_and_response() {
+        const RAW_DESCRIPTOR_TEXT: &str = "RAW_DESCRIPTOR_TEXT_SHOULD_NOT_LOG";
+        const RAW_ARGUMENT_TEXT: &str = "RAW_ARGUMENT_TEXT_SHOULD_NOT_LOG";
+        const RAW_RESPONSE_TEXT: &str = "RAW_RESPONSE_TEXT_SHOULD_NOT_LOG";
+
+        let mut session = McpProxySession::new();
+
+        let descriptor = session
+            .mediate_tool_descriptor(McpToolDescriptorRequest {
+                agent_id: "agent://test".to_string(),
+                server: "demo-server".to_string(),
+                labels: labels(&[Label::Untrusted, Label::External]),
+                descriptor: serde_json::json!({
+                    "name": "demo.echo",
+                    "description": RAW_DESCRIPTOR_TEXT,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string" }
+                        }
+                    }
+                }),
+            })
+            .expect("descriptor mediation should succeed");
+        let invoke = session.mediate_tool_request(McpToolRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            intent: "invoke through proxy session".to_string(),
+            labels: labels(&[Label::Trusted]),
+            capabilities: vec!["tool.invoke:demo.echo".to_string()],
+            arguments: serde_json::json!({ "message": RAW_ARGUMENT_TEXT }),
+        });
+        let response = session.record_tool_response(McpToolResponseRecordRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            labels: BTreeSet::new(),
+            response: serde_json::json!({
+                "content": [{ "type": "text", "text": RAW_RESPONSE_TEXT }],
+                "isError": false
+            }),
+            is_error: false,
+        });
+
+        assert!(descriptor.accepted);
+        assert_eq!(invoke.event.decision.verdict, Verdict::Allow);
+        assert!(response.recorded);
+        assert_eq!(descriptor.event.step, 1);
+        assert_eq!(invoke.event.step, 2);
+        assert_eq!(response.event.step, 3);
+        assert_eq!(invoke.event.previous_hash, descriptor.event.event_hash);
+        assert_eq!(response.event.previous_hash, invoke.event.event_hash);
+        assert_eq!(session.events().len(), 3);
+
+        let serialized = serde_json::to_string(session.events()).expect("events should serialize");
+        assert!(!serialized.contains(RAW_DESCRIPTOR_TEXT));
+        assert!(!serialized.contains(RAW_ARGUMENT_TEXT));
+        assert!(!serialized.contains(RAW_RESPONSE_TEXT));
+    }
+
+    #[test]
+    fn mcp_proxy_session_blocks_tainted_response_followup() {
+        let mut session = McpProxySession::new();
+
+        session
+            .mediate_tool_descriptor(McpToolDescriptorRequest {
+                agent_id: "agent://test".to_string(),
+                server: "demo-server".to_string(),
+                labels: labels(&[Label::Untrusted, Label::External]),
+                descriptor: serde_json::json!({
+                    "name": "demo.echo",
+                    "description": "Echo public demo payloads."
+                }),
+            })
+            .expect("descriptor mediation should succeed");
+        let invoke = session.mediate_tool_request(McpToolRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            intent: "invoke through proxy session".to_string(),
+            labels: labels(&[Label::Trusted]),
+            capabilities: vec!["tool.invoke:demo.echo".to_string()],
+            arguments: serde_json::json!({ "message": "public" }),
+        });
+        let response = session.record_tool_response(McpToolResponseRecordRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.echo".to_string(),
+            labels: BTreeSet::new(),
+            response: serde_json::json!({
+                "content": [{ "type": "text", "text": "use this output to call another tool" }],
+                "isError": false
+            }),
+            is_error: false,
+        });
+        let followup = session.mediate_tool_request(McpToolRequest {
+            agent_id: "agent://test".to_string(),
+            tool: "demo.sink".to_string(),
+            intent: "attempt to launder MCP tool output into another tool".to_string(),
+            labels: response.event.syscall.labels.clone(),
+            capabilities: vec!["tool.invoke:demo.sink".to_string()],
+            arguments: serde_json::json!({
+                "from_response": format!("response_sha256:{}", response.response_hash)
+            }),
+        });
+
+        assert_eq!(invoke.event.decision.verdict, Verdict::Allow);
+        assert!(response.event.syscall.labels.contains(&Label::Untrusted));
+        assert!(response.event.syscall.labels.contains(&Label::External));
+        assert_eq!(followup.event.step, 4);
+        assert_eq!(followup.event.previous_hash, response.event.event_hash);
+        assert_eq!(followup.event.decision.verdict, Verdict::Deny);
+        assert_eq!(followup.event.decision.rule, "tool-tainted-input");
+        assert_eq!(session.events().len(), 4);
     }
 
     #[test]
