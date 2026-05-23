@@ -1,7 +1,7 @@
 use agentk::{
     AgentKError, McpToolRequest, Policy, ReadinessStatus, Verdict, default_log_path,
     fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, inspect_jsonl,
-    mcp_proxy_from_path, mcp_server_json_lines, readiness_report, release_audit_report,
+    mcp_proxy_from_path, mcp_server_json_stream, readiness_report, release_audit_report,
     replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
     signing_key_status, trusted_signing_key_manifest_keys_from_path,
@@ -10,7 +10,7 @@ use agentk::{
     write_latest_copy,
 };
 use clap::{Parser, Subcommand};
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -525,10 +525,9 @@ fn mcp_lines() -> Result<(), AgentKError> {
 }
 
 fn mcp_server() -> Result<(), AgentKError> {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    print!("{}", mcp_server_json_lines(&input)?);
-    Ok(())
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    mcp_server_json_stream(BufReader::new(stdin.lock()), stdout.lock())
 }
 
 fn signing_key(json: bool) -> Result<(), AgentKError> {
