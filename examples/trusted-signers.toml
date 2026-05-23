@@ -1,0 +1,5 @@
+version = 1
+
+[[trusted_keys]]
+label = "agentk-development-signer"
+public_key = "db995fe25169d141cab9bbba92baa01f9f2e1ece7df4cb2ac05190f37fcc1f9d"

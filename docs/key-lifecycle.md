@@ -56,9 +56,19 @@ Reviewers should pin evidence verification to the expected public release key:
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
 ```
 
-Multiple `--trusted-public-key` values are allowed during rotation windows. If
-pinning is enabled, AgentK rejects otherwise-valid receipts or secret handles
-signed by an unknown public key.
+Reviewers can also load expected keys from a public trusted-signer manifest.
+The bundled `examples/trusted-signers.toml` is for the demo signer; production
+release review should use a manifest containing the expected release public key:
+
+```sh
+cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-key-manifest <release-trusted-signers.toml>
+cargo run -- trusted-signers-check --manifest <release-trusted-signers.toml>
+```
+
+Multiple `--trusted-public-key` values or manifest entries are allowed during
+rotation windows. If pinning is enabled, AgentK rejects otherwise-valid receipts
+or secret handles signed by an unknown public key. The manifest contains public
+keys only; private keys remain outside the repository.
 
 ## Rotation
 

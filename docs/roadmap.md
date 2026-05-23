@@ -82,6 +82,7 @@ Status: in progress.
 - [x] Add local key generation command.
 - [x] Add signature verification CLI output.
 - [x] Add trusted public-key pinning for signature verification.
+- [x] Add a public trusted-signer manifest for verifier pinning.
 - [x] Add signed key rotation manifest.
 - [x] Add key rotation manifest verification.
 - [ ] Add production key storage and operational lifecycle.
