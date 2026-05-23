@@ -30,6 +30,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] Secret FD tests prove raw secret material is not logged.
 - [ ] Secret FD dummy registration is target-only and does not accept raw secret material.
 - [ ] Secret FD tests prove external secret provider refs are not logged.
+- [ ] Secret FD tests prove external secret provider refs are redacted from broker debug output.
 - [ ] Flight-log inspect tests prove raw input refs are redacted.
 - [ ] Replay tests prove allowed model/tool/network side effects get synthetic stub output refs.
 - [ ] Behavior fork replay tests prove raw output overrides are rejected.

@@ -206,9 +206,75 @@ pub enum SecretTargetSource {
     ExternalReference,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
+pub struct ExternalSecretReference {
+    provider: String,
+    reference: String,
+}
+
+impl ExternalSecretReference {
+    fn new(provider: String, reference: String) -> Self {
+        Self {
+            provider,
+            reference,
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
+impl fmt::Debug for ExternalSecretReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternalSecretReference")
+            .field("provider_sha256", &hash_json(&self.provider))
+            .field("reference_sha256", &hash_json(&self.reference))
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+enum SecretTarget {
+    Dummy,
+    ExternalReference(ExternalSecretReference),
+}
+
+impl SecretTarget {
+    fn source(&self) -> SecretTargetSource {
+        match self {
+            Self::Dummy => SecretTargetSource::Dummy,
+            Self::ExternalReference(_) => SecretTargetSource::ExternalReference,
+        }
+    }
+}
+
+impl fmt::Debug for SecretTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dummy => f.write_str("Dummy"),
+            Self::ExternalReference(reference) => {
+                f.debug_tuple("ExternalReference").field(reference).finish()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct SecretBroker {
-    targets: BTreeMap<String, SecretTargetSource>,
+    targets: BTreeMap<String, SecretTarget>,
+}
+
+impl fmt::Debug for SecretBroker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretBroker")
+            .field("targets", &self.targets)
+            .finish()
+    }
 }
 
 impl SecretBroker {
@@ -217,22 +283,33 @@ impl SecretBroker {
     }
 
     pub fn register_dummy(&mut self, target: impl Into<String>) {
-        self.targets
-            .insert(target.into(), SecretTargetSource::Dummy);
+        self.targets.insert(target.into(), SecretTarget::Dummy);
     }
 
     pub fn register_external(
         &mut self,
         target: impl Into<String>,
-        _provider: impl Into<String>,
-        _reference: impl Into<String>,
+        provider: impl Into<String>,
+        reference: impl Into<String>,
     ) {
-        self.targets
-            .insert(target.into(), SecretTargetSource::ExternalReference);
+        self.targets.insert(
+            target.into(),
+            SecretTarget::ExternalReference(ExternalSecretReference::new(
+                provider.into(),
+                reference.into(),
+            )),
+        );
     }
 
     pub fn target_source(&self, target: &str) -> Option<SecretTargetSource> {
-        self.targets.get(target).copied()
+        self.targets.get(target).map(SecretTarget::source)
+    }
+
+    pub fn external_reference(&self, target: &str) -> Option<&ExternalSecretReference> {
+        match self.targets.get(target) {
+            Some(SecretTarget::ExternalReference(reference)) => Some(reference),
+            _ => None,
+        }
     }
 
     fn open(
@@ -4028,14 +4105,31 @@ mod tests {
 
     #[test]
     fn secret_fd_handle_can_use_external_secret_reference_without_logging_it() {
+        let external_provider = "test-provider";
         let external_reference = "external-store-reference-should-not-log";
         let mut broker = SecretBroker::new();
-        broker.register_external("secret://github-token", "test-provider", external_reference);
+        broker.register_external(
+            "secret://github-token",
+            external_provider,
+            external_reference,
+        );
 
         assert_eq!(
             broker.target_source("secret://github-token"),
             Some(SecretTargetSource::ExternalReference)
         );
+        let reference_record = broker
+            .external_reference("secret://github-token")
+            .expect("external reference is retained for broker adapters");
+        assert_eq!(reference_record.provider(), external_provider);
+        assert_eq!(reference_record.reference(), external_reference);
+
+        let broker_debug = format!("{broker:?}");
+        assert!(broker_debug.contains("ExternalReference"));
+        assert!(broker_debug.contains("provider_sha256"));
+        assert!(broker_debug.contains("reference_sha256"));
+        assert!(!broker_debug.contains(external_provider));
+        assert!(!broker_debug.contains(external_reference));
 
         let mut kernel = AgentKernel::new("agent://test").with_secret_broker(broker);
         kernel.grant("secret.open:secret://github-token");
@@ -4053,7 +4147,7 @@ mod tests {
 
         let serialized = serde_json::to_string(kernel.events()).expect("events should serialize");
         assert!(!serialized.contains(external_reference));
-        assert!(!serialized.contains("test-provider"));
+        assert!(!serialized.contains(external_provider));
         assert!(serialized.contains("secret_fd_"));
     }
 
