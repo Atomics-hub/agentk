@@ -264,10 +264,9 @@ Not implemented yet:
 - production MCP server transport,
 - production secret storage,
 - real sandboxing,
-- eBPF/cgroup enforcement,
-- fork replay with changed model/tool behavior.
+- eBPF/cgroup enforcement.
 
-By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. The CLI only prints the public key.
+By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. The CLI only prints the public key.
 
 See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md), and [docs/public-readiness.md](docs/public-readiness.md).
 

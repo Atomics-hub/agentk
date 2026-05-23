@@ -61,6 +61,7 @@ Status: in progress.
 - [x] Add Ed25519 development signatures for receipts and secret handles.
 - [x] Add tamper-failure tests for signed proofs.
 - [x] Add configurable signing key via `AGENTK_SIGNING_KEY_HEX`.
+- [x] Add release gate for requiring a configured signing key.
 - [x] Add local key generation command.
 - [x] Add signature verification CLI output.
 - [x] Add signed key rotation manifest.
