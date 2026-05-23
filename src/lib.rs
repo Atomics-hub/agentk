@@ -22,6 +22,7 @@ const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
+pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
 pub const REQUIRE_SIGNING_KEY_ENV: &str = "AGENTK_REQUIRE_SIGNING_KEY";
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -2721,7 +2722,7 @@ fn check_signing_key_source_with(
     signing_key_required: bool,
 ) -> ReadinessCheck {
     match status.source {
-        SigningKeySource::Environment => readiness_check(
+        SigningKeySource::Environment | SigningKeySource::File => readiness_check(
             "signing key source",
             ReadinessStatus::Pass,
             "using configured signing key",
@@ -2729,7 +2730,9 @@ fn check_signing_key_source_with(
         SigningKeySource::Development if signing_key_required => readiness_check(
             "signing key source",
             ReadinessStatus::Fail,
-            format!("{SIGNING_KEY_ENV} is required by {REQUIRE_SIGNING_KEY_ENV}"),
+            format!(
+                "{SIGNING_KEY_ENV} or {SIGNING_KEY_FILE_ENV} is required by {REQUIRE_SIGNING_KEY_ENV}"
+            ),
         ),
         SigningKeySource::Development => readiness_check(
             "signing key source",
@@ -2740,6 +2743,11 @@ fn check_signing_key_source_with(
             "signing key source",
             ReadinessStatus::Fail,
             format!("{SIGNING_KEY_ENV} is invalid"),
+        ),
+        SigningKeySource::InvalidFileFallback => readiness_check(
+            "signing key source",
+            ReadinessStatus::Fail,
+            format!("{SIGNING_KEY_FILE_ENV} is invalid"),
         ),
     }
 }
@@ -3034,16 +3042,20 @@ struct ActiveSigningKey {
 #[serde(rename_all = "kebab-case")]
 pub enum SigningKeySource {
     Environment,
+    File,
     Development,
     InvalidEnvironmentFallback,
+    InvalidFileFallback,
 }
 
 impl SigningKeySource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Environment => "environment",
+            Self::File => "file",
             Self::Development => "development",
             Self::InvalidEnvironmentFallback => "invalid-environment-fallback",
+            Self::InvalidFileFallback => "invalid-file-fallback",
         }
     }
 }
@@ -3068,11 +3080,15 @@ pub fn signing_key_status() -> SigningKeyStatus {
     let public_key = hex::encode(active.signing_key.verifying_key().to_bytes());
     let warning = match active.source {
         SigningKeySource::Environment => None,
+        SigningKeySource::File => None,
         SigningKeySource::Development => Some(format!(
             "{SIGNING_KEY_ENV} is not set; using static development key"
         )),
         SigningKeySource::InvalidEnvironmentFallback => Some(format!(
             "{SIGNING_KEY_ENV} is invalid; using static development key"
+        )),
+        SigningKeySource::InvalidFileFallback => Some(format!(
+            "{SIGNING_KEY_FILE_ENV} is invalid; using static development key"
         )),
     };
 
@@ -3080,7 +3096,10 @@ pub fn signing_key_status() -> SigningKeyStatus {
         algorithm: PROOF_ALGORITHM.to_string(),
         source: active.source,
         public_key,
-        production_ready: active.source == SigningKeySource::Environment,
+        production_ready: matches!(
+            active.source,
+            SigningKeySource::Environment | SigningKeySource::File
+        ),
         warning,
     }
 }
@@ -3121,7 +3140,7 @@ pub fn generate_signing_key_file(
         path: path.to_path_buf(),
         algorithm: PROOF_ALGORITHM.to_string(),
         public_key,
-        env_var: SIGNING_KEY_ENV.to_string(),
+        env_var: SIGNING_KEY_FILE_ENV.to_string(),
         file_mode: "0600".to_string(),
     })
 }
@@ -3345,8 +3364,25 @@ fn write_public_file(path: &Path, contents: &[u8], force: bool) -> Result<(), Ag
 }
 
 fn active_signing_key() -> ActiveSigningKey {
-    match env::var(SIGNING_KEY_ENV) {
-        Ok(value) => match signing_key_from_hex(&value) {
+    if let Ok(value) = env::var(SIGNING_KEY_ENV) {
+        return active_signing_key_from_sources(Some(&value), None, false);
+    }
+
+    if let Ok(path) = env::var(SIGNING_KEY_FILE_ENV) {
+        let file_value = fs::read_to_string(path).ok();
+        return active_signing_key_from_sources(None, file_value.as_deref(), true);
+    }
+
+    active_signing_key_from_sources(None, None, false)
+}
+
+fn active_signing_key_from_sources(
+    signing_key_hex: Option<&str>,
+    signing_key_file_hex: Option<&str>,
+    file_configured: bool,
+) -> ActiveSigningKey {
+    if let Some(value) = signing_key_hex {
+        return match signing_key_from_hex(value) {
             Some(signing_key) => ActiveSigningKey {
                 signing_key,
                 source: SigningKeySource::Environment,
@@ -3355,11 +3391,25 @@ fn active_signing_key() -> ActiveSigningKey {
                 signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
                 source: SigningKeySource::InvalidEnvironmentFallback,
             },
-        },
-        Err(_) => ActiveSigningKey {
-            signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
-            source: SigningKeySource::Development,
-        },
+        };
+    }
+
+    if file_configured {
+        return match signing_key_file_hex.and_then(signing_key_from_hex) {
+            Some(signing_key) => ActiveSigningKey {
+                signing_key,
+                source: SigningKeySource::File,
+            },
+            None => ActiveSigningKey {
+                signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
+                source: SigningKeySource::InvalidFileFallback,
+            },
+        };
+    }
+
+    ActiveSigningKey {
+        signing_key: SigningKey::from_bytes(&DEV_SIGNING_KEY_BYTES),
+        source: SigningKeySource::Development,
     }
 }
 
@@ -4346,6 +4396,48 @@ mod tests {
     }
 
     #[test]
+    fn file_signing_key_source_is_release_ready_without_exposing_path() {
+        let key_hex = hex::encode([0x42_u8; 32]);
+        let active = active_signing_key_from_sources(None, Some(&key_hex), true);
+
+        assert_eq!(active.source, SigningKeySource::File);
+        assert_eq!(active.source.as_str(), "file");
+        assert!(!active.source.as_str().contains('/'));
+
+        let status = SigningKeyStatus {
+            algorithm: PROOF_ALGORITHM.to_string(),
+            source: active.source,
+            public_key: hex::encode(active.signing_key.verifying_key().to_bytes()),
+            production_ready: matches!(
+                active.source,
+                SigningKeySource::Environment | SigningKeySource::File
+            ),
+            warning: None,
+        };
+        let check = check_signing_key_source_with(&status, true);
+
+        assert_eq!(check.status, ReadinessStatus::Pass);
+        assert!(status.production_ready);
+    }
+
+    #[test]
+    fn invalid_file_signing_key_source_fails_readiness() {
+        let active = active_signing_key_from_sources(None, Some("not a key"), true);
+        let status = SigningKeyStatus {
+            algorithm: PROOF_ALGORITHM.to_string(),
+            source: active.source,
+            public_key: hex::encode(active.signing_key.verifying_key().to_bytes()),
+            production_ready: false,
+            warning: None,
+        };
+        let check = check_signing_key_source_with(&status, true);
+
+        assert_eq!(active.source, SigningKeySource::InvalidFileFallback);
+        assert_eq!(check.status, ReadinessStatus::Fail);
+        assert!(check.detail.contains(SIGNING_KEY_FILE_ENV));
+    }
+
+    #[test]
     fn signing_key_requirement_flag_accepts_explicit_truthy_values() {
         for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
             assert!(env_flag_enabled(Some(value)), "{value}");
@@ -4393,6 +4485,7 @@ mod tests {
         );
         assert!(!metadata.contains(private_key.trim()));
         assert!(metadata.contains(&generated.public_key));
+        assert_eq!(generated.env_var, SIGNING_KEY_FILE_ENV);
 
         let _ = fs::remove_file(path);
     }

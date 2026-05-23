@@ -39,7 +39,7 @@ Non-guarantees:
 - no protection against malicious local users,
 - no production-grade storage for real secrets yet.
 
-For non-demo runs, configure `AGENTK_SIGNING_KEY_HEX` with a 32-byte hex Ed25519 signing key. Do not commit this value. AgentK prints only the derived public key through `agentk signing-key`.
+For non-demo runs, prefer `AGENTK_SIGNING_KEY_FILE` pointing to a private key file outside the repository, or configure `AGENTK_SIGNING_KEY_HEX` with a 32-byte hex Ed25519 signing key. Do not commit either value or file. AgentK prints only the derived public key through `agentk signing-key`.
 
 Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates or production-like checks to fail readiness if AgentK would otherwise use the static development key.
 

@@ -41,7 +41,7 @@ cargo run -- key-rotate-verify --manifest docs/key-rotation-vNEXT.json
 Run the strict audit with the local release key:
 
 ```sh
-AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-release-signing-key) cargo run --locked -- release-audit --strict
+AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-release-signing-key cargo run --locked -- release-audit --strict
 ```
 
 Then run the explicit command set used by reviewers:
