@@ -62,7 +62,7 @@ Before first public push:
 ```txt
 git remote -v
 git status --short
-AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-signing-key) cargo run -- release-audit --strict
+AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_HEX=$(cat ../agentk-signing-key) cargo run -- release-audit --strict
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features

@@ -22,6 +22,7 @@ const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
+pub const REQUIRE_SIGNING_KEY_ENV: &str = "AGENTK_REQUIRE_SIGNING_KEY";
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2712,11 +2713,23 @@ fn check_security_disclosure(root: &Path) -> ReadinessCheck {
 
 fn check_signing_key_source() -> ReadinessCheck {
     let status = signing_key_status();
+    check_signing_key_source_with(&status, signing_key_required())
+}
+
+fn check_signing_key_source_with(
+    status: &SigningKeyStatus,
+    signing_key_required: bool,
+) -> ReadinessCheck {
     match status.source {
         SigningKeySource::Environment => readiness_check(
             "signing key source",
             ReadinessStatus::Pass,
             "using configured signing key",
+        ),
+        SigningKeySource::Development if signing_key_required => readiness_check(
+            "signing key source",
+            ReadinessStatus::Fail,
+            format!("{SIGNING_KEY_ENV} is required by {REQUIRE_SIGNING_KEY_ENV}"),
         ),
         SigningKeySource::Development => readiness_check(
             "signing key source",
@@ -2729,6 +2742,16 @@ fn check_signing_key_source() -> ReadinessCheck {
             format!("{SIGNING_KEY_ENV} is invalid"),
         ),
     }
+}
+
+fn signing_key_required() -> bool {
+    env_flag_enabled(env::var(REQUIRE_SIGNING_KEY_ENV).ok().as_deref())
+}
+
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
 }
 
 fn check_signing_key_disclaimer(root: &Path) -> ReadinessCheck {
@@ -4303,6 +4326,34 @@ mod tests {
         assert!(!serialized.contains("signing_key"));
         assert!(!serialized.contains("private"));
         assert!(!serialized.contains(&hex::encode(DEV_SIGNING_KEY_BYTES)));
+    }
+
+    #[test]
+    fn required_signing_key_turns_development_signer_into_failure() {
+        let status = SigningKeyStatus {
+            algorithm: PROOF_ALGORITHM.to_string(),
+            source: SigningKeySource::Development,
+            public_key: "public".to_string(),
+            production_ready: false,
+            warning: None,
+        };
+
+        let check = check_signing_key_source_with(&status, true);
+
+        assert_eq!(check.status, ReadinessStatus::Fail);
+        assert!(check.detail.contains(SIGNING_KEY_ENV));
+        assert!(check.detail.contains(REQUIRE_SIGNING_KEY_ENV));
+    }
+
+    #[test]
+    fn signing_key_requirement_flag_accepts_explicit_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] {
+            assert!(env_flag_enabled(Some(value)), "{value}");
+        }
+
+        for value in [None, Some(""), Some("0"), Some("false"), Some("off")] {
+            assert!(!env_flag_enabled(value), "{value:?}");
+        }
     }
 
     #[test]

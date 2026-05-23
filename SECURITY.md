@@ -41,6 +41,8 @@ Non-guarantees:
 
 For non-demo runs, configure `AGENTK_SIGNING_KEY_HEX` with a 32-byte hex Ed25519 signing key. Do not commit this value. AgentK prints only the derived public key through `agentk signing-key`.
 
+Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates or production-like checks to fail readiness if AgentK would otherwise use the static development key.
+
 `agentk keygen --out <path>` writes a new private signing key to a caller-chosen file with restrictive permissions on Unix. Keep that path outside the repository.
 
 `agentk key-rotate --current <path> --next-out <path> --manifest <path>` reads the current private signing key, writes the next private signing key, and emits a public manifest signed by the previous key. The manifest is intended to be reviewable and contains public keys, a payload hash, and a signature only.
