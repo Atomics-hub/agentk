@@ -28,6 +28,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] All policy deny paths have tests.
 - [ ] All receipt/hash verification paths have tests.
 - [ ] Secret FD tests prove raw secret material is not logged.
+- [ ] Secret FD tests prove external secret provider refs are not logged.
 - [ ] Flight-log inspect tests prove raw input refs are redacted.
 - [ ] Replay tests prove allowed model/tool/network side effects get synthetic stub output refs.
 - [ ] Behavior fork replay tests prove raw output overrides are rejected.

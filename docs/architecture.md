@@ -115,7 +115,7 @@ secret.open github_token -> secret_fd:github_read_15min
 
 The agent can use the handle through a broker, but cannot print, copy, or send the secret itself.
 
-The current prototype stores only dummy in-memory secrets in tests and serializes the handle, proof, signature, public key, and labels. It does not serialize raw secret material.
+The current prototype can register either dummy secret targets for tests or external secret references for adapter experiments. AgentK only needs to know that a brokered target exists before issuing a handle; it serializes the handle, proof, signature, public key, and labels, not raw secret bytes or external provider references.
 
 Secret handles are scoped to the same capability string as the `secret.open`
 receipt, share the receipt expiry step, and carry the receipt id and proof hash.
