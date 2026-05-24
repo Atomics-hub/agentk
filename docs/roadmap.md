@@ -68,6 +68,7 @@ Status: in progress.
 - [x] Add a poisoned subprocess MCP demo transcript and release-audit smoke coverage.
 - [x] Add optional subprocess proxy trace output for `trace-inspect` review.
 - [x] Strip AgentK-only metadata from subprocess proxy passthrough traffic.
+- [x] Return sanitized JSON-RPC errors for malformed downstream subprocess responses.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
