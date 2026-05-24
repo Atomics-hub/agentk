@@ -46,8 +46,8 @@ are not printed in the error.
 ## Lifecycle
 
 The client must send `initialize` with AgentK's supported MCP protocol version,
-then `notifications/initialized`, before `tools/list` or `tools/call` traffic
-is proxied.
+then `notifications/initialized`, before mediated tool or resource traffic is
+proxied.
 
 Before readiness:
 
@@ -59,13 +59,15 @@ Before readiness:
 The downstream server's `initialize` response must report the supported
 protocol version before AgentK marks the session initialized. The downstream
 `tools/list` result must be an object with a `tools` array before descriptors
-are exposed.
+are exposed. The downstream `resources/list` result must be an object with a
+`resources` array before resource descriptors are exposed.
 
-After readiness, `initialize`, `ping`, `tools/list`, and `tools/call` requests
-are the only request methods covered by this proxy. Other MCP request methods
-are rejected with a sanitized `Method not found` response until they have an
-explicit AgentK policy contract. The proxy forwards `notifications/initialized`
-and the cancellation notification, but drops other notifications.
+After readiness, `initialize`, `ping`, `tools/list`, `tools/call`,
+`resources/list`, and `resources/read` requests are the only request methods
+covered by this proxy. Other MCP request methods are rejected with a sanitized
+`Method not found` response until they have an explicit AgentK policy contract.
+The proxy forwards `notifications/initialized` and the cancellation
+notification, but drops other notifications.
 
 ## Mediation
 
@@ -88,9 +90,21 @@ If policy allows the call, AgentK forwards the sanitized request, records a
 hash-only response event, and attaches AgentK evidence to the client-visible
 response.
 
+On `resources/list`, AgentK treats downstream resource descriptors as untrusted
+external context. It records resource descriptor hashes, marks suspicious
+descriptor text as `poisoned-suspect`, and drops malformed descriptors instead
+of reflecting raw malformed payloads.
+
+On `resources/read`, AgentK requires a target-scoped `resource.read` capability
+before forwarding the request. The resource URI is represented in policy and
+evidence by hash, AgentK-only metadata is stripped before forwarding, and the
+resource response is recorded as a hash-only `resource.response` event before
+evidence is attached to the client-visible response.
+
 ## Redaction And Evidence
 
-AgentK records evidence as hashes and policy decisions, not raw tool payloads.
+AgentK records evidence as hashes and policy decisions, not raw tool or
+resource payloads.
 
 The proxy sanitizes these downstream failures:
 
@@ -101,16 +115,22 @@ The proxy sanitizes these downstream failures:
 - malformed `tools/list` results
 - malformed successful `tools/call` results
 - downstream `tools/call` error bodies
+- malformed `resources/list` results
+- malformed successful `resources/read` results
+- downstream `resources/read` error bodies
 
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and
 `data` fields are not returned to the client. The original error body is still
 represented by a response hash in the AgentK trace.
 
+Downstream `resources/read` errors follow the same pattern: raw error text is
+not reflected to the client, while hash evidence is kept in the trace.
+
 ## Trace Inspection
 
 Use `--trace-out` to write the AgentK event log for proxied descriptor,
-tool-invoke, and response-record events:
+tool-invoke, resource-read, and response-record events:
 
 ```sh
 cargo run -- mcp-proxy-stdio \
@@ -134,6 +154,6 @@ This is the subprocess stdio proxy path. It is suitable for local review,
 release-audit smoke coverage, and integration experiments. A complete
 production MCP transport still needs a hardened server packaging story,
 deployment guidance, and operational key management. The current boundary
-mediates descriptor listing and tool calls; broader MCP resource and prompt
-surfaces still need explicit policy contracts and are not forwarded as generic
-passthrough.
+mediates tool listing/calls and resource listing/reads; prompt surfaces and
+resource subscription flows still need explicit policy contracts and are not
+forwarded as generic passthrough.
