@@ -80,6 +80,7 @@ Status: in progress.
 - [x] Add CLI allowlisting for downstream subprocess MCP environment variables.
 - [x] Suppress downstream subprocess MCP stderr so diagnostics cannot bypass redaction.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
+- [x] Validate subprocess MCP proxy config before spawning the child.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Mediate downstream subprocess MCP `resources/list` and `resources/read` with hash-only evidence.

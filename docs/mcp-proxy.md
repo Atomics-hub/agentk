@@ -26,6 +26,11 @@ Hyphen-prefixed child args are accepted:
 cargo run -- mcp-proxy-stdio --command sh --arg -c --arg 'exec ./server'
 ```
 
+The proxy validates non-empty `agent_id`, `server_id`, and child command values
+before spawning. Spawn failures are reported without reflecting the command
+string, so local executable paths or accidental command text do not become part
+of client-visible diagnostics.
+
 The proxy clears the child process environment by default. Use
 `--allow-env NAME` to copy a named parent environment variable into the child
 environment. Repeat the flag for multiple variables:
@@ -41,7 +46,8 @@ Do not put secret values directly in `--arg`; pass only names through
 `--allow-env` when a downstream server needs an environment variable.
 Allowed environment names must match `[A-Za-z_][A-Za-z0-9_]*`. Missing or
 non-UTF-8 parent values fail before the child process is spawned, and values
-are not printed in the error.
+are not printed in the error. The same name validation is enforced on the proxy
+configuration before spawning the child.
 
 The child server's stderr is not forwarded by the proxy. Downstream diagnostic
 streams are outside the MCP protocol and can contain raw secrets, poisoned
