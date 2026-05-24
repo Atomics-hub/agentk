@@ -64,7 +64,7 @@ tool output cannot grant itself new tools
 - Flight-log inspection is redacted by default, but raw JSONL logs may still contain sensitive targets or any raw inputs produced by future adapters.
 - Replay verifies the log chain and stubs side effects; fork replay currently compares policy decisions only.
 - There is no host process sandbox yet.
-- MCP support includes side-effect-free mediation commands, descriptor hashing, response hashing, and a minimal JSON-RPC stdio server, not a complete production proxy.
+- MCP support includes side-effect-free mediation commands, descriptor hashing, response hashing, a subprocess stdio proxy for mediated tool/resource/prompt boundaries, and a minimal JSON-RPC stdio server, not a complete production proxy.
 - Key rotation emits a signed public manifest, but there is no production key storage yet.
 
 ## Design Bias

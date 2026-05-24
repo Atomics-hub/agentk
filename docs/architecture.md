@@ -141,7 +141,7 @@ Replay modes:
 
 `agentk fork-replay-behavior` accepts a JSON array of changed hashed output refs and emits a divergence report. Overrides are bound to the recorded step, syscall, and target, and raw output strings are rejected.
 
-`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, signer-pinning and trusted-signer manifest smoke coverage, brokered secret-handle, secret-reference validation, and secret-store availability smoke tests, an MCP taint-flow smoke test, redacted inspect, replay, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
+`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, signer-pinning and trusted-signer manifest smoke coverage, brokered secret-handle, secret-reference validation, and secret-store availability smoke tests, MCP taint-flow and subprocess MCP boundary smoke tests, redacted inspect, replay, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
 
 ### MCP Proxy MVP
 
@@ -184,11 +184,12 @@ This is useful for integration experiments, but it is not a full MCP proxy and i
 
 `agentk mcp-proxy-stdio` sits between an MCP client and a downstream stdio MCP
 server process. It mediates `tools/list` descriptors, `tools/call` requests,
-`resources/list` descriptors, and `resources/read` requests. Tool and resource
-responses are recorded with hash-first evidence, AgentK-only policy metadata is
-stripped from forwarded covered messages, and post-ready MCP request methods
-without an AgentK policy contract are rejected instead of being forwarded as
-generic passthrough.
+`resources/list` descriptors, `resources/read` requests, `prompts/list`
+descriptors, and `prompts/get` requests. Tool, resource, and prompt responses
+are recorded with hash-first evidence, AgentK-only policy metadata is stripped
+from forwarded covered messages, and post-ready MCP request methods without an
+AgentK policy contract are rejected instead of being forwarded as generic
+passthrough.
 
 ### Key Rotation Manifests
 

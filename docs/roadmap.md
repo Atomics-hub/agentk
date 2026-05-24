@@ -83,6 +83,8 @@ Status: in progress.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Mediate downstream subprocess MCP `resources/list` and `resources/read` with hash-only evidence.
 - [x] Add release-audit smoke coverage for subprocess MCP resource mediation.
+- [x] Mediate downstream subprocess MCP `prompts/list` and `prompts/get` with hash-only evidence.
+- [x] Add release-audit smoke coverage for subprocess MCP prompt mediation.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.

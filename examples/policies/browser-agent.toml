@@ -191,6 +191,59 @@ reason = "browser MCP resource content is recorded by hash without storing raw o
 syscalls = ["resource.response"]
 
 [[rules]]
+id = "prompt-descriptor-read"
+effect = "allow"
+reason = "browser MCP prompt descriptors are hashed and mediated as untrusted context before use"
+
+[rules.when]
+syscalls = ["prompt.describe"]
+
+[[rules]]
+id = "prompt-sensitive-input"
+effect = "deny"
+reason = "secret or private labels cannot be used to fetch browser MCP prompts"
+
+[rules.when]
+syscalls = ["prompt.get"]
+labels_any = ["secret", "private"]
+
+[[rules]]
+id = "prompt-tainted-input"
+effect = "deny"
+reason = "untrusted or poisoned labels cannot fetch browser MCP prompts"
+
+[rules.when]
+syscalls = ["prompt.get"]
+labels_any = ["untrusted", "poisoned-suspect"]
+
+[[rules]]
+id = "prompt-get-receipt"
+effect = "allow"
+reason = "browser MCP prompt fetch covered by a scoped receipt"
+
+[rules.when]
+syscalls = ["prompt.get"]
+labels_none = ["secret", "private", "untrusted", "poisoned-suspect"]
+capability = "present"
+
+[[rules]]
+id = "prompt-get-capability-missing"
+effect = "deny"
+reason = "browser MCP prompt fetches require explicit target-scoped capability"
+
+[rules.when]
+syscalls = ["prompt.get"]
+capability = "missing"
+
+[[rules]]
+id = "prompt-response-record"
+effect = "allow"
+reason = "browser MCP prompt content is recorded by hash without storing raw output"
+
+[rules.when]
+syscalls = ["prompt.response"]
+
+[[rules]]
 id = "default-deny"
 effect = "deny"
 reason = "no policy rule allowed this syscall; default deny"
