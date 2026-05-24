@@ -2102,7 +2102,7 @@ impl McpSubprocessProxy {
 
         match method {
             "initialize" => self.handle_initialize(id, &message, object).map(Some),
-            "ping" => self.round_trip(&message, &id).map(Some),
+            "ping" => self.handle_ping(id, &message).map(Some),
             "tools/list" => self.handle_tools_list(id, &message).map(Some),
             "tools/call" => {
                 let params = object
@@ -2174,6 +2174,20 @@ impl McpSubprocessProxy {
         }
 
         let response = self.round_trip(message, &id)?;
+        if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
+            let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
+                Ok(error) => error,
+                Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
+            };
+            return Ok(jsonrpc_downstream_mcp_method_error(
+                id,
+                "initialize",
+                downstream_error,
+            ));
+        }
         if let Some(result) = response.get("result") {
             if let Err(detail) = validate_downstream_mcp_initialize_result(result) {
                 return Ok(jsonrpc_bad_downstream_response(id, detail));
@@ -2188,12 +2202,50 @@ impl McpSubprocessProxy {
         ))
     }
 
+    fn handle_ping(
+        &mut self,
+        id: serde_json::Value,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value, AgentKError> {
+        let response = self.round_trip(message, &id)?;
+        if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
+            let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
+                Ok(error) => error,
+                Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
+            };
+            return Ok(jsonrpc_downstream_mcp_method_error(
+                id,
+                "ping",
+                downstream_error,
+            ));
+        }
+
+        Ok(response)
+    }
+
     fn handle_tools_list(
         &mut self,
         id: serde_json::Value,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, AgentKError> {
         let response = self.round_trip(message, &id)?;
+        if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
+            let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
+                Ok(error) => error,
+                Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
+            };
+            return Ok(jsonrpc_downstream_mcp_method_error(
+                id,
+                "tools/list",
+                downstream_error,
+            ));
+        }
         let Some(result) = response.get("result") else {
             return Ok(response);
         };
@@ -2278,6 +2330,9 @@ impl McpSubprocessProxy {
             return Ok(jsonrpc_bad_downstream_response(id, detail));
         }
         if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
             let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
                 Ok(error) => error,
                 Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
@@ -2327,6 +2382,9 @@ impl McpSubprocessProxy {
     ) -> Result<serde_json::Value, AgentKError> {
         let response = self.round_trip(message, &id)?;
         if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
             let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
                 Ok(error) => error,
                 Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
@@ -2411,6 +2469,9 @@ impl McpSubprocessProxy {
             return Ok(jsonrpc_bad_downstream_response(id, detail));
         }
         if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
             let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
                 Ok(error) => error,
                 Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
@@ -2461,6 +2522,9 @@ impl McpSubprocessProxy {
     ) -> Result<serde_json::Value, AgentKError> {
         let response = self.round_trip(message, &id)?;
         if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
             let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
                 Ok(error) => error,
                 Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
@@ -2559,6 +2623,9 @@ impl McpSubprocessProxy {
             return Ok(jsonrpc_bad_downstream_response(id, detail));
         }
         if let Some(error) = response.get("error") {
+            if is_agentk_downstream_proxy_error(error) {
+                return Ok(response);
+            }
             let downstream_error = match sanitize_downstream_mcp_json_rpc_error(error) {
                 Ok(error) => error,
                 Err(detail) => return Ok(jsonrpc_bad_downstream_response(id, detail)),
@@ -4112,6 +4179,13 @@ fn sanitize_downstream_mcp_json_rpc_error(
         "message_redacted": true,
         "data_redacted": error.contains_key("data")
     }))
+}
+
+fn is_agentk_downstream_proxy_error(error: &serde_json::Value) -> bool {
+    matches!(
+        error.get("code").and_then(serde_json::Value::as_i64),
+        Some(-32003 | -32004)
+    )
 }
 
 fn jsonrpc_not_initialized(id: serde_json::Value) -> serde_json::Value {
@@ -11266,6 +11340,46 @@ done
     }
 
     #[cfg(unix)]
+    fn downstream_lifecycle_error_mcp_server_shell() -> &'static str {
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32070,"message":"LIFECYCLE_ERROR_SECRET_SHOULD_NOT_REFLECT","data":{"secret":"LIFECYCLE_ERROR_SECRET_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32071,"message":"PING_ERROR_SECRET_SHOULD_NOT_REFLECT","data":{"secret":"PING_ERROR_SECRET_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#
+    }
+
+    #[cfg(unix)]
+    fn downstream_tools_list_error_mcp_server_shell() -> &'static str {
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"tools-list-error","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32072,"message":"TOOLS_LIST_ERROR_SECRET_SHOULD_NOT_REFLECT","data":{"secret":"TOOLS_LIST_ERROR_SECRET_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#
+    }
+
+    #[cfg(unix)]
     fn bad_downstream_response_mcp_server_shell() -> &'static str {
         r#"
 while IFS= read -r line; do
@@ -12127,6 +12241,113 @@ done
         assert_eq!(report.events[2].syscall.kind, SyscallKind::PromptResponse);
         let serialized = serde_json::to_string(&report.events).expect("events should serialize");
         assert!(!serialized.contains(RAW_PROMPT_ERROR));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_sanitizes_lifecycle_error_bodies() {
+        const RAW_INITIALIZE_ERROR: &str = "LIFECYCLE_ERROR_SECRET_SHOULD_NOT_REFLECT";
+        const RAW_PING_ERROR: &str = "PING_ERROR_SECRET_SHOULD_NOT_REFLECT";
+
+        let config = McpSubprocessProxyConfig::new("agent://test", "lifecycle-error", "sh")
+            .with_args([
+                "-c".to_string(),
+                downstream_lifecycle_error_mcp_server_shell().to_string(),
+                "agentk-lifecycle-error".to_string(),
+            ]);
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+"#;
+
+        let report =
+            mcp_subprocess_proxy_json_lines(input, config).expect("subprocess proxy should run");
+        let responses = report
+            .output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], serde_json::json!(1));
+        assert_eq!(responses[0]["error"]["code"], serde_json::json!(-32008));
+        assert_eq!(
+            responses[0]["error"]["data"]["downstream_error"]["code"],
+            serde_json::json!(-32070)
+        );
+        assert_eq!(
+            responses[0]["error"]["data"]["downstream_error"]["message_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            responses[0]["error"]["data"]["downstream_error"]["data_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(responses[1]["id"], serde_json::json!(2));
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32008));
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["code"],
+            serde_json::json!(-32071)
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["message_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["data_redacted"],
+            serde_json::json!(true)
+        );
+        assert!(!report.output.contains(RAW_INITIALIZE_ERROR));
+        assert!(!report.output.contains(RAW_PING_ERROR));
+        assert!(report.events.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_sanitizes_downstream_tools_list_error_body() {
+        const RAW_TOOLS_LIST_ERROR: &str = "TOOLS_LIST_ERROR_SECRET_SHOULD_NOT_REFLECT";
+
+        let config = McpSubprocessProxyConfig::new("agent://test", "tools-list-error", "sh")
+            .with_args([
+                "-c".to_string(),
+                downstream_tools_list_error_mcp_server_shell().to_string(),
+                "agentk-tools-list-error".to_string(),
+            ]);
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+
+        let report =
+            mcp_subprocess_proxy_json_lines(input, config).expect("subprocess proxy should run");
+        let responses = report
+            .output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0]["result"]["serverInfo"]["name"],
+            serde_json::json!("tools-list-error")
+        );
+        assert_eq!(responses[1]["id"], serde_json::json!(2));
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32008));
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["code"],
+            serde_json::json!(-32072)
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["message_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["downstream_error"]["data_redacted"],
+            serde_json::json!(true)
+        );
+        assert!(!report.output.contains(RAW_TOOLS_LIST_ERROR));
+        assert!(report.events.is_empty());
     }
 
     #[cfg(unix)]

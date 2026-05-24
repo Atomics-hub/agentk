@@ -136,7 +136,9 @@ The proxy sanitizes these downstream failures:
 - malformed JSON-RPC responses
 - mismatched response ids
 - closed downstream stdout or send failures
+- downstream `initialize` and `ping` error bodies
 - unsupported downstream initialize versions
+- downstream `tools/list` error bodies
 - malformed `tools/list` results
 - malformed successful `tools/call` results
 - downstream `tools/call` error bodies

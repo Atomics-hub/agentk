@@ -74,6 +74,8 @@ Status: in progress.
 - [x] Validate downstream subprocess initialize protocol before exposing tools.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [x] Validate downstream subprocess `tools/call` result shape before recording responses.
+- [x] Sanitize downstream subprocess lifecycle error bodies before returning them.
+- [x] Sanitize downstream subprocess `tools/list` error bodies before returning them.
 - [x] Sanitize downstream subprocess `tools/call` error bodies before returning them.
 - [x] Add a poisoned downstream error-body demo transcript and release-audit smoke coverage.
 - [x] Spawn downstream subprocess MCP servers with an explicit environment boundary.
