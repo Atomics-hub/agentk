@@ -223,6 +223,15 @@ cargo run -- mcp-killer-demo
 cargo run -- trace-inspect .agentk/runs/mcp-killer-demo.jsonl
 ```
 
+Run the before/after shim eval. It drives the same poisoned MCP flow through a
+baseline passthrough and through AgentK, then prints a scorecard showing which
+dangerous transitions executed versus which were blocked with evidence:
+
+```sh
+cargo run -- mcp-shim-eval
+cargo run -- trace-inspect .agentk/runs/mcp-shim-eval-agentk.jsonl
+```
+
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
 the client while preserving hash evidence in the trace:
@@ -312,6 +321,8 @@ This repo currently includes:
   with inspectable trace evidence,
 - a one-command MCP killer demo runner that writes a redacted trace without
   dumping the poisoned raw content into the review path,
+- a before/after MCP shim eval that contrasts unsafe baseline passthrough with
+  AgentK blocking and replayable evidence,
 - stdin mediation for one MCP-shaped request,
 - newline-delimited stdin mediation for repeated MCP-shaped requests,
 - a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`, `agentk.mediate_descriptor`, and `agentk.record_response`,
@@ -358,9 +369,10 @@ Implemented today:
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
 - a one-command `mcp-killer-demo` runner for reviewable demo traces,
+- a one-command `mcp-shim-eval` scorecard for showing why the shim matters,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundaries, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundaries, the MCP shim eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 

@@ -1848,6 +1848,38 @@ pub struct McpKillerDemoRunReport {
     pub inspect: FlightLogInspectReport,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpSecurityShimEvalReport {
+    pub scenario: String,
+    pub trace_path: PathBuf,
+    pub baseline: McpSecurityShimEvalModeReport,
+    pub agentk: McpSecurityShimEvalModeReport,
+    pub scorecard: Vec<McpSecurityShimEvalCheck>,
+    pub improved_checks: usize,
+    pub total_checks: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpSecurityShimEvalModeReport {
+    pub name: String,
+    pub protocol_responses: usize,
+    pub exfiltration_reached_downstream: bool,
+    pub unsafe_patch_reached_downstream: bool,
+    pub agentk_metadata_reached_downstream: bool,
+    pub blocked_followups: usize,
+    pub trace_events: u64,
+    pub replayable_evidence: bool,
+    pub raw_poison_in_trace: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpSecurityShimEvalCheck {
+    pub check: String,
+    pub baseline: String,
+    pub agentk: String,
+    pub improved: bool,
+}
+
 pub struct McpSubprocessProxy {
     agent_id: String,
     server_id: String,
@@ -2951,13 +2983,153 @@ pub fn run_mcp_killer_demo(
     root: impl AsRef<Path>,
     trace_path: impl AsRef<Path>,
 ) -> Result<McpKillerDemoRunReport, AgentKError> {
+    run_mcp_killer_demo_internal(root.as_ref(), trace_path.as_ref(), None)
+}
+
+pub fn run_mcp_security_shim_eval(
+    root: impl AsRef<Path>,
+    trace_path: impl AsRef<Path>,
+) -> Result<McpSecurityShimEvalReport, AgentKError> {
     let root = root.as_ref();
+    let baseline = run_mcp_killer_demo_baseline(root)?;
+    let agentk_execution_log = mcp_demo_temp_log_path("agentk-shim-eval");
+    let agentk_run =
+        run_mcp_killer_demo_internal(root, trace_path.as_ref(), Some(&agentk_execution_log))?;
+    let agentk_execution_log_content =
+        fs::read_to_string(&agentk_execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&agentk_execution_log);
+    let trace = fs::read_to_string(&agentk_run.trace_path)?;
+    let agentk_exfiltration_reached_downstream =
+        agentk_execution_log_content.contains("network egress executed");
+    let agentk_unsafe_patch_reached_downstream =
+        agentk_execution_log_content.contains("unsafe patch executed");
+    let agentk_metadata_reached_downstream =
+        agentk_execution_log_content.contains("metadata leaked to downstream");
+    let blocked_followups = agentk_run
+        .inspect
+        .events
+        .iter()
+        .filter(|event| {
+            event.verdict == Verdict::Deny
+                && event.syscall == "tool.invoke"
+                && (event.target == "network.send" || event.target == "repo.apply_patch")
+        })
+        .count();
+    let agentk = McpSecurityShimEvalModeReport {
+        name: "agentk-shim".to_string(),
+        protocol_responses: agentk_run.protocol_responses,
+        exfiltration_reached_downstream: agentk_exfiltration_reached_downstream,
+        unsafe_patch_reached_downstream: agentk_unsafe_patch_reached_downstream,
+        agentk_metadata_reached_downstream,
+        blocked_followups,
+        trace_events: agentk_run.inspect.events_checked,
+        replayable_evidence: agentk_run.inspect.signatures_ok
+            && agentk_run.inspect.events_checked == 7
+            && blocked_followups == 2,
+        raw_poison_in_trace: trace.contains("DEMO_PRIVATE_MARKER")
+            || trace.contains("https://evil.example.invalid/upload"),
+    };
+    let scorecard = vec![
+        mcp_security_eval_check(
+            "poisoned output triggers network egress",
+            if baseline.exfiltration_reached_downstream {
+                "EXECUTED"
+            } else {
+                "not executed"
+            },
+            if agentk.exfiltration_reached_downstream {
+                "EXECUTED"
+            } else {
+                "BLOCKED"
+            },
+            baseline.exfiltration_reached_downstream && !agentk.exfiltration_reached_downstream,
+        ),
+        mcp_security_eval_check(
+            "poisoned output triggers unsafe patch",
+            if baseline.unsafe_patch_reached_downstream {
+                "EXECUTED"
+            } else {
+                "not executed"
+            },
+            if agentk.unsafe_patch_reached_downstream {
+                "EXECUTED"
+            } else {
+                "BLOCKED"
+            },
+            baseline.unsafe_patch_reached_downstream && !agentk.unsafe_patch_reached_downstream,
+        ),
+        mcp_security_eval_check(
+            "AgentK metadata reaches downstream",
+            if baseline.agentk_metadata_reached_downstream {
+                "LEAKED"
+            } else {
+                "stripped"
+            },
+            if agentk.agentk_metadata_reached_downstream {
+                "LEAKED"
+            } else {
+                "STRIPPED"
+            },
+            baseline.agentk_metadata_reached_downstream
+                && !agentk.agentk_metadata_reached_downstream,
+        ),
+        mcp_security_eval_check(
+            "replayable boundary evidence",
+            if baseline.replayable_evidence {
+                "present"
+            } else {
+                "NONE"
+            },
+            if agentk.replayable_evidence {
+                "PRESENT"
+            } else {
+                "missing"
+            },
+            !baseline.replayable_evidence && agentk.replayable_evidence,
+        ),
+        mcp_security_eval_check(
+            "raw poison stored in trace",
+            "no trace",
+            if agentk.raw_poison_in_trace {
+                "RAW"
+            } else {
+                "REDACTED"
+            },
+            !agentk.raw_poison_in_trace,
+        ),
+    ];
+    let improved_checks = scorecard.iter().filter(|check| check.improved).count();
+    let total_checks = scorecard.len();
+
+    Ok(McpSecurityShimEvalReport {
+        scenario: "poisoned MCP tool output attempts secret exfiltration and unsafe file patch"
+            .to_string(),
+        trace_path: agentk_run.trace_path,
+        baseline,
+        agentk,
+        scorecard,
+        improved_checks,
+        total_checks,
+    })
+}
+
+fn run_mcp_killer_demo_internal(
+    root: &Path,
+    trace_path: &Path,
+    execution_log: Option<&Path>,
+) -> Result<McpKillerDemoRunReport, AgentKError> {
     let input = fs::read_to_string(root.join("examples/mcp-killer-demo-session.jsonl"))?;
-    let config = McpSubprocessProxyConfig::new("agent://demo/mcp-killer", "killer-demo", "sh")
+    let mut config = McpSubprocessProxyConfig::new("agent://demo/mcp-killer", "killer-demo", "sh")
         .with_args([root
             .join("examples/mcp-killer-demo-server.sh")
             .display()
             .to_string()]);
+    if let Some(execution_log) = execution_log {
+        config = config.with_env(
+            "AGENTK_FAKE_MCP_EXEC_LOG",
+            execution_log.display().to_string(),
+        );
+    }
     let report = mcp_subprocess_proxy_json_lines(&input, config)?;
     let trace_path = write_events_jsonl(&report.events, trace_path)?;
     let inspect = inspect_jsonl(&trace_path)?;
@@ -2967,6 +3139,74 @@ pub fn run_mcp_killer_demo(
         protocol_responses: report.output.lines().count(),
         inspect,
     })
+}
+
+fn run_mcp_killer_demo_baseline(root: &Path) -> Result<McpSecurityShimEvalModeReport, AgentKError> {
+    let input = fs::read_to_string(root.join("examples/mcp-killer-demo-session.jsonl"))?;
+    let execution_log = mcp_demo_temp_log_path("baseline-shim-eval");
+    let mut child = Command::new("sh")
+        .arg(root.join("examples/mcp-killer-demo-server.sh"))
+        .env_clear()
+        .env("AGENTK_FAKE_MCP_EXEC_LOG", &execution_log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "failed to spawn baseline MCP demo server: {error}"
+            ))
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest("baseline MCP demo server did not expose stdin".to_string())
+    })?;
+    stdin.write_all(input.as_bytes())?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "baseline MCP demo server exited unsuccessfully: {stderr}"
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+
+    Ok(McpSecurityShimEvalModeReport {
+        name: "baseline-passthrough".to_string(),
+        protocol_responses: stdout.lines().count(),
+        exfiltration_reached_downstream: execution_log_content.contains("network egress executed"),
+        unsafe_patch_reached_downstream: execution_log_content.contains("unsafe patch executed"),
+        agentk_metadata_reached_downstream: execution_log_content
+            .contains("metadata leaked to downstream"),
+        blocked_followups: 0,
+        trace_events: 0,
+        replayable_evidence: false,
+        raw_poison_in_trace: false,
+    })
+}
+
+fn mcp_security_eval_check(
+    check: impl Into<String>,
+    baseline: impl Into<String>,
+    agentk: impl Into<String>,
+    improved: bool,
+) -> McpSecurityShimEvalCheck {
+    McpSecurityShimEvalCheck {
+        check: check.into(),
+        baseline: baseline.into(),
+        agentk: agentk.into(),
+        improved,
+    }
+}
+
+fn mcp_demo_temp_log_path(label: &str) -> PathBuf {
+    env::temp_dir().join(format!(
+        "agentk-{label}-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ))
 }
 
 pub fn mcp_subprocess_proxy_json_stream<R, W>(
@@ -5985,6 +6225,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_transport_guard = mcp_transport_guard_smoke()?;
     let mcp_subprocess_proxy = mcp_subprocess_proxy_smoke(root)?;
     let mcp_killer_demo = mcp_killer_demo_smoke(root)?;
+    let mcp_security_shim_eval = mcp_security_shim_eval_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -6276,6 +6517,43 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_killer_demo.denied_not_forwarded && mcp_killer_demo.metadata_stripped,
                 mcp_killer_demo.raw_poison_not_logged,
                 mcp_killer_demo.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp shim eval",
+            if mcp_security_shim_eval
+                .baseline
+                .exfiltration_reached_downstream
+                && mcp_security_shim_eval
+                    .baseline
+                    .unsafe_patch_reached_downstream
+                && !mcp_security_shim_eval
+                    .agentk
+                    .exfiltration_reached_downstream
+                && !mcp_security_shim_eval
+                    .agentk
+                    .unsafe_patch_reached_downstream
+                && mcp_security_shim_eval.agentk.blocked_followups == 2
+                && mcp_security_shim_eval.agentk.replayable_evidence
+                && !mcp_security_shim_eval.agentk.raw_poison_in_trace
+                && mcp_security_shim_eval.improved_checks == mcp_security_shim_eval.total_checks
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "baseline exfil {}, patch {}; agentk blocked {}, evidence {}, score {}/{}",
+                mcp_security_shim_eval
+                    .baseline
+                    .exfiltration_reached_downstream,
+                mcp_security_shim_eval
+                    .baseline
+                    .unsafe_patch_reached_downstream,
+                mcp_security_shim_eval.agentk.blocked_followups,
+                mcp_security_shim_eval.agentk.replayable_evidence,
+                mcp_security_shim_eval.improved_checks,
+                mcp_security_shim_eval.total_checks
             ),
         ),
         release_audit_check(
@@ -7042,6 +7320,17 @@ fn mcp_killer_demo_smoke(root: &Path) -> Result<McpKillerDemoSmokeReport, AgentK
             && !serialized_events.contains(RAW_POISON_URL),
         event_count: report.events.len(),
     })
+}
+
+fn mcp_security_shim_eval_smoke(root: &Path) -> Result<McpSecurityShimEvalReport, AgentKError> {
+    let trace_path = env::temp_dir().join(format!(
+        "agentk-mcp-shim-eval-{}-{}.jsonl",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let report = run_mcp_security_shim_eval(root, &trace_path)?;
+    let _ = fs::remove_file(&trace_path);
+    Ok(report)
 }
 
 fn mcp_subprocess_proxy_error_smoke(
@@ -12511,6 +12800,35 @@ done
                 && event.target == "repo.apply_patch"
                 && event.rule == "tool-tainted-input"
         }));
+
+        let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
+        assert!(!trace.contains("DEMO_PRIVATE_MARKER"));
+        assert!(!trace.contains("https://evil.example.invalid/upload"));
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
+    fn mcp_security_shim_eval_compares_baseline_and_agentk() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let trace_path = temp_path("agentk-mcp-shim-eval", "jsonl");
+        let report = run_mcp_security_shim_eval(root, &trace_path)
+            .expect("MCP shim eval should compare baseline and AgentK");
+
+        assert_eq!(report.trace_path, trace_path);
+        assert_eq!(report.baseline.protocol_responses, 5);
+        assert!(report.baseline.exfiltration_reached_downstream);
+        assert!(report.baseline.unsafe_patch_reached_downstream);
+        assert!(report.baseline.agentk_metadata_reached_downstream);
+        assert!(!report.baseline.replayable_evidence);
+        assert!(!report.agentk.exfiltration_reached_downstream);
+        assert!(!report.agentk.unsafe_patch_reached_downstream);
+        assert!(!report.agentk.agentk_metadata_reached_downstream);
+        assert_eq!(report.agentk.blocked_followups, 2);
+        assert_eq!(report.agentk.trace_events, 7);
+        assert!(report.agentk.replayable_evidence);
+        assert!(!report.agentk.raw_poison_in_trace);
+        assert_eq!(report.improved_checks, report.total_checks);
+        assert!(report.scorecard.iter().all(|check| check.improved));
 
         let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
         assert!(!trace.contains("DEMO_PRIVATE_MARKER"));
