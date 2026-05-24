@@ -11,6 +11,8 @@ use agentk::{
     write_events_jsonl, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
+use std::collections::BTreeMap;
+use std::env;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 
@@ -110,6 +112,9 @@ enum Command {
         /// Argument passed to the downstream command. Repeat for multiple args.
         #[arg(long = "arg")]
         args: Vec<String>,
+        /// Parent environment variable name to copy into the cleared child environment. Repeat for multiple vars.
+        #[arg(long = "allow-env", value_name = "NAME")]
+        allow_env: Vec<String>,
         /// Optional JSONL path for the AgentK proxy flight log.
         #[arg(long)]
         trace_out: Option<PathBuf>,
@@ -243,8 +248,9 @@ fn run() -> Result<(), AgentKError> {
             server_id,
             command,
             args,
+            allow_env,
             trace_out,
-        } => mcp_proxy_stdio(agent_id, server_id, command, args, trace_out),
+        } => mcp_proxy_stdio(agent_id, server_id, command, args, allow_env, trace_out),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -562,9 +568,14 @@ fn mcp_proxy_stdio(
     server_id: String,
     command: String,
     args: Vec<String>,
+    allow_env: Vec<String>,
     trace_out: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
-    let config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
+    let mut config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
+    for (name, value) in collect_mcp_proxy_allowed_env(&allow_env, |name| env::var(name).ok())? {
+        config = config.with_env(name, value);
+    }
+
     if let Some(path) = trace_out {
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -577,6 +588,42 @@ fn mcp_proxy_stdio(
     let stdin = io::stdin();
     let stdout = io::stdout();
     mcp_subprocess_proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock(), config)
+}
+
+fn collect_mcp_proxy_allowed_env<F>(
+    names: &[String],
+    mut lookup: F,
+) -> Result<BTreeMap<String, String>, AgentKError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut env = BTreeMap::new();
+    for name in names {
+        if !is_safe_env_name(name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "allowed env names must match [A-Za-z_][A-Za-z0-9_]*".to_string(),
+            ));
+        }
+        let value = lookup(name).ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(format!(
+                "allowed env var {name} is not present or is not valid UTF-8"
+            ))
+        })?;
+        env.insert(name.clone(), value);
+    }
+
+    Ok(env)
+}
+
+fn is_safe_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn signing_key(json: bool) -> Result<(), AgentKError> {
@@ -797,4 +844,56 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_proxy_allow_env_collects_explicit_parent_values() {
+        let names = vec!["AGENTK_PROXY_DEMO".to_string()];
+        let env = collect_mcp_proxy_allowed_env(&names, |name| {
+            (name == "AGENTK_PROXY_DEMO").then(|| "demo-value".to_string())
+        })
+        .expect("explicit env should collect");
+
+        assert_eq!(
+            env.get("AGENTK_PROXY_DEMO").map(String::as_str),
+            Some("demo-value")
+        );
+    }
+
+    #[test]
+    fn mcp_proxy_allow_env_rejects_unsafe_names_without_value_reflection() {
+        let names = vec!["BAD=VALUE".to_string()];
+        let error = collect_mcp_proxy_allowed_env(&names, |_| Some("demo-value".to_string()))
+            .expect_err("unsafe env name should fail")
+            .to_string();
+
+        assert!(error.contains("allowed env names"));
+        assert!(!error.contains("demo-value"));
+    }
+
+    #[test]
+    fn mcp_proxy_allow_env_reports_missing_name_without_value() {
+        let names = vec!["MISSING_TOKEN".to_string()];
+        let error = collect_mcp_proxy_allowed_env(&names, |_| None)
+            .expect_err("missing env var should fail")
+            .to_string();
+
+        assert!(error.contains("MISSING_TOKEN"));
+        assert!(!error.contains("demo-value"));
+    }
+
+    #[test]
+    fn mcp_proxy_allow_env_accepts_safe_name_shapes() {
+        for name in ["TOKEN", "_TOKEN", "TOKEN_1"] {
+            assert!(is_safe_env_name(name), "{name} should be accepted");
+        }
+
+        for name in ["", "1DEMO", "DEMO-NAME", "BAD=VALUE"] {
+            assert!(!is_safe_env_name(name), "{name} should be rejected");
+        }
+    }
 }

@@ -201,6 +201,9 @@ cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/
 cargo run -- trace-inspect .agentk/runs/mcp-proxy-demo.jsonl
 ```
 
+Use `--allow-env NAME` to copy a named parent environment variable into the
+cleared child environment. Repeat the flag for multiple variables.
+
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
 the client while preserving hash evidence in the trace:
