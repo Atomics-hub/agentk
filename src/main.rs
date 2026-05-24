@@ -1,8 +1,9 @@
 use agentk::{
-    AgentKError, Policy, ReadinessStatus, Verdict, default_log_path, fork_replay_behavior_jsonl,
-    fork_replay_jsonl, generate_signing_key_file, inspect_jsonl, mcp_proxy_from_path,
-    mcp_server_json_stream, mediate_mcp_json_reader, mediate_mcp_json_stream, readiness_report,
-    release_audit_report, replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
+    AgentKError, McpSubprocessProxyConfig, Policy, ReadinessStatus, Verdict, default_log_path,
+    fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, inspect_jsonl,
+    mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
+    mediate_mcp_json_reader, mediate_mcp_json_stream, readiness_report, release_audit_report,
+    replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
     signing_key_status, trusted_signing_key_manifest_keys_from_path,
     trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
@@ -95,6 +96,21 @@ enum Command {
     McpLines,
     /// Run a minimal MCP JSON-RPC stdio server that exposes agentk.mediate.
     McpServer,
+    /// Proxy MCP JSON-RPC stdin/stdout through a downstream MCP server process.
+    McpProxyStdio {
+        /// Stable AgentK agent identifier for mediated tool calls.
+        #[arg(long, default_value = "agent://mcp/proxy")]
+        agent_id: String,
+        /// Stable identifier for the downstream MCP server.
+        #[arg(long, default_value = "downstream-mcp")]
+        server_id: String,
+        /// Downstream MCP server command to spawn.
+        #[arg(long)]
+        command: String,
+        /// Argument passed to the downstream command. Repeat for multiple args.
+        #[arg(long = "arg")]
+        args: Vec<String>,
+    },
     /// Print the active proof-signing public key and source.
     SigningKey {
         /// Emit the signer status as JSON.
@@ -219,6 +235,12 @@ fn run() -> Result<(), AgentKError> {
         Command::McpStdio => mcp_stdio(),
         Command::McpLines => mcp_lines(),
         Command::McpServer => mcp_server(),
+        Command::McpProxyStdio {
+            agent_id,
+            server_id,
+            command,
+            args,
+        } => mcp_proxy_stdio(agent_id, server_id, command, args),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -525,6 +547,23 @@ fn mcp_server() -> Result<(), AgentKError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     mcp_server_json_stream(BufReader::new(stdin.lock()), stdout.lock())
+}
+
+fn mcp_proxy_stdio(
+    agent_id: String,
+    server_id: String,
+    command: String,
+    args: Vec<String>,
+) -> Result<(), AgentKError> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let config = McpSubprocessProxyConfig {
+        agent_id,
+        server_id,
+        command,
+        args,
+    };
+    mcp_subprocess_proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock(), config)
 }
 
 fn signing_key(json: bool) -> Result<(), AgentKError> {
