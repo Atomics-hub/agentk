@@ -67,7 +67,7 @@ Status: in progress.
 - [x] Add a subprocess stdio MCP proxy path that mediates real client/server JSON-RPC traffic.
 - [x] Add a poisoned subprocess MCP demo transcript and release-audit smoke coverage.
 - [x] Add optional subprocess proxy trace output for `trace-inspect` review.
-- [x] Strip AgentK-only metadata from subprocess proxy passthrough traffic.
+- [x] Strip AgentK-only metadata from subprocess proxy forwarded traffic.
 - [x] Return sanitized JSON-RPC errors for malformed downstream subprocess responses.
 - [x] Drop malformed downstream tool descriptors with hash-only evidence.
 - [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
@@ -80,6 +80,7 @@ Status: in progress.
 - [x] Add CLI allowlisting for downstream subprocess MCP environment variables.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
+- [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.

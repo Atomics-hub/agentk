@@ -61,6 +61,12 @@ protocol version before AgentK marks the session initialized. The downstream
 `tools/list` result must be an object with a `tools` array before descriptors
 are exposed.
 
+After readiness, `initialize`, `ping`, `tools/list`, and `tools/call` requests
+are the only request methods covered by this proxy. Other MCP request methods
+are rejected with a sanitized `Method not found` response until they have an
+explicit AgentK policy contract. The proxy forwards `notifications/initialized`
+and the cancellation notification, but drops other notifications.
+
 ## Mediation
 
 On `tools/list`, AgentK treats downstream tool descriptors as untrusted
@@ -129,5 +135,5 @@ release-audit smoke coverage, and integration experiments. A complete
 production MCP transport still needs a hardened server packaging story,
 deployment guidance, and operational key management. The current boundary
 mediates descriptor listing and tool calls; broader MCP resource and prompt
-surfaces still need explicit policy contracts before they should be treated as
-production-isolated flows.
+surfaces still need explicit policy contracts and are not forwarded as generic
+passthrough.
