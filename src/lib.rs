@@ -6352,6 +6352,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_killer_demo = mcp_killer_demo_smoke(root)?;
     let mcp_security_shim_eval = mcp_security_shim_eval_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
+    let mcp_subprocess_proxy_lifecycle_error = mcp_subprocess_proxy_lifecycle_error_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -6702,6 +6703,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy_error.raw_error_not_returned,
                 mcp_subprocess_proxy_error.raw_error_not_logged,
                 mcp_subprocess_proxy_error.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess lifecycle redaction",
+            if mcp_subprocess_proxy_lifecycle_error.lifecycle_error_sanitized
+                && mcp_subprocess_proxy_lifecycle_error.tools_list_error_sanitized
+                && mcp_subprocess_proxy_lifecycle_error.raw_error_not_returned
+                && mcp_subprocess_proxy_lifecycle_error.raw_error_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "lifecycle {}, list {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_lifecycle_error.lifecycle_error_sanitized,
+                mcp_subprocess_proxy_lifecycle_error.tools_list_error_sanitized,
+                mcp_subprocess_proxy_lifecycle_error.raw_error_not_returned,
+                mcp_subprocess_proxy_lifecycle_error.raw_error_not_logged,
+                mcp_subprocess_proxy_lifecycle_error.event_count
             ),
         ),
         release_audit_check(
@@ -7100,6 +7121,15 @@ struct McpSubprocessProxyErrorSmokeReport {
     descriptor_mediated: bool,
     error_sanitized: bool,
     error_recorded: bool,
+    raw_error_not_returned: bool,
+    raw_error_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyLifecycleErrorSmokeReport {
+    lifecycle_error_sanitized: bool,
+    tools_list_error_sanitized: bool,
     raw_error_not_returned: bool,
     raw_error_not_logged: bool,
     event_count: usize,
@@ -7546,6 +7576,125 @@ fn mcp_subprocess_proxy_error_smoke(
         raw_error_not_returned: !report.output.contains(RAW_ERROR_TEXT),
         raw_error_not_logged: !serialized_events.contains(RAW_ERROR_TEXT),
         event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_lifecycle_error_smoke()
+-> Result<McpSubprocessProxyLifecycleErrorSmokeReport, AgentKError> {
+    const RAW_INITIALIZE_ERROR: &str = "RELEASE_AUDIT_INITIALIZE_ERROR_SHOULD_NOT_REFLECT";
+    const RAW_PING_ERROR: &str = "RELEASE_AUDIT_PING_ERROR_SHOULD_NOT_REFLECT";
+    const RAW_TOOLS_LIST_ERROR: &str = "RELEASE_AUDIT_TOOLS_LIST_ERROR_SHOULD_NOT_REFLECT";
+    const LIFECYCLE_ERROR_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32070,"message":"RELEASE_AUDIT_INITIALIZE_ERROR_SHOULD_NOT_REFLECT","data":{"secret":"RELEASE_AUDIT_INITIALIZE_ERROR_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32071,"message":"RELEASE_AUDIT_PING_ERROR_SHOULD_NOT_REFLECT","data":{"secret":"RELEASE_AUDIT_PING_ERROR_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    const TOOLS_LIST_ERROR_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"tools-list-error","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32072,"message":"RELEASE_AUDIT_TOOLS_LIST_ERROR_SHOULD_NOT_REFLECT","data":{"secret":"RELEASE_AUDIT_TOOLS_LIST_ERROR_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let lifecycle_input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+"#;
+    let lifecycle_report = mcp_subprocess_proxy_json_lines(
+        lifecycle_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "lifecycle-error", "sh").with_args(
+            [
+                "-c".to_string(),
+                LIFECYCLE_ERROR_SCRIPT.to_string(),
+                "agentk-lifecycle-error".to_string(),
+            ],
+        ),
+    )?;
+    let lifecycle_responses = lifecycle_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let tools_list_input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+    let tools_list_report = mcp_subprocess_proxy_json_lines(
+        tools_list_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "tools-list-error", "sh").with_args(
+            [
+                "-c".to_string(),
+                TOOLS_LIST_ERROR_SCRIPT.to_string(),
+                "agentk-tools-list-error".to_string(),
+            ],
+        ),
+    )?;
+    let tools_list_responses = tools_list_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = format!("{}{}", lifecycle_report.output, tools_list_report.output);
+    let serialized_events =
+        serde_json::to_string(&(&lifecycle_report.events, &tools_list_report.events))?;
+
+    Ok(McpSubprocessProxyLifecycleErrorSmokeReport {
+        lifecycle_error_sanitized: lifecycle_responses.first().is_some_and(|response| {
+            response["error"]["code"] == serde_json::json!(-32008)
+                && response["error"]["data"]["downstream_error"]["code"]
+                    == serde_json::json!(-32070)
+                && response["error"]["data"]["downstream_error"]["message_redacted"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["downstream_error"]["data_redacted"]
+                    == serde_json::json!(true)
+        }) && lifecycle_responses.get(1).is_some_and(|response| {
+            response["error"]["code"] == serde_json::json!(-32008)
+                && response["error"]["data"]["downstream_error"]["code"]
+                    == serde_json::json!(-32071)
+                && response["error"]["data"]["downstream_error"]["message_redacted"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["downstream_error"]["data_redacted"]
+                    == serde_json::json!(true)
+        }),
+        tools_list_error_sanitized: tools_list_responses.get(1).is_some_and(|response| {
+            response["error"]["code"] == serde_json::json!(-32008)
+                && response["error"]["data"]["downstream_error"]["code"]
+                    == serde_json::json!(-32072)
+                && response["error"]["data"]["downstream_error"]["message_redacted"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["downstream_error"]["data_redacted"]
+                    == serde_json::json!(true)
+        }),
+        raw_error_not_returned: !output.contains(RAW_INITIALIZE_ERROR)
+            && !output.contains(RAW_PING_ERROR)
+            && !output.contains(RAW_TOOLS_LIST_ERROR),
+        raw_error_not_logged: !serialized_events.contains(RAW_INITIALIZE_ERROR)
+            && !serialized_events.contains(RAW_PING_ERROR)
+            && !serialized_events.contains(RAW_TOOLS_LIST_ERROR),
+        event_count: lifecycle_report.events.len() + tools_list_report.events.len(),
     })
 }
 
@@ -13276,6 +13425,18 @@ done
         assert!(report.raw_error_not_returned);
         assert!(report.raw_error_not_logged);
         assert_eq!(report.event_count, 3);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_lifecycle_error_smoke_redacts_downstream_errors() {
+        let report = mcp_subprocess_proxy_lifecycle_error_smoke()
+            .expect("subprocess proxy lifecycle error smoke should run");
+
+        assert!(report.lifecycle_error_sanitized);
+        assert!(report.tools_list_error_sanitized);
+        assert!(report.raw_error_not_returned);
+        assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
