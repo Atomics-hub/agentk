@@ -213,6 +213,16 @@ accepted, for example `--arg -c`.
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
 
+Run the MCP killer demo. The downstream server returns poisoned tool output
+that tells the agent to exfiltrate a private marker and patch the repository.
+AgentK records the poisoned output by hash, then blocks both dangerous
+follow-up tool calls before the child server sees them:
+
+```sh
+cargo run -- mcp-proxy-stdio --server-id killer-demo --trace-out .agentk/runs/mcp-killer-demo.jsonl --command sh --arg examples/mcp-killer-demo-server.sh < examples/mcp-killer-demo-session.jsonl
+cargo run -- trace-inspect .agentk/runs/mcp-killer-demo.jsonl
+```
+
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
 the client while preserving hash evidence in the trace:
@@ -297,6 +307,9 @@ This repo currently includes:
   with hash-only evidence,
 - subprocess MCP prompt mediation for `prompts/list` and `prompts/get` with
   hash-only evidence,
+- an MCP killer demo where poisoned tool output tries to trigger secret
+  exfiltration and an unsafe file patch, but both follow-up calls are blocked
+  with inspectable trace evidence,
 - stdin mediation for one MCP-shaped request,
 - newline-delimited stdin mediation for repeated MCP-shaped requests,
 - a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`, `agentk.mediate_descriptor`, and `agentk.record_response`,
@@ -340,6 +353,8 @@ Implemented today:
 - MCP resource descriptor/read/response evidence with explicit read
   capabilities,
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
+- a runnable MCP killer demo that blocks poisoned-output exfiltration and
+  unsafe patch attempts,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
 - a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundaries, inspect, and MCP server smoke checks.
