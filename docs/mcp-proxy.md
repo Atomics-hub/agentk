@@ -43,6 +43,12 @@ Allowed environment names must match `[A-Za-z_][A-Za-z0-9_]*`. Missing or
 non-UTF-8 parent values fail before the child process is spawned, and values
 are not printed in the error.
 
+The child server's stderr is not forwarded by the proxy. Downstream diagnostic
+streams are outside the MCP protocol and can contain raw secrets, poisoned
+tool output, local paths, or credentials. AgentK keeps the review path on
+sanitized JSON-RPC responses and hash-only trace evidence instead of letting
+child stderr bypass the boundary.
+
 ## Lifecycle
 
 The client must send `initialize` with AgentK's supported MCP protocol version,
@@ -134,6 +140,7 @@ The proxy sanitizes these downstream failures:
 - malformed `prompts/list` results
 - malformed successful `prompts/get` results
 - downstream `prompts/get` error bodies
+- child stderr diagnostics
 
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and
@@ -174,5 +181,6 @@ release-audit smoke coverage, and integration experiments. A complete
 production MCP transport still needs a hardened server packaging story,
 deployment guidance, and operational key management. The current boundary
 mediates tool listing/calls, resource listing/reads, and prompt listing/gets;
-resource subscription flows still need explicit policy contracts and are not
-forwarded as generic passthrough.
+child stderr is suppressed rather than treated as evidence. Resource
+subscription flows still need explicit policy contracts and are not forwarded
+as generic passthrough.
