@@ -1830,7 +1830,7 @@ impl McpSubprocessProxy {
                     .unwrap_or_else(|| serde_json::json!({}));
                 self.handle_tools_call(id, params, message).map(Some)
             }
-            _ => self.round_trip(&message, &id).map(Some),
+            _ => Ok(Some(jsonrpc_mcp_proxy_method_not_covered(id))),
         }
     }
 
@@ -1846,7 +1846,7 @@ impl McpSubprocessProxy {
         if method == "notifications/initialized" && self.initialized {
             self.ready = true;
             let _ = self.send_json_rpc_message(message);
-        } else if self.ready {
+        } else if self.ready && mcp_subprocess_proxy_notification_allowed(method) {
             let _ = self.send_json_rpc_message(message);
         }
 
@@ -2896,6 +2896,21 @@ fn handle_mcp_json_rpc_notification(method: &str, session: &mut McpJsonRpcSessio
 
 fn mcp_method_allowed_before_ready(method: &str) -> bool {
     matches!(method, "initialize" | "ping")
+}
+
+fn mcp_subprocess_proxy_notification_allowed(method: &str) -> bool {
+    matches!(method, "notifications/cancelled")
+}
+
+fn jsonrpc_mcp_proxy_method_not_covered(id: serde_json::Value) -> serde_json::Value {
+    jsonrpc_error(
+        id,
+        -32601,
+        "Method not found",
+        Some(serde_json::json!({
+            "detail": "method is not covered by AgentK MCP proxy policy"
+        })),
+    )
 }
 
 fn validate_mcp_initialize_params(params: &serde_json::Value) -> Result<(), String> {
@@ -8618,18 +8633,16 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"resources":{"listChanged":false}},"serverInfo":{"name":"metadata-probe","version":"test"}}}'
       ;;
-    *'"method":"resources/list"'*)
-      case "$line" in
-        *'"cursor":"after-init"'*) ;;
-        *) printf '%s\n' "cursor missing from passthrough request" >> "$1" ;;
-      esac
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resources":[]}}'
-      ;;
     *'"method":"notifications/initialized"'*)
       ;;
     *'"method":"notifications/cancelled"'*)
+      printf '%s\n' "cancelled forwarded" >> "$1"
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
       ;;
     *)
+      printf '%s\n' "unsupported forwarded" >> "$1"
       printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
       ;;
   esac
@@ -8647,10 +8660,10 @@ while IFS= read -r line; do
       ;;
     *'"method":"notifications/initialized"'*)
       ;;
-    *'"method":"resources/list"'*)
+    *'"id":2'*'"method":"ping"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":"DOWNSTREAM_SECRET_SHOULD_NOT_REFLECT'
       ;;
-    *'"method":"resources/read"'*)
+    *'"id":3'*'"method":"ping"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":"wrong-response-id","result":{"secret":"DOWNSTREAM_SECRET_SHOULD_NOT_REFLECT"}}'
       ;;
     *)
@@ -8866,7 +8879,7 @@ done
 
     #[cfg(unix)]
     #[test]
-    fn subprocess_mcp_proxy_strips_agentk_metadata_from_passthrough() {
+    fn subprocess_mcp_proxy_strips_agentk_metadata_from_allowed_notification() {
         let leak_log = temp_path("agentk-subprocess-mcp-metadata-leak", "log");
         let config = McpSubprocessProxyConfig::new("agent://test", "metadata-probe", "sh")
             .with_args([
@@ -8878,8 +8891,9 @@ done
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"cursor":"after-init","agentk":{"secret":"DO_NOT_LEAK"}}}
 {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"agentk":{"secret":"DO_NOT_LEAK"}}}
+{"jsonrpc":"2.0","method":"notifications/resources/list_changed","params":{"agentk":{"secret":"DO_NOT_LEAK"}}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
 "#;
 
         let report =
@@ -8895,14 +8909,67 @@ done
             responses[0]["result"]["serverInfo"]["name"],
             "metadata-probe"
         );
-        assert_eq!(responses[1]["result"]["resources"], serde_json::json!([]));
+        assert_eq!(responses[1]["id"], serde_json::json!(2));
+        assert_eq!(responses[1]["result"], serde_json::json!({}));
+        let log = fs::read_to_string(&leak_log).expect("cancel notification should be forwarded");
+        assert!(log.contains("cancelled forwarded"));
+        assert!(!log.contains("unsupported forwarded"));
+        assert!(!log.contains("agentk"));
+        assert!(!log.contains("DO_NOT_LEAK"));
         assert!(
-            !leak_log.exists(),
-            "AgentK-only metadata must be stripped from non-tool passthrough traffic"
+            !report.output.contains("DO_NOT_LEAK"),
+            "AgentK-only metadata must be stripped from allowed notifications"
         );
         assert!(report.events.is_empty());
 
         let _ = fs::remove_file(leak_log);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_rejects_unsupported_ready_methods_without_forwarding() {
+        const RAW_CLIENT_PAYLOAD: &str = "UNSUPPORTED_METHOD_SECRET_SHOULD_NOT_REFLECT";
+
+        let leak_log = temp_path("agentk-subprocess-mcp-unsupported-method", "log");
+        let config = McpSubprocessProxyConfig::new("agent://test", "metadata-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                metadata_probe_mcp_server_shell().to_string(),
+                "agentk-metadata-probe".to_string(),
+                leak_log.display().to_string(),
+            ]);
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{"cursor":"after-init","agentk":{"secret":"UNSUPPORTED_METHOD_SECRET_SHOULD_NOT_REFLECT"}}}
+"#;
+
+        let report =
+            mcp_subprocess_proxy_json_lines(input, config).expect("subprocess proxy should run");
+        let responses = report
+            .output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0]["result"]["serverInfo"]["name"],
+            "metadata-probe"
+        );
+        assert_eq!(responses[1]["id"], serde_json::json!(2));
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32601));
+        assert_eq!(
+            responses[1]["error"]["data"]["detail"],
+            serde_json::json!("method is not covered by AgentK MCP proxy policy")
+        );
+        assert!(!report.output.contains("resources/list"));
+        assert!(!report.output.contains(RAW_CLIENT_PAYLOAD));
+        assert!(
+            !leak_log.exists(),
+            "unsupported MCP methods must not be forwarded to the child"
+        );
+        assert!(report.events.is_empty());
     }
 
     #[cfg(unix)]
@@ -8919,8 +8986,8 @@ done
         let input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"demo://resource"}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}
 "#;
 
         let report =

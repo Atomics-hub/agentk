@@ -194,7 +194,9 @@ proxy forwards JSON-RPC to the child server only after mediating `tools/list`
 descriptors and `tools/call` arguments, strips AgentK-only policy metadata
 before forwarding, starts the child with only explicitly configured environment
 variables, records response hashes, and returns a blocked MCP result
-without executing the child tool when policy denies the call:
+without executing the child tool when policy denies the call. MCP methods that
+do not yet have an AgentK policy contract are rejected instead of being
+forwarded as generic passthrough:
 
 ```sh
 cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
