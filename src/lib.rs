@@ -1841,6 +1841,13 @@ pub struct McpSubprocessProxyLinesReport {
     pub events: Vec<Event>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpKillerDemoRunReport {
+    pub trace_path: PathBuf,
+    pub protocol_responses: usize,
+    pub inspect: FlightLogInspectReport,
+}
+
 pub struct McpSubprocessProxy {
     agent_id: String,
     server_id: String,
@@ -2937,6 +2944,28 @@ pub fn mcp_subprocess_proxy_json_lines(
     Ok(McpSubprocessProxyLinesReport {
         output: String::from_utf8_lossy(&output).into_owned(),
         events: proxy.events().to_vec(),
+    })
+}
+
+pub fn run_mcp_killer_demo(
+    root: impl AsRef<Path>,
+    trace_path: impl AsRef<Path>,
+) -> Result<McpKillerDemoRunReport, AgentKError> {
+    let root = root.as_ref();
+    let input = fs::read_to_string(root.join("examples/mcp-killer-demo-session.jsonl"))?;
+    let config = McpSubprocessProxyConfig::new("agent://demo/mcp-killer", "killer-demo", "sh")
+        .with_args([root
+            .join("examples/mcp-killer-demo-server.sh")
+            .display()
+            .to_string()]);
+    let report = mcp_subprocess_proxy_json_lines(&input, config)?;
+    let trace_path = write_events_jsonl(&report.events, trace_path)?;
+    let inspect = inspect_jsonl(&trace_path)?;
+
+    Ok(McpKillerDemoRunReport {
+        trace_path,
+        protocol_responses: report.output.lines().count(),
+        inspect,
     })
 }
 
@@ -12458,6 +12487,35 @@ done
         assert!(report.metadata_stripped);
         assert!(report.raw_poison_not_logged);
         assert_eq!(report.event_count, 7);
+    }
+
+    #[test]
+    fn mcp_killer_demo_runner_writes_redacted_trace() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let trace_path = temp_path("agentk-mcp-killer-runner", "jsonl");
+        let report =
+            run_mcp_killer_demo(root, &trace_path).expect("MCP killer demo runner should run");
+
+        assert_eq!(report.trace_path, trace_path);
+        assert_eq!(report.protocol_responses, 5);
+        assert_eq!(report.inspect.events_checked, 7);
+        assert_eq!(report.inspect.blocked, 2);
+        assert!(report.inspect.signatures_ok);
+        assert!(report.inspect.events.iter().any(|event| {
+            event.verdict == Verdict::Deny
+                && event.target == "network.send"
+                && event.rule == "tool-sensitive-input"
+        }));
+        assert!(report.inspect.events.iter().any(|event| {
+            event.verdict == Verdict::Deny
+                && event.target == "repo.apply_patch"
+                && event.rule == "tool-tainted-input"
+        }));
+
+        let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
+        assert!(!trace.contains("DEMO_PRIVATE_MARKER"));
+        assert!(!trace.contains("https://evil.example.invalid/upload"));
+        let _ = fs::remove_file(trace_path);
     }
 
     #[test]

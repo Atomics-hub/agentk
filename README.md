@@ -219,7 +219,7 @@ AgentK records the poisoned output by hash, then blocks both dangerous
 follow-up tool calls before the child server sees them:
 
 ```sh
-cargo run -- mcp-proxy-stdio --server-id killer-demo --trace-out .agentk/runs/mcp-killer-demo.jsonl --command sh --arg examples/mcp-killer-demo-server.sh < examples/mcp-killer-demo-session.jsonl
+cargo run -- mcp-killer-demo
 cargo run -- trace-inspect .agentk/runs/mcp-killer-demo.jsonl
 ```
 
@@ -310,6 +310,8 @@ This repo currently includes:
 - an MCP killer demo where poisoned tool output tries to trigger secret
   exfiltration and an unsafe file patch, but both follow-up calls are blocked
   with inspectable trace evidence,
+- a one-command MCP killer demo runner that writes a redacted trace without
+  dumping the poisoned raw content into the review path,
 - stdin mediation for one MCP-shaped request,
 - newline-delimited stdin mediation for repeated MCP-shaped requests,
 - a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`, `agentk.mediate_descriptor`, and `agentk.record_response`,
@@ -355,6 +357,7 @@ Implemented today:
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
+- a one-command `mcp-killer-demo` runner for reviewable demo traces,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
 - a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundaries, inspect, and MCP server smoke checks.
