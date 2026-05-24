@@ -77,6 +77,7 @@ Status: in progress.
 - [x] Sanitize downstream subprocess `tools/call` error bodies before returning them.
 - [x] Add a poisoned downstream error-body demo transcript and release-audit smoke coverage.
 - [x] Spawn downstream subprocess MCP servers with an explicit environment boundary.
+- [x] Add CLI allowlisting for downstream subprocess MCP environment variables.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
