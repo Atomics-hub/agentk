@@ -6757,20 +6757,28 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_subprocess_proxy_config_guard.unsafe_env_rejected
                 && mcp_subprocess_proxy_config_guard.raw_env_not_reflected
                 && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected
+                && mcp_subprocess_proxy_config_guard.unsupported_ready_method_blocked
+                && mcp_subprocess_proxy_config_guard.unsupported_ready_method_not_forwarded
+                && mcp_subprocess_proxy_config_guard.unsupported_payload_not_returned
+                && mcp_subprocess_proxy_config_guard.unsupported_payload_not_logged
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "identity {}, command {}, env {}, redacted {}",
+                "identity {}, command {}, env {}, unsupported {}, child clean {}, redacted {}",
                 mcp_subprocess_proxy_config_guard.empty_agent_rejected
                     && mcp_subprocess_proxy_config_guard.empty_server_rejected,
                 mcp_subprocess_proxy_config_guard.empty_command_rejected
                     && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected,
                 mcp_subprocess_proxy_config_guard.unsafe_env_rejected,
+                mcp_subprocess_proxy_config_guard.unsupported_ready_method_blocked,
+                mcp_subprocess_proxy_config_guard.unsupported_ready_method_not_forwarded,
                 mcp_subprocess_proxy_config_guard.raw_env_not_reflected
                     && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected
+                    && mcp_subprocess_proxy_config_guard.unsupported_payload_not_returned
+                    && mcp_subprocess_proxy_config_guard.unsupported_payload_not_logged
             ),
         ),
         release_audit_check(
@@ -7154,6 +7162,10 @@ struct McpProxyConfigGuardSmokeReport {
     unsafe_env_rejected: bool,
     raw_env_not_reflected: bool,
     spawn_command_not_reflected: bool,
+    unsupported_ready_method_blocked: bool,
+    unsupported_ready_method_not_forwarded: bool,
+    unsupported_payload_not_returned: bool,
+    unsupported_payload_not_logged: bool,
 }
 
 #[derive(Debug)]
@@ -7775,6 +7787,23 @@ fn mcp_subprocess_proxy_config_guard_smoke() -> Result<McpProxyConfigGuardSmokeR
     const RAW_ENV_NAME: &str = "BAD-NAME";
     const RAW_ENV_VALUE: &str = "RELEASE_AUDIT_ENV_VALUE_SHOULD_NOT_REFLECT";
     const RAW_COMMAND: &str = "RELEASE_AUDIT_COMMAND_SHOULD_NOT_REFLECT";
+    const RAW_UNSUPPORTED_METHOD: &str = "completion/complete";
+    const RAW_UNSUPPORTED_PAYLOAD: &str = "RELEASE_AUDIT_UNSUPPORTED_METHOD_SHOULD_NOT_REFLECT";
+    const UNSUPPORTED_METHOD_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"unsupported-method-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *)
+      printf '%s\n' "unsupported forwarded" >> "$1"
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"forwarded":true}}'
+      ;;
+  esac
+done
+"#;
 
     let empty_agent =
         McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new("", "release-audit", "sh"))
@@ -7807,6 +7836,54 @@ fn mcp_subprocess_proxy_config_guard_smoke() -> Result<McpProxyConfigGuardSmokeR
     ))
     .expect_err("missing command should fail without reflecting command")
     .to_string();
+    let unsupported_execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-unsupported-method-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let unsupported_input = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": RAW_UNSUPPORTED_METHOD,
+            "params": {
+                "cursor": "after-init",
+                "secret": RAW_UNSUPPORTED_PAYLOAD
+            }
+        })
+    );
+    let unsupported_report = mcp_subprocess_proxy_json_lines(
+        &unsupported_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "unsupported-method-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                UNSUPPORTED_METHOD_SCRIPT.to_string(),
+                "agentk-unsupported-method".to_string(),
+                unsupported_execution_log.display().to_string(),
+            ]),
+    )?;
+    let unsupported_responses = unsupported_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let unsupported_events = serde_json::to_string(&unsupported_report.events)?;
+    let unsupported_method_not_forwarded = !unsupported_execution_log.exists();
+    let _ = fs::remove_file(&unsupported_execution_log);
 
     Ok(McpProxyConfigGuardSmokeReport {
         empty_agent_rejected: empty_agent.contains("agent_id must be non-empty"),
@@ -7818,6 +7895,19 @@ fn mcp_subprocess_proxy_config_guard_smoke() -> Result<McpProxyConfigGuardSmokeR
         spawn_command_not_reflected: spawn_error
             .contains("failed to spawn downstream MCP server process")
             && !spawn_error.contains(RAW_COMMAND),
+        unsupported_ready_method_blocked: unsupported_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32601)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!("method is not covered by AgentK MCP proxy policy")
+        }),
+        unsupported_ready_method_not_forwarded: unsupported_method_not_forwarded,
+        unsupported_payload_not_returned: !unsupported_report
+            .output
+            .contains(RAW_UNSUPPORTED_METHOD)
+            && !unsupported_report.output.contains(RAW_UNSUPPORTED_PAYLOAD),
+        unsupported_payload_not_logged: !unsupported_events.contains(RAW_UNSUPPORTED_METHOD)
+            && !unsupported_events.contains(RAW_UNSUPPORTED_PAYLOAD),
     })
 }
 
@@ -13464,6 +13554,10 @@ done
         assert!(report.unsafe_env_rejected);
         assert!(report.raw_env_not_reflected);
         assert!(report.spawn_command_not_reflected);
+        assert!(report.unsupported_ready_method_blocked);
+        assert!(report.unsupported_ready_method_not_forwarded);
+        assert!(report.unsupported_payload_not_returned);
+        assert!(report.unsupported_payload_not_logged);
     }
 
     #[test]

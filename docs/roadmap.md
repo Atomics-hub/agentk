@@ -87,6 +87,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for subprocess MCP proxy config guards.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
+- [x] Add release-audit smoke coverage for unsupported subprocess MCP no-passthrough.
 - [x] Mediate downstream subprocess MCP `resources/list` and `resources/read` with hash-only evidence.
 - [x] Add release-audit smoke coverage for subprocess MCP resource mediation.
 - [x] Mediate downstream subprocess MCP `prompts/list` and `prompts/get` with hash-only evidence.
