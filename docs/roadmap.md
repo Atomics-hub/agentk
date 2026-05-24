@@ -72,6 +72,7 @@ Status: in progress.
 - [x] Drop malformed downstream tool descriptors with hash-only evidence.
 - [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
 - [x] Validate downstream subprocess initialize protocol before exposing tools.
+- [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
