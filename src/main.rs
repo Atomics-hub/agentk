@@ -3,7 +3,7 @@ use agentk::{
     default_log_path, fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file,
     inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
     mediate_mcp_json_reader, mediate_mcp_json_stream, readiness_report, release_audit_report,
-    replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
+    replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
     signing_key_status, trusted_signing_key_manifest_keys_from_path,
     trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
@@ -98,6 +98,15 @@ enum Command {
     McpLines,
     /// Run a minimal MCP JSON-RPC stdio server that exposes agentk.mediate.
     McpServer,
+    /// Run the MCP poisoned-output exfiltration/patch blocking demo.
+    McpKillerDemo {
+        /// Optional JSONL path for the AgentK proxy flight log.
+        #[arg(long, default_value = ".agentk/runs/mcp-killer-demo.jsonl")]
+        trace_out: PathBuf,
+        /// Emit the redacted inspection report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Proxy MCP JSON-RPC stdin/stdout through a downstream MCP server process.
     McpProxyStdio {
         /// Stable AgentK agent identifier for mediated tool calls.
@@ -243,6 +252,7 @@ fn run() -> Result<(), AgentKError> {
         Command::McpStdio => mcp_stdio(),
         Command::McpLines => mcp_lines(),
         Command::McpServer => mcp_server(),
+        Command::McpKillerDemo { trace_out, json } => mcp_killer_demo(trace_out, json),
         Command::McpProxyStdio {
             agent_id,
             server_id,
@@ -561,6 +571,46 @@ fn mcp_server() -> Result<(), AgentKError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     mcp_server_json_stream(BufReader::new(stdin.lock()), stdout.lock())
+}
+
+fn mcp_killer_demo(trace_out: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = run_mcp_killer_demo(env!("CARGO_MANIFEST_DIR"), trace_out)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK MCP killer demo");
+    println!("scenario  poisoned MCP output tries secret exfiltration and unsafe patching");
+    println!("trace     {}", report.trace_path.display());
+    println!("responses {}", report.protocol_responses);
+    println!("events    {}", report.inspect.events_checked);
+    println!("allowed   {}", report.inspect.allowed);
+    println!("blocked   {}", report.inspect.blocked);
+    println!("signatures {}", report.inspect.signatures_ok);
+    println!();
+
+    for event in report
+        .inspect
+        .events
+        .iter()
+        .filter(|event| event.verdict == Verdict::Deny)
+    {
+        println!(
+            "blocked   #{} {} {} via {}",
+            event.step, event.syscall, event.target, event.rule
+        );
+        println!("reason    {}", event.reason);
+    }
+
+    println!();
+    println!(
+        "inspect   cargo run -- trace-inspect {}",
+        report.trace_path.display()
+    );
+
+    Ok(())
 }
 
 fn mcp_proxy_stdio(
