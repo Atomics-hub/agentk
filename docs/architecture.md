@@ -183,11 +183,12 @@ from being laundered into another tool boundary as trusted input.
 This is useful for integration experiments, but it is not a full MCP proxy and it still never executes the underlying tool.
 
 `agentk mcp-proxy-stdio` sits between an MCP client and a downstream stdio MCP
-server process. It mediates `tools/list` descriptors and `tools/call` requests,
-records hash-first evidence for downstream tool responses, strips AgentK-only
-policy metadata from forwarded covered messages, and rejects post-ready MCP
-request methods that do not yet have an AgentK policy contract instead of
-forwarding them as generic passthrough.
+server process. It mediates `tools/list` descriptors, `tools/call` requests,
+`resources/list` descriptors, and `resources/read` requests. Tool and resource
+responses are recorded with hash-first evidence, AgentK-only policy metadata is
+stripped from forwarded covered messages, and post-ready MCP request methods
+without an AgentK policy contract are rejected instead of being forwarded as
+generic passthrough.
 
 ### Key Rotation Manifests
 

@@ -81,6 +81,7 @@ Status: in progress.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
+- [x] Mediate downstream subprocess MCP `resources/list` and `resources/read` with hash-only evidence.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
