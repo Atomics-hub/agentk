@@ -192,7 +192,8 @@ cargo run -- mcp-server < examples/mcp-server-session.jsonl
 Run AgentK as a stdio proxy in front of a downstream MCP server process. The
 proxy forwards JSON-RPC to the child server only after mediating `tools/list`
 descriptors and `tools/call` arguments, strips AgentK-only policy metadata
-before forwarding, records response hashes, and returns a blocked MCP result
+before forwarding, starts the child with only explicitly configured environment
+variables, records response hashes, and returns a blocked MCP result
 without executing the child tool when policy denies the call:
 
 ```sh
