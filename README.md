@@ -382,8 +382,9 @@ Implemented today:
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
-  subprocess MCP boundaries, lifecycle/list redaction, config guards, the MCP
-  shim eval, inspect, and MCP server smoke checks.
+  subprocess MCP boundaries, lifecycle/list redaction, config guards,
+  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke
+  checks.
 
 Not implemented yet:
 
