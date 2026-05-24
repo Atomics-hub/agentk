@@ -6279,6 +6279,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_security_shim_eval = mcp_security_shim_eval_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
+    let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
     let mcp_subprocess_proxy_prompt_error = mcp_subprocess_proxy_prompt_error_smoke()?;
@@ -6654,6 +6655,30 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess config guard",
+            if mcp_subprocess_proxy_config_guard.empty_agent_rejected
+                && mcp_subprocess_proxy_config_guard.empty_server_rejected
+                && mcp_subprocess_proxy_config_guard.empty_command_rejected
+                && mcp_subprocess_proxy_config_guard.unsafe_env_rejected
+                && mcp_subprocess_proxy_config_guard.raw_env_not_reflected
+                && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "identity {}, command {}, env {}, redacted {}",
+                mcp_subprocess_proxy_config_guard.empty_agent_rejected
+                    && mcp_subprocess_proxy_config_guard.empty_server_rejected,
+                mcp_subprocess_proxy_config_guard.empty_command_rejected
+                    && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected,
+                mcp_subprocess_proxy_config_guard.unsafe_env_rejected,
+                mcp_subprocess_proxy_config_guard.raw_env_not_reflected
+                    && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess resource boundary",
             if mcp_subprocess_proxy_resource.resource_descriptor_mediated
                 && mcp_subprocess_proxy_resource.allowed_forwarded
@@ -7015,6 +7040,16 @@ struct McpSubprocessProxyEnvSmokeReport {
     raw_child_stderr_not_returned: bool,
     raw_child_stderr_not_logged: bool,
     event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpProxyConfigGuardSmokeReport {
+    empty_agent_rejected: bool,
+    empty_server_rejected: bool,
+    empty_command_rejected: bool,
+    unsafe_env_rejected: bool,
+    raw_env_not_reflected: bool,
+    spawn_command_not_reflected: bool,
 }
 
 #[derive(Debug)]
@@ -7509,6 +7544,57 @@ done
         raw_child_stderr_not_returned: !report.output.contains(RAW_CHILD_STDERR_MARKER),
         raw_child_stderr_not_logged: !serialized_events.contains(RAW_CHILD_STDERR_MARKER),
         event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_config_guard_smoke() -> Result<McpProxyConfigGuardSmokeReport, AgentKError>
+{
+    const RAW_ENV_NAME: &str = "BAD-NAME";
+    const RAW_ENV_VALUE: &str = "RELEASE_AUDIT_ENV_VALUE_SHOULD_NOT_REFLECT";
+    const RAW_COMMAND: &str = "RELEASE_AUDIT_COMMAND_SHOULD_NOT_REFLECT";
+
+    let empty_agent =
+        McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new("", "release-audit", "sh"))
+            .expect_err("empty agent id should be rejected before spawn")
+            .to_string();
+    let empty_server = McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new(
+        "agent://release-audit",
+        " ",
+        "sh",
+    ))
+    .expect_err("empty server id should be rejected before spawn")
+    .to_string();
+    let empty_command = McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new(
+        "agent://release-audit",
+        "release-audit",
+        " ",
+    ))
+    .expect_err("empty command should be rejected before spawn")
+    .to_string();
+    let unsafe_env = McpSubprocessProxy::spawn(
+        McpSubprocessProxyConfig::new("agent://release-audit", "release-audit", "sh")
+            .with_env(RAW_ENV_NAME, RAW_ENV_VALUE),
+    )
+    .expect_err("unsafe env name should be rejected before spawn")
+    .to_string();
+    let spawn_error = McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new(
+        "agent://release-audit",
+        "release-audit",
+        RAW_COMMAND,
+    ))
+    .expect_err("missing command should fail without reflecting command")
+    .to_string();
+
+    Ok(McpProxyConfigGuardSmokeReport {
+        empty_agent_rejected: empty_agent.contains("agent_id must be non-empty"),
+        empty_server_rejected: empty_server.contains("server_id must be non-empty"),
+        empty_command_rejected: empty_command.contains("command must be non-empty"),
+        unsafe_env_rejected: unsafe_env.contains("env names must match"),
+        raw_env_not_reflected: !unsafe_env.contains(RAW_ENV_NAME)
+            && !unsafe_env.contains(RAW_ENV_VALUE),
+        spawn_command_not_reflected: spawn_error
+            .contains("failed to spawn downstream MCP server process")
+            && !spawn_error.contains(RAW_COMMAND),
     })
 }
 
@@ -12983,6 +13069,19 @@ done
         assert!(report.raw_child_stderr_not_returned);
         assert!(report.raw_child_stderr_not_logged);
         assert_eq!(report.event_count, 3);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_config_guard_smoke_redacts_spawn_inputs() {
+        let report = mcp_subprocess_proxy_config_guard_smoke()
+            .expect("subprocess proxy config guard smoke should run");
+
+        assert!(report.empty_agent_rejected);
+        assert!(report.empty_server_rejected);
+        assert!(report.empty_command_rejected);
+        assert!(report.unsafe_env_rejected);
+        assert!(report.raw_env_not_reflected);
+        assert!(report.spawn_command_not_reflected);
     }
 
     #[test]
