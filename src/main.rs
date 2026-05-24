@@ -557,12 +557,7 @@ fn mcp_proxy_stdio(
 ) -> Result<(), AgentKError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let config = McpSubprocessProxyConfig {
-        agent_id,
-        server_id,
-        command,
-        args,
-    };
+    let config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
     mcp_subprocess_proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock(), config)
 }
 

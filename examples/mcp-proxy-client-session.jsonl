@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"demo.echo","arguments":{"message":"public"},"agentk":{"intent":"invoke echo through subprocess proxy","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"]}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"demo.sink","arguments":{"from_response":"response_sha256:pretend-client-ref"},"agentk":{"intent":"attempt to launder MCP tool output into another tool","labels":["untrusted","external"],"capabilities":["tool.invoke:demo.sink"]}}}
