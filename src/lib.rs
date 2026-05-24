@@ -4671,6 +4671,8 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
         check_required_file(&root, "examples/mcp-proxy-client-session.jsonl"),
         check_required_file(&root, "examples/mcp-poisoned-server.sh"),
+        check_required_file(&root, "examples/mcp-proxy-poisoned-error-session.jsonl"),
+        check_required_file(&root, "examples/mcp-poisoned-error-server.sh"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
         check_required_file(&root, "examples/secret-refs.toml"),
         check_required_file(&root, "examples/trusted-signers.toml"),
@@ -4775,6 +4777,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let mcp_transport_guard = mcp_transport_guard_smoke()?;
     let mcp_subprocess_proxy = mcp_subprocess_proxy_smoke(root)?;
+    let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let replay_stub_outputs_ok = replay.side_effects_stubbed == replay.stub_outputs.len()
@@ -5039,6 +5042,28 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess error redaction",
+            if mcp_subprocess_proxy_error.descriptor_mediated
+                && mcp_subprocess_proxy_error.error_sanitized
+                && mcp_subprocess_proxy_error.error_recorded
+                && mcp_subprocess_proxy_error.raw_error_not_returned
+                && mcp_subprocess_proxy_error.raw_error_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "descriptor {}, sanitized {}, response {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_error.descriptor_mediated,
+                mcp_subprocess_proxy_error.error_sanitized,
+                mcp_subprocess_proxy_error.error_recorded,
+                mcp_subprocess_proxy_error.raw_error_not_returned,
+                mcp_subprocess_proxy_error.raw_error_not_logged,
+                mcp_subprocess_proxy_error.event_count
+            ),
+        ),
+        release_audit_check(
             "trace inspect",
             if inspect.signatures_ok {
                 ReadinessStatus::Pass
@@ -5287,6 +5312,16 @@ struct McpSubprocessProxySmokeReport {
     event_count: usize,
 }
 
+#[derive(Debug)]
+struct McpSubprocessProxyErrorSmokeReport {
+    descriptor_mediated: bool,
+    error_sanitized: bool,
+    error_recorded: bool,
+    raw_error_not_returned: bool,
+    raw_error_not_logged: bool,
+    event_count: usize,
+}
+
 fn mcp_transport_guard_smoke() -> Result<McpTransportGuardSmokeReport, AgentKError> {
     const RAW_ID_PAYLOAD: &str = "RELEASE_AUDIT_MCP_ID_SHOULD_NOT_REFLECT";
     const RAW_LINES_PAYLOAD: &str = "RELEASE_AUDIT_MCP_LINES_SHOULD_NOT_REFLECT";
@@ -5526,6 +5561,56 @@ fn mcp_subprocess_proxy_smoke(root: &Path) -> Result<McpSubprocessProxySmokeRepo
         metadata_stripped: !execution_log_content.contains("metadata leaked"),
         raw_descriptor_not_logged: !serialized_events.contains(RAW_DESCRIPTOR_TEXT),
         raw_response_not_logged: !serialized_events.contains(RAW_RESPONSE_TEXT),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_error_smoke(
+    root: &Path,
+) -> Result<McpSubprocessProxyErrorSmokeReport, AgentKError> {
+    const RAW_ERROR_TEXT: &str = "POISONED_ERROR_PAYLOAD_SHOULD_NOT_REFLECT";
+
+    let input = fs::read_to_string(root.join("examples/mcp-proxy-poisoned-error-session.jsonl"))?;
+    let config =
+        McpSubprocessProxyConfig::new("agent://release-audit", "poisoned-error-demo", "sh")
+            .with_args([root
+                .join("examples/mcp-poisoned-error-server.sh")
+                .display()
+                .to_string()]);
+    let report = mcp_subprocess_proxy_json_lines(&input, config)?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpSubprocessProxyErrorSmokeReport {
+        descriptor_mediated: responses.get(1).is_some_and(|response| {
+            response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
+                && response["result"]["tools"][0]["name"] == serde_json::json!("demo.lookup")
+        }),
+        error_sanitized: responses.get(2).is_some_and(|response| {
+            response["error"]["code"] == serde_json::json!(-32005)
+                && response["error"]["message"] == serde_json::json!("Downstream tool error")
+                && response["error"]["data"]["downstream_error"]["code"]
+                    == serde_json::json!(-32042)
+                && response["error"]["data"]["downstream_error"]["message_redacted"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["downstream_error"]["data_redacted"]
+                    == serde_json::json!(true)
+        }),
+        error_recorded: responses.get(2).is_some_and(|response| {
+            response["error"]["data"]["agentk"]["response_record"]["recorded"]
+                == serde_json::json!(true)
+                && response["error"]["data"]["agentk"]["response_record"]["is_error"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["agentk"]["response_record"]["response_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.len() == 64)
+        }),
+        raw_error_not_returned: !report.output.contains(RAW_ERROR_TEXT),
+        raw_error_not_logged: !serialized_events.contains(RAW_ERROR_TEXT),
         event_count: report.events.len(),
     })
 }
@@ -9555,6 +9640,20 @@ done
         assert!(report.raw_descriptor_not_logged);
         assert!(report.raw_response_not_logged);
         assert_eq!(report.event_count, 5);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_error_smoke_redacts_downstream_error() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let report = mcp_subprocess_proxy_error_smoke(root)
+            .expect("subprocess proxy error smoke should run");
+
+        assert!(report.descriptor_mediated);
+        assert!(report.error_sanitized);
+        assert!(report.error_recorded);
+        assert!(report.raw_error_not_returned);
+        assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 3);
     }
 
     #[test]
