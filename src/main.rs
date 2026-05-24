@@ -424,6 +424,12 @@ fn trace_inspect(path: PathBuf, json: bool) -> Result<(), AgentKError> {
     println!("receipts  {}", report.receipts_checked);
     println!("handles   {}", report.secret_handles_checked);
     println!("final     {}", report.final_hash);
+    if !report.blocked_rules.is_empty() {
+        println!("blocked rules");
+        for (rule, count) in &report.blocked_rules {
+            println!("  {rule}: {count}");
+        }
+    }
     println!();
 
     for event in &report.events {
