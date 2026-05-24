@@ -359,6 +359,7 @@ Implemented today:
 - JSONL flight log hash chain,
 - local log verification,
 - redacted flight-log inspection that replaces raw input refs with hash evidence,
+- trace inspection summaries that group blocked events by policy rule,
 - deterministic replay that stubs side effects,
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,

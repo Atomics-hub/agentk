@@ -135,7 +135,7 @@ Replay modes:
 
 `agentk verify-signatures` verifies receipt and secret-handle signatures. Reviewers can pass one or more `--trusted-public-key` values, or `--trusted-key-manifest examples/trusted-signers.toml`, to pin verification to known release signer identities; mathematically valid signatures from unknown keys then fail review. `agentk trusted-signers-check` validates a trusted-signer manifest and reports only version and key count.
 
-`agentk trace-inspect` is the human review path. It verifies the hash chain, summarizes signature status, and prints one compact row per event. Known hash evidence refs such as `args_sha256`, `descriptor_sha256`, and `response_sha256` are preserved. Any raw input ref is replaced with a fresh `input_sha256` ref in the inspection report.
+`agentk trace-inspect` is the human review path. It verifies the hash chain, summarizes signature status, groups blocked events by policy rule, and prints one compact row per event. Known hash evidence refs such as `args_sha256`, `descriptor_sha256`, and `response_sha256` are preserved. Any raw input ref is replaced with a fresh `input_sha256` ref in the inspection report.
 
 `agentk replay` records deterministic `stub_output_sha256` evidence refs for allowed `model.call`, `tool.invoke`, and `network.send` events. Blocked side effects stay blocked and do not get stub outputs.
 

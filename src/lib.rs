@@ -5253,6 +5253,7 @@ pub struct FlightLogInspectReport {
     pub allowed: usize,
     pub blocked: usize,
     pub side_effects_stubbed: usize,
+    pub blocked_rules: BTreeMap<String, usize>,
     pub events: Vec<FlightLogEventSummary>,
     pub signature_failures: Vec<String>,
 }
@@ -5301,6 +5302,15 @@ pub fn inspect_events(
                 && is_side_effecting_syscall(&event.syscall.kind)
         })
         .count();
+    let mut blocked_rules = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Deny)
+    {
+        *blocked_rules
+            .entry(event.decision.rule.clone())
+            .or_insert(0) += 1;
+    }
     let events = events.iter().map(inspect_event_summary).collect();
 
     Ok(FlightLogInspectReport {
@@ -5313,6 +5323,7 @@ pub fn inspect_events(
         allowed,
         blocked,
         side_effects_stubbed,
+        blocked_rules,
         events,
         signature_failures: signatures.failures,
     })
@@ -12396,6 +12407,10 @@ done
         assert_eq!(report.events_checked, 1);
         assert_eq!(report.blocked, 1);
         assert_eq!(
+            report.blocked_rules.get("tool-invoke-capability-missing"),
+            Some(&1)
+        );
+        assert_eq!(
             report.events[0].reason,
             "tool invocation requires explicit target-scoped capability"
         );
@@ -12941,6 +12956,7 @@ done
 
         assert_eq!(inspect.events_checked, 5);
         assert_eq!(inspect.blocked, 1);
+        assert_eq!(inspect.blocked_rules.get("tool-tainted-input"), Some(&1));
         assert!(inspect.signatures_ok);
         assert!(inspect.events.iter().all(|event| !event.redacted_inputs));
         assert!(
