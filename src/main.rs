@@ -110,7 +110,7 @@ enum Command {
         #[arg(long)]
         command: String,
         /// Argument passed to the downstream command. Repeat for multiple args.
-        #[arg(long = "arg")]
+        #[arg(long = "arg", num_args = 1, allow_hyphen_values = true)]
         args: Vec<String>,
         /// Parent environment variable name to copy into the cleared child environment. Repeat for multiple vars.
         #[arg(long = "allow-env", value_name = "NAME")]
@@ -849,6 +849,26 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_proxy_stdio_accepts_hyphen_prefixed_child_args() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "mcp-proxy-stdio",
+            "--command",
+            "sh",
+            "--arg",
+            "-c",
+            "--arg",
+            "printf ok",
+        ])
+        .expect("hyphen-prefixed child args should parse");
+
+        let Some(Command::McpProxyStdio { args, .. }) = cli.command else {
+            panic!("expected mcp-proxy-stdio command");
+        };
+        assert_eq!(args, vec!["-c".to_string(), "printf ok".to_string()]);
+    }
 
     #[test]
     fn mcp_proxy_allow_env_collects_explicit_parent_values() {

@@ -203,6 +203,8 @@ cargo run -- trace-inspect .agentk/runs/mcp-proxy-demo.jsonl
 
 Use `--allow-env NAME` to copy a named parent environment variable into the
 cleared child environment. Repeat the flag for multiple variables.
+Repeat `--arg` for each downstream argument; hyphen-prefixed child args are
+accepted, for example `--arg -c`.
 
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
