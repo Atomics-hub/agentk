@@ -370,6 +370,9 @@ Implemented today:
   capabilities,
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
 - subprocess MCP stderr suppression for downstream diagnostics,
+- subprocess MCP lifecycle error redaction for downstream `initialize` and
+  `ping` failures,
+- subprocess MCP `tools/list` error redaction before descriptors are exposed,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
 - a one-command `mcp-killer-demo` runner for reviewable demo traces,
