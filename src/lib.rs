@@ -1833,12 +1833,50 @@ impl McpSubprocessProxyConfig {
         self.env.insert(key.into(), value.into());
         self
     }
+
+    fn validate(&self) -> Result<(), AgentKError> {
+        if self.agent_id.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP proxy agent_id must be non-empty".to_string(),
+            ));
+        }
+        if self.server_id.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP proxy server_id must be non-empty".to_string(),
+            ));
+        }
+        if self.command.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP server command must be non-empty".to_string(),
+            ));
+        }
+        for name in self.env.keys() {
+            if !is_safe_mcp_env_name(name) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "downstream MCP env names must match [A-Za-z_][A-Za-z0-9_]*".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpSubprocessProxyLinesReport {
     pub output: String,
     pub events: Vec<Event>,
+}
+
+fn is_safe_mcp_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1914,6 +1952,8 @@ impl Drop for McpSubprocessProxy {
 
 impl McpSubprocessProxy {
     pub fn spawn(config: McpSubprocessProxyConfig) -> Result<Self, AgentKError> {
+        config.validate()?;
+
         let mut child = Command::new(&config.command)
             .args(&config.args)
             .env_clear()
@@ -1924,8 +1964,7 @@ impl McpSubprocessProxy {
             .spawn()
             .map_err(|error| {
                 AgentKError::InvalidMcpRequest(format!(
-                    "failed to spawn downstream MCP server {}: {error}",
-                    config.command
+                    "failed to spawn downstream MCP server process: {error}"
                 ))
             })?;
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -9156,6 +9195,62 @@ mod tests {
             self.flushes += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_rejects_empty_config_fields_before_spawn() {
+        let agent_error =
+            McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new("", "demo-server", "sh"))
+                .expect_err("empty agent id should be rejected before spawn")
+                .to_string();
+        assert!(agent_error.contains("agent_id must be non-empty"));
+
+        let server_error =
+            McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new("agent://test", " ", "sh"))
+                .expect_err("empty server id should be rejected before spawn")
+                .to_string();
+        assert!(server_error.contains("server_id must be non-empty"));
+
+        let command_error = McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new(
+            "agent://test",
+            "demo-server",
+            " ",
+        ))
+        .expect_err("empty command should be rejected before spawn")
+        .to_string();
+        assert!(command_error.contains("command must be non-empty"));
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_rejects_unsafe_config_env_names_without_value_reflection() {
+        const RAW_ENV_VALUE: &str = "RAW_ENV_VALUE_SHOULD_NOT_REFLECT";
+
+        let error = McpSubprocessProxy::spawn(
+            McpSubprocessProxyConfig::new("agent://test", "demo-server", "sh")
+                .with_env("BAD-NAME", RAW_ENV_VALUE),
+        )
+        .expect_err("unsafe env name should be rejected before spawn")
+        .to_string();
+
+        assert!(error.contains("env names must match [A-Za-z_][A-Za-z0-9_]*"));
+        assert!(!error.contains("BAD-NAME"));
+        assert!(!error.contains(RAW_ENV_VALUE));
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_spawn_errors_do_not_reflect_command() {
+        const RAW_COMMAND: &str = "MISSING_COMMAND_SHOULD_NOT_REFLECT";
+
+        let error = McpSubprocessProxy::spawn(McpSubprocessProxyConfig::new(
+            "agent://test",
+            "demo-server",
+            RAW_COMMAND,
+        ))
+        .expect_err("missing command should fail")
+        .to_string();
+
+        assert!(error.contains("failed to spawn downstream MCP server process"));
+        assert!(!error.contains(RAW_COMMAND));
     }
 
     #[derive(Default)]
