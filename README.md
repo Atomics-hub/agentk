@@ -316,6 +316,8 @@ This repo currently includes:
   with hash-only evidence,
 - subprocess MCP prompt mediation for `prompts/list` and `prompts/get` with
   hash-only evidence,
+- subprocess MCP stderr suppression so child diagnostics cannot bypass the
+  redacted JSON-RPC and trace-evidence path,
 - an MCP killer demo where poisoned tool output tries to trigger secret
   exfiltration and an unsafe file patch, but both follow-up calls are blocked
   with inspectable trace evidence,
@@ -366,6 +368,7 @@ Implemented today:
 - MCP resource descriptor/read/response evidence with explicit read
   capabilities,
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
+- subprocess MCP stderr suppression for downstream diagnostics,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
 - a one-command `mcp-killer-demo` runner for reviewable demo traces,

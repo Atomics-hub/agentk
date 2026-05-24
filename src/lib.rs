@@ -1920,6 +1920,7 @@ impl McpSubprocessProxy {
             .envs(&config.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| {
                 AgentKError::InvalidMcpRequest(format!(
@@ -6584,17 +6585,21 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_subprocess_proxy_env.ambient_env_stripped
                 && mcp_subprocess_proxy_env.raw_ambient_env_not_returned
                 && mcp_subprocess_proxy_env.raw_ambient_env_not_logged
+                && mcp_subprocess_proxy_env.raw_child_stderr_not_returned
+                && mcp_subprocess_proxy_env.raw_child_stderr_not_logged
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "explicit {}, ambient stripped {}, returned redacted {}, evidence redacted {}, events {}",
+                "explicit {}, ambient stripped {}, returned redacted {}, evidence redacted {}, stderr redacted {}, events {}",
                 mcp_subprocess_proxy_env.explicit_env_passed,
                 mcp_subprocess_proxy_env.ambient_env_stripped,
                 mcp_subprocess_proxy_env.raw_ambient_env_not_returned,
                 mcp_subprocess_proxy_env.raw_ambient_env_not_logged,
+                mcp_subprocess_proxy_env.raw_child_stderr_not_returned
+                    && mcp_subprocess_proxy_env.raw_child_stderr_not_logged,
                 mcp_subprocess_proxy_env.event_count
             ),
         ),
@@ -6957,6 +6962,8 @@ struct McpSubprocessProxyEnvSmokeReport {
     ambient_env_stripped: bool,
     raw_ambient_env_not_returned: bool,
     raw_ambient_env_not_logged: bool,
+    raw_child_stderr_not_returned: bool,
+    raw_child_stderr_not_logged: bool,
     event_count: usize,
 }
 
@@ -7385,6 +7392,7 @@ fn mcp_subprocess_proxy_error_smoke(
 
 fn mcp_subprocess_proxy_env_smoke() -> Result<McpSubprocessProxyEnvSmokeReport, AgentKError> {
     const RAW_AMBIENT_ENV_MARKER: &str = "AGENTK_AMBIENT_ENV_SHOULD_NOT_LEAK";
+    const RAW_CHILD_STDERR_MARKER: &str = "AGENTK_CHILD_STDERR_SHOULD_NOT_LEAK";
     const ENV_PROBE_SCRIPT: &str = r#"
 while IFS= read -r line; do
   case "$line" in
@@ -7402,6 +7410,7 @@ while IFS= read -r line; do
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"demo.env","description":"Reports explicit env probe status."}]}}'
       ;;
     *'demo.env'*)
+      printf '%s\n' "AGENTK_CHILD_STDERR_SHOULD_NOT_LEAK" >&2
       if [ "${AGENTK_PROXY_ENV_PROBE:-}" = "explicit" ] && [ -z "${HOME+x}" ]; then
         printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"explicit env present; ambient env absent"}],"structuredContent":{"explicit_env":"present","ambient_home":false},"isError":false}}'
       else
@@ -7447,6 +7456,8 @@ done
         }),
         raw_ambient_env_not_returned: !report.output.contains(RAW_AMBIENT_ENV_MARKER),
         raw_ambient_env_not_logged: !serialized_events.contains(RAW_AMBIENT_ENV_MARKER),
+        raw_child_stderr_not_returned: !report.output.contains(RAW_CHILD_STDERR_MARKER),
+        raw_child_stderr_not_logged: !serialized_events.contains(RAW_CHILD_STDERR_MARKER),
         event_count: report.events.len(),
     })
 }
@@ -12859,6 +12870,8 @@ done
         assert!(report.ambient_env_stripped);
         assert!(report.raw_ambient_env_not_returned);
         assert!(report.raw_ambient_env_not_logged);
+        assert!(report.raw_child_stderr_not_returned);
+        assert!(report.raw_child_stderr_not_logged);
         assert_eq!(report.event_count, 3);
     }
 
