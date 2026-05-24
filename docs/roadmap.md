@@ -70,6 +70,7 @@ Status: in progress.
 - [x] Strip AgentK-only metadata from subprocess proxy passthrough traffic.
 - [x] Return sanitized JSON-RPC errors for malformed downstream subprocess responses.
 - [x] Drop malformed downstream tool descriptors with hash-only evidence.
+- [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
