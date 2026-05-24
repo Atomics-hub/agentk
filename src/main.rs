@@ -421,6 +421,10 @@ fn trace_inspect(path: PathBuf, json: bool) -> Result<(), AgentKError> {
             event.step, event.syscall, event.target
         );
         println!("       rule:     {}", event.rule);
+        println!("       reason:   {}", event.reason);
+        if let Some(missing) = &event.missing_capability {
+            println!("       missing:  {missing}");
+        }
         println!("       labels:   {labels}");
         println!("       evidence: {evidence}");
         if event.redacted_inputs {

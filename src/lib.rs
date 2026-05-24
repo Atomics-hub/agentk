@@ -3599,6 +3599,8 @@ pub struct FlightLogEventSummary {
     pub target: String,
     pub verdict: Verdict,
     pub rule: String,
+    pub reason: String,
+    pub missing_capability: Option<String>,
     pub labels: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub redacted_inputs: bool,
@@ -3676,6 +3678,8 @@ fn inspect_event_summary(event: &Event) -> FlightLogEventSummary {
         target: event.syscall.target.clone(),
         verdict: event.decision.verdict,
         rule: event.decision.rule.clone(),
+        reason: event.decision.reason.clone(),
+        missing_capability: event.decision.missing_capability.clone(),
         labels: event
             .syscall
             .labels
@@ -8301,6 +8305,11 @@ done
         assert_eq!(report.allowed, 1);
         assert_eq!(report.blocked, 0);
         assert!(report.signatures_ok);
+        assert_eq!(
+            report.events[0].reason,
+            "tool invocation covered by a scoped receipt"
+        );
+        assert!(report.events[0].missing_capability.is_none());
         assert!(report.events[0].redacted_inputs);
         assert!(report.events[0].evidence_refs[0].starts_with("input_sha256:"));
         assert!(!serialized.contains(raw_input));
@@ -8325,10 +8334,43 @@ done
         let inspect = inspect_jsonl(&path).expect("inspect should verify");
 
         assert_eq!(inspect.events_checked, 1);
+        assert_eq!(
+            inspect.events[0].reason,
+            "tool response content is recorded by hash without storing raw output"
+        );
         assert!(!inspect.events[0].redacted_inputs);
         assert_eq!(
             inspect.events[0].evidence_refs[0],
             format!("response_sha256:{}", report.response_hash)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn flight_log_inspect_reports_missing_capability_reason() {
+        let path = temp_path("agentk-inspect-missing-capability", "jsonl");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "demo.echo".to_string(),
+            intent: "inspect missing capability".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![format!("args_sha256:{}", hash_json(&serde_json::json!({})))],
+        });
+        kernel.write_jsonl(&path).expect("log should write");
+
+        let report = inspect_jsonl(&path).expect("inspect should verify");
+
+        assert_eq!(report.events_checked, 1);
+        assert_eq!(report.blocked, 1);
+        assert_eq!(
+            report.events[0].reason,
+            "tool invocation requires explicit target-scoped capability"
+        );
+        assert_eq!(
+            report.events[0].missing_capability.as_deref(),
+            Some("tool.invoke:demo.echo")
         );
 
         let _ = fs::remove_file(path);
