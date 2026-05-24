@@ -206,6 +206,9 @@ cleared child environment. Repeat the flag for multiple variables.
 Repeat `--arg` for each downstream argument; hyphen-prefixed child args are
 accepted, for example `--arg -c`.
 
+The subprocess proxy operator contract lives in
+[docs/mcp-proxy.md](docs/mcp-proxy.md).
+
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
 the client while preserving hash evidence in the trace:
@@ -340,7 +343,7 @@ Not implemented yet:
 
 By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_FILE` to a private key file created by `agentk keygen`, or set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. On Unix, readiness also fails if the configured key file is readable by group/other users or if its parent directory is group/other writable. The CLI only prints the public key.
 
-See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md), [docs/key-lifecycle.md](docs/key-lifecycle.md), and [docs/public-readiness.md](docs/public-readiness.md).
+See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md), [docs/key-lifecycle.md](docs/key-lifecycle.md), [docs/mcp-proxy.md](docs/mcp-proxy.md), and [docs/public-readiness.md](docs/public-readiness.md).
 
 ## Name
 
