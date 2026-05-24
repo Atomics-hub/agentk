@@ -978,18 +978,7 @@ impl AgentKernel {
     }
 
     pub fn write_jsonl(&self, path: impl AsRef<Path>) -> Result<PathBuf, AgentKError> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let mut out = String::new();
-        for event in &self.events {
-            out.push_str(&serde_json::to_string(event)?);
-            out.push('\n');
-        }
-        fs::write(path, out)?;
-        Ok(path.to_path_buf())
+        write_events_jsonl(&self.events, path)
     }
 
     fn evaluate(&self, step: u64, syscall: &Syscall) -> PolicyDecision {
@@ -5880,6 +5869,24 @@ pub fn verify_jsonl(path: impl AsRef<Path>) -> Result<VerifyReport, AgentKError>
     verify_events(&read_events_jsonl(path)?)
 }
 
+pub fn write_events_jsonl(
+    events: &[Event],
+    path: impl AsRef<Path>,
+) -> Result<PathBuf, AgentKError> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&serde_json::to_string(event)?);
+        out.push('\n');
+    }
+    fs::write(path, out)?;
+    Ok(path.to_path_buf())
+}
+
 pub fn read_events_jsonl(path: impl AsRef<Path>) -> Result<Vec<Event>, AgentKError> {
     let content = fs::read_to_string(path.as_ref())?;
     let mut events = Vec::new();
@@ -8692,6 +8699,45 @@ done
         assert!(report.raw_descriptor_not_logged);
         assert!(report.raw_response_not_logged);
         assert_eq!(report.event_count, 5);
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_events_can_be_written_and_inspected() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let input = fs::read_to_string(root.join("examples/mcp-proxy-client-session.jsonl"))
+            .expect("demo session should read");
+        let trace_path = temp_path("agentk-subprocess-proxy-trace", "jsonl");
+        let config = McpSubprocessProxyConfig::new("agent://test", "poisoned-demo", "sh")
+            .with_args([root
+                .join("examples/mcp-poisoned-server.sh")
+                .display()
+                .to_string()]);
+        let report =
+            mcp_subprocess_proxy_json_lines(&input, config).expect("subprocess proxy should run");
+
+        write_events_jsonl(&report.events, &trace_path).expect("trace should write");
+        let inspect = inspect_jsonl(&trace_path).expect("trace should inspect");
+
+        assert_eq!(inspect.events_checked, 5);
+        assert_eq!(inspect.blocked, 1);
+        assert!(inspect.signatures_ok);
+        assert!(inspect.events.iter().all(|event| !event.redacted_inputs));
+        assert!(
+            inspect
+                .events
+                .iter()
+                .flat_map(|event| event.evidence_refs.iter())
+                .any(|input| input.starts_with("descriptor_sha256:"))
+        );
+        assert!(
+            inspect
+                .events
+                .iter()
+                .flat_map(|event| event.evidence_refs.iter())
+                .any(|input| input.starts_with("response_sha256:"))
+        );
+
+        let _ = fs::remove_file(trace_path);
     }
 
     #[test]
