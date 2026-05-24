@@ -81,6 +81,7 @@ Status: in progress.
 - [x] Suppress downstream subprocess MCP stderr so diagnostics cannot bypass redaction.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
 - [x] Validate subprocess MCP proxy config before spawning the child.
+- [x] Add release-audit smoke coverage for subprocess MCP proxy config guards.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Mediate downstream subprocess MCP `resources/list` and `resources/read` with hash-only evidence.
