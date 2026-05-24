@@ -5847,6 +5847,8 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-server-session.jsonl"),
         check_required_file(&root, "examples/mcp-proxy-client-session.jsonl"),
         check_required_file(&root, "examples/mcp-poisoned-server.sh"),
+        check_required_file(&root, "examples/mcp-killer-demo-session.jsonl"),
+        check_required_file(&root, "examples/mcp-killer-demo-server.sh"),
         check_required_file(&root, "examples/mcp-proxy-poisoned-error-session.jsonl"),
         check_required_file(&root, "examples/mcp-poisoned-error-server.sh"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
@@ -5953,6 +5955,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
     let mcp_transport_guard = mcp_transport_guard_smoke()?;
     let mcp_subprocess_proxy = mcp_subprocess_proxy_smoke(root)?;
+    let mcp_killer_demo = mcp_killer_demo_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -6219,6 +6222,31 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy.raw_descriptor_not_logged
                     && mcp_subprocess_proxy.raw_response_not_logged,
                 mcp_subprocess_proxy.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp killer demo",
+            if mcp_killer_demo.descriptors_mediated
+                && mcp_killer_demo.poisoned_response_recorded
+                && mcp_killer_demo.exfiltration_blocked
+                && mcp_killer_demo.patch_blocked
+                && mcp_killer_demo.denied_not_forwarded
+                && mcp_killer_demo.metadata_stripped
+                && mcp_killer_demo.raw_poison_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "descriptors {}, response {}, exfil blocked {}, patch blocked {}, child clean {}, redacted {}, events {}",
+                mcp_killer_demo.descriptors_mediated,
+                mcp_killer_demo.poisoned_response_recorded,
+                mcp_killer_demo.exfiltration_blocked,
+                mcp_killer_demo.patch_blocked,
+                mcp_killer_demo.denied_not_forwarded && mcp_killer_demo.metadata_stripped,
+                mcp_killer_demo.raw_poison_not_logged,
+                mcp_killer_demo.event_count
             ),
         ),
         release_audit_check(
@@ -6595,6 +6623,18 @@ struct McpSubprocessProxySmokeReport {
 }
 
 #[derive(Debug)]
+struct McpKillerDemoSmokeReport {
+    descriptors_mediated: bool,
+    poisoned_response_recorded: bool,
+    exfiltration_blocked: bool,
+    patch_blocked: bool,
+    denied_not_forwarded: bool,
+    metadata_stripped: bool,
+    raw_poison_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
 struct McpSubprocessProxyErrorSmokeReport {
     descriptor_mediated: bool,
     error_sanitized: bool,
@@ -6890,6 +6930,87 @@ fn mcp_subprocess_proxy_smoke(root: &Path) -> Result<McpSubprocessProxySmokeRepo
         metadata_stripped: !execution_log_content.contains("metadata leaked"),
         raw_descriptor_not_logged: !serialized_events.contains(RAW_DESCRIPTOR_TEXT),
         raw_response_not_logged: !serialized_events.contains(RAW_RESPONSE_TEXT),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_killer_demo_smoke(root: &Path) -> Result<McpKillerDemoSmokeReport, AgentKError> {
+    const RAW_POISON_MARKER: &str = "DEMO_PRIVATE_MARKER";
+    const RAW_POISON_URL: &str = "https://evil.example.invalid/upload";
+
+    let input = fs::read_to_string(root.join("examples/mcp-killer-demo-session.jsonl"))?;
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-mcp-killer-demo-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let config = McpSubprocessProxyConfig::new("agent://release-audit", "killer-demo", "sh")
+        .with_args([root
+            .join("examples/mcp-killer-demo-server.sh")
+            .display()
+            .to_string()])
+        .with_env(
+            "AGENTK_FAKE_MCP_EXEC_LOG",
+            execution_log.display().to_string(),
+        );
+    let report = mcp_subprocess_proxy_json_lines(&input, config)?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpKillerDemoSmokeReport {
+        descriptors_mediated: responses.get(1).is_some_and(|response| {
+            response["result"]["tools"].as_array().is_some_and(|tools| {
+                tools.len() == 3
+                    && tools
+                        .iter()
+                        .all(|tool| tool["agentk"]["mediated"] == serde_json::json!(true))
+                    && tools.iter().any(|tool| {
+                        tool["name"] == serde_json::json!("repo.apply_patch")
+                            && tool["agentk"]["risks"].as_array().is_some_and(|risks| {
+                                risks.iter().any(|risk| {
+                                    risk.as_str()
+                                        == Some("descriptor declares destructive behavior")
+                                })
+                            })
+                    })
+            })
+        }),
+        poisoned_response_recorded: responses.get(2).is_some_and(|response| {
+            response["result"]["agentk"]["response_record"]["recorded"] == serde_json::json!(true)
+                && response["result"]["agentk"]["response_record"]["response_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.len() == 64)
+                && response["result"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| {
+                        text.contains(RAW_POISON_MARKER) && text.contains(RAW_POISON_URL)
+                    })
+        }),
+        exfiltration_blocked: responses.get(3).is_some_and(|response| {
+            response["result"]["isError"] == serde_json::json!(true)
+                && response["result"]["structuredContent"]["downstream_forwarded"]
+                    == serde_json::json!(false)
+                && response["result"]["structuredContent"]["invoke"]["event"]["decision"]["rule"]
+                    == serde_json::json!("tool-sensitive-input")
+        }),
+        patch_blocked: responses.get(4).is_some_and(|response| {
+            response["result"]["isError"] == serde_json::json!(true)
+                && response["result"]["structuredContent"]["downstream_forwarded"]
+                    == serde_json::json!(false)
+                && response["result"]["structuredContent"]["invoke"]["event"]["decision"]["rule"]
+                    == serde_json::json!("tool-tainted-input")
+        }),
+        denied_not_forwarded: !execution_log_content.contains("network egress executed")
+            && !execution_log_content.contains("unsafe patch executed"),
+        metadata_stripped: !execution_log_content.contains("metadata leaked to downstream"),
+        raw_poison_not_logged: !serialized_events.contains(RAW_POISON_MARKER)
+            && !serialized_events.contains(RAW_POISON_URL),
         event_count: report.events.len(),
     })
 }
@@ -12322,6 +12443,21 @@ done
         assert!(report.raw_descriptor_not_logged);
         assert!(report.raw_response_not_logged);
         assert_eq!(report.event_count, 5);
+    }
+
+    #[test]
+    fn release_audit_mcp_killer_demo_blocks_poisoned_followups() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let report = mcp_killer_demo_smoke(root).expect("MCP killer demo smoke should run");
+
+        assert!(report.descriptors_mediated);
+        assert!(report.poisoned_response_recorded);
+        assert!(report.exfiltration_blocked);
+        assert!(report.patch_blocked);
+        assert!(report.denied_not_forwarded);
+        assert!(report.metadata_stripped);
+        assert!(report.raw_poison_not_logged);
+        assert_eq!(report.event_count, 7);
     }
 
     #[test]
