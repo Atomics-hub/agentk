@@ -77,6 +77,7 @@ Status: in progress.
 - [x] Count stubbed model/tool/network side effects.
 - [x] Fork replay with changed policy.
 - [x] Add redacted flight-log inspect output for human review.
+- [x] Include policy reasons and missing capabilities in trace-inspect summaries.
 - [x] Record stub outputs for model/tool/network syscalls.
 - [x] Fork replay with changed model/tool behavior.
 - [x] Emit divergence reports.
