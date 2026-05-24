@@ -5957,6 +5957,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
+    let mcp_subprocess_proxy_prompt_error = mcp_subprocess_proxy_prompt_error_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let replay_stub_outputs_ok = replay.side_effects_stubbed == replay.stub_outputs.len()
@@ -6323,6 +6324,28 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess prompt error redaction",
+            if mcp_subprocess_proxy_prompt_error.descriptor_mediated
+                && mcp_subprocess_proxy_prompt_error.error_sanitized
+                && mcp_subprocess_proxy_prompt_error.error_recorded
+                && mcp_subprocess_proxy_prompt_error.raw_error_not_returned
+                && mcp_subprocess_proxy_prompt_error.raw_error_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "descriptor {}, sanitized {}, response {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_prompt_error.descriptor_mediated,
+                mcp_subprocess_proxy_prompt_error.error_sanitized,
+                mcp_subprocess_proxy_prompt_error.error_recorded,
+                mcp_subprocess_proxy_prompt_error.raw_error_not_returned,
+                mcp_subprocess_proxy_prompt_error.raw_error_not_logged,
+                mcp_subprocess_proxy_prompt_error.event_count
+            ),
+        ),
+        release_audit_check(
             "trace inspect",
             if inspect.signatures_ok {
                 ReadinessStatus::Pass
@@ -6615,6 +6638,16 @@ struct McpPromptSmokeReport {
     raw_descriptor_not_logged: bool,
     raw_response_not_logged: bool,
     raw_denied_payload_not_returned: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpPromptErrorSmokeReport {
+    descriptor_mediated: bool,
+    error_sanitized: bool,
+    error_recorded: bool,
+    raw_error_not_returned: bool,
+    raw_error_not_logged: bool,
     event_count: usize,
 }
 
@@ -7276,6 +7309,116 @@ done
         raw_response_not_logged: !serialized_events.contains(RAW_PROMPT_RESPONSE),
         raw_denied_payload_not_returned: !report.output.contains(RAW_DENIED_PAYLOAD)
             && !serialized_events.contains(RAW_DENIED_PAYLOAD),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_prompt_error_smoke() -> Result<McpPromptErrorSmokeReport, AgentKError> {
+    const RAW_ERROR_TEXT: &str = "PROMPT_ERROR_PAYLOAD_SHOULD_NOT_REFLECT";
+    const PROMPT_ERROR_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"prompts":{"listChanged":false}},"serverInfo":{"name":"prompt-error-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"demo.prompt","description":"Prompt that returns a poisoned downstream error."}]}}'
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32055,"message":"PROMPT_ERROR_PAYLOAD_SHOULD_NOT_REFLECT","data":{"secret":"PROMPT_ERROR_PAYLOAD_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let prompt_name = "demo.prompt";
+    let name_hash = hash_json(&prompt_name.to_string());
+    let capability = format!("prompt.get:prompt-error-probe:prompt_name_sha256:{name_hash}");
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "prompts/list",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "prompts/get",
+            "params": {
+                "name": prompt_name,
+                "arguments": { "topic": "public" },
+                "agentk": {
+                    "intent": "release-audit downstream MCP prompt error",
+                    "labels": ["trusted"],
+                    "capabilities": [capability]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let config = McpSubprocessProxyConfig::new("agent://release-audit", "prompt-error-probe", "sh")
+        .with_args([
+            "-c".to_string(),
+            PROMPT_ERROR_SCRIPT.to_string(),
+            "agentk-prompt-error-probe".to_string(),
+        ]);
+    let report = mcp_subprocess_proxy_json_lines(&input, config)?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpPromptErrorSmokeReport {
+        descriptor_mediated: responses.get(1).is_some_and(|response| {
+            response["result"]["prompts"][0]["agentk"]["mediated"] == serde_json::json!(true)
+                && response["result"]["prompts"][0]["name"] == serde_json::json!(prompt_name)
+        }),
+        error_sanitized: responses.get(2).is_some_and(|response| {
+            response["error"]["code"] == serde_json::json!(-32010)
+                && response["error"]["message"] == serde_json::json!("Downstream prompt error")
+                && response["error"]["data"]["downstream_error"]["code"]
+                    == serde_json::json!(-32055)
+                && response["error"]["data"]["downstream_error"]["message_redacted"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["downstream_error"]["data_redacted"]
+                    == serde_json::json!(true)
+        }),
+        error_recorded: responses.get(2).is_some_and(|response| {
+            response["error"]["data"]["agentk"]["response_record"]["recorded"]
+                == serde_json::json!(true)
+                && response["error"]["data"]["agentk"]["response_record"]["is_error"]
+                    == serde_json::json!(true)
+                && response["error"]["data"]["agentk"]["response_record"]["response_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.len() == 64)
+        }),
+        raw_error_not_returned: !report.output.contains(RAW_ERROR_TEXT),
+        raw_error_not_logged: !serialized_events.contains(RAW_ERROR_TEXT),
         event_count: report.events.len(),
     })
 }
@@ -10433,6 +10576,54 @@ done
     }
 
     #[cfg(unix)]
+    fn malformed_prompt_mcp_server_shell() -> &'static str {
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"prompts":{"listChanged":false}},"serverInfo":{"name":"malformed-prompt","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":"PROMPT_LIST_SECRET_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"messages":"PROMPT_GET_RESULT_SECRET_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#
+    }
+
+    #[cfg(unix)]
+    fn downstream_prompt_error_mcp_server_shell() -> &'static str {
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"prompts":{"listChanged":false}},"serverInfo":{"name":"prompt-error","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"demo.prompt","description":"Prompt that returns a poisoned downstream error."}]}}'
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32055,"message":"PROMPT_ERROR_SECRET_SHOULD_NOT_REFLECT","data":{"secret":"PROMPT_ERROR_SECRET_SHOULD_NOT_REFLECT"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#
+    }
+
+    #[cfg(unix)]
     fn bad_downstream_response_mcp_server_shell() -> &'static str {
         r#"
 while IFS= read -r line; do
@@ -11111,6 +11302,189 @@ done
         assert!(!serialized.contains(RAW_DENIED_PAYLOAD));
 
         let _ = fs::remove_file(execution_log);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_sanitizes_malformed_prompt_results() {
+        const RAW_PROMPT_LIST_RESULT: &str = "PROMPT_LIST_SECRET_SHOULD_NOT_REFLECT";
+        const RAW_PROMPT_GET_RESULT: &str = "PROMPT_GET_RESULT_SECRET_SHOULD_NOT_REFLECT";
+
+        let prompt_name = "demo.prompt";
+        let name_hash = hash_json(&prompt_name.to_string());
+        let capability = format!("prompt.get:malformed-prompt:prompt_name_sha256:{name_hash}");
+        let config = McpSubprocessProxyConfig::new("agent://test", "malformed-prompt", "sh")
+            .with_args([
+                "-c".to_string(),
+                malformed_prompt_mcp_server_shell().to_string(),
+                "agentk-malformed-prompt".to_string(),
+            ]);
+        let input = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25"
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "prompts/list",
+                "params": {}
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/get",
+                "params": {
+                    "name": prompt_name,
+                    "arguments": { "topic": "public" },
+                    "agentk": {
+                        "intent": "fetch malformed MCP prompt through AgentK",
+                        "labels": ["trusted"],
+                        "capabilities": [capability]
+                    }
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let report =
+            mcp_subprocess_proxy_json_lines(&input, config).expect("subprocess proxy should run");
+        let responses = report
+            .output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[1]["error"]["code"], serde_json::json!(-32003));
+        assert_eq!(
+            responses[1]["error"]["data"]["detail"],
+            serde_json::json!("downstream MCP prompts/list result.prompts must be an array")
+        );
+        assert_eq!(responses[2]["error"]["code"], serde_json::json!(-32003));
+        assert_eq!(
+            responses[2]["error"]["data"]["detail"],
+            serde_json::json!("downstream MCP prompts/get result.messages must be an array")
+        );
+        assert!(!report.output.contains(RAW_PROMPT_LIST_RESULT));
+        assert!(!report.output.contains(RAW_PROMPT_GET_RESULT));
+        assert_eq!(report.events.len(), 1);
+        assert_eq!(report.events[0].syscall.kind, SyscallKind::PromptGet);
+        let serialized = serde_json::to_string(&report.events).expect("events should serialize");
+        assert!(!serialized.contains(RAW_PROMPT_LIST_RESULT));
+        assert!(!serialized.contains(RAW_PROMPT_GET_RESULT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_sanitizes_downstream_prompt_error_body() {
+        const RAW_PROMPT_ERROR: &str = "PROMPT_ERROR_SECRET_SHOULD_NOT_REFLECT";
+
+        let prompt_name = "demo.prompt";
+        let name_hash = hash_json(&prompt_name.to_string());
+        let capability = format!("prompt.get:prompt-error:prompt_name_sha256:{name_hash}");
+        let config =
+            McpSubprocessProxyConfig::new("agent://test", "prompt-error", "sh").with_args([
+                "-c".to_string(),
+                downstream_prompt_error_mcp_server_shell().to_string(),
+                "agentk-prompt-error".to_string(),
+            ]);
+        let input = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25"
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "prompts/list",
+                "params": {}
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/get",
+                "params": {
+                    "name": prompt_name,
+                    "arguments": { "topic": "public" },
+                    "agentk": {
+                        "intent": "fetch prompt with downstream error through AgentK",
+                        "labels": ["trusted"],
+                        "capabilities": [capability]
+                    }
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let report =
+            mcp_subprocess_proxy_json_lines(&input, config).expect("subprocess proxy should run");
+        let responses = report
+            .output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON response"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[2]["error"]["code"], serde_json::json!(-32010));
+        assert_eq!(
+            responses[2]["error"]["message"],
+            serde_json::json!("Downstream prompt error")
+        );
+        assert_eq!(
+            responses[2]["error"]["data"]["downstream_error"]["code"],
+            serde_json::json!(-32055)
+        );
+        assert_eq!(
+            responses[2]["error"]["data"]["downstream_error"]["message_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            responses[2]["error"]["data"]["downstream_error"]["data_redacted"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            responses[2]["error"]["data"]["agentk"]["response_record"]["is_error"],
+            serde_json::json!(true)
+        );
+        assert!(
+            responses[2]["error"]["data"]["agentk"]["response_record"]["response_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+        assert!(!report.output.contains(RAW_PROMPT_ERROR));
+        assert_eq!(report.events.len(), 3);
+        assert_eq!(report.events[0].syscall.kind, SyscallKind::PromptDescribe);
+        assert_eq!(report.events[1].syscall.kind, SyscallKind::PromptGet);
+        assert_eq!(report.events[2].syscall.kind, SyscallKind::PromptResponse);
+        let serialized = serde_json::to_string(&report.events).expect("events should serialize");
+        assert!(!serialized.contains(RAW_PROMPT_ERROR));
     }
 
     #[cfg(unix)]
@@ -12008,6 +12382,19 @@ done
         assert!(report.raw_response_not_logged);
         assert!(report.raw_denied_payload_not_returned);
         assert_eq!(report.event_count, 5);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_prompt_error_smoke_redacts_downstream_error() {
+        let report = mcp_subprocess_proxy_prompt_error_smoke()
+            .expect("subprocess proxy prompt error smoke should run");
+
+        assert!(report.descriptor_mediated);
+        assert!(report.error_sanitized);
+        assert!(report.error_recorded);
+        assert!(report.raw_error_not_returned);
+        assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 3);
     }
 
     #[test]

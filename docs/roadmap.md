@@ -85,6 +85,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for subprocess MCP resource mediation.
 - [x] Mediate downstream subprocess MCP `prompts/list` and `prompts/get` with hash-only evidence.
 - [x] Add release-audit smoke coverage for subprocess MCP prompt mediation.
+- [x] Add prompt error redaction and malformed prompt result coverage for the subprocess MCP proxy.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
