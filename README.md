@@ -338,7 +338,7 @@ Implemented today:
   capabilities,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundary, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
