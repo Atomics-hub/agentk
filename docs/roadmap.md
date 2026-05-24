@@ -75,6 +75,7 @@ Status: in progress.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [x] Validate downstream subprocess `tools/call` result shape before recording responses.
 - [x] Sanitize downstream subprocess `tools/call` error bodies before returning them.
+- [x] Add a poisoned downstream error-body demo transcript and release-audit smoke coverage.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.

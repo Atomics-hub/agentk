@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"demo.lookup","arguments":{"record":"public-demo-record"},"agentk":{"intent":"lookup public demo record through subprocess proxy","labels":["trusted"],"capabilities":["tool.invoke:demo.lookup"]}}}

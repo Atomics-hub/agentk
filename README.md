@@ -200,6 +200,15 @@ cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/
 cargo run -- trace-inspect .agentk/runs/mcp-proxy-demo.jsonl
 ```
 
+Run a second proxy transcript where the downstream MCP server returns a
+poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
+the client while preserving hash evidence in the trace:
+
+```sh
+cargo run -- mcp-proxy-stdio --server-id poisoned-error-demo --trace-out .agentk/runs/mcp-proxy-error-demo.jsonl --command sh --arg examples/mcp-poisoned-error-server.sh < examples/mcp-proxy-poisoned-error-session.jsonl
+cargo run -- trace-inspect .agentk/runs/mcp-proxy-error-demo.jsonl
+```
+
 Print the active proof-signing public key:
 
 ```sh
