@@ -196,7 +196,8 @@ before forwarding, records response hashes, and returns a blocked MCP result
 without executing the child tool when policy denies the call:
 
 ```sh
-cargo run -- mcp-proxy-stdio --server-id poisoned-demo --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
+cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
+cargo run -- trace-inspect .agentk/runs/mcp-proxy-demo.jsonl
 ```
 
 Print the active proof-signing public key:

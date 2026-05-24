@@ -1,14 +1,14 @@
 use agentk::{
-    AgentKError, McpSubprocessProxyConfig, Policy, ReadinessStatus, Verdict, default_log_path,
-    fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, inspect_jsonl,
-    mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
+    AgentKError, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus, Verdict,
+    default_log_path, fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file,
+    inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
     mediate_mcp_json_reader, mediate_mcp_json_stream, readiness_report, release_audit_report,
     replay_jsonl, rotate_signing_key_file, run_poisoned_webpage_demo,
     secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
     signing_key_status, trusted_signing_key_manifest_keys_from_path,
     trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
     verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
-    write_latest_copy,
+    write_events_jsonl, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::io::{self, BufReader};
@@ -110,6 +110,9 @@ enum Command {
         /// Argument passed to the downstream command. Repeat for multiple args.
         #[arg(long = "arg")]
         args: Vec<String>,
+        /// Optional JSONL path for the AgentK proxy flight log.
+        #[arg(long)]
+        trace_out: Option<PathBuf>,
     },
     /// Print the active proof-signing public key and source.
     SigningKey {
@@ -240,7 +243,8 @@ fn run() -> Result<(), AgentKError> {
             server_id,
             command,
             args,
-        } => mcp_proxy_stdio(agent_id, server_id, command, args),
+            trace_out,
+        } => mcp_proxy_stdio(agent_id, server_id, command, args, trace_out),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -554,10 +558,20 @@ fn mcp_proxy_stdio(
     server_id: String,
     command: String,
     args: Vec<String>,
+    trace_out: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
+    let config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
+    if let Some(path) = trace_out {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut proxy = McpSubprocessProxy::spawn(config)?;
+        proxy.proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock())?;
+        write_events_jsonl(proxy.events(), path)?;
+        return Ok(());
+    }
+
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
     mcp_subprocess_proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock(), config)
 }
 

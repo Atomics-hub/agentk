@@ -66,6 +66,7 @@ Status: in progress.
 - [x] Add a JSON-RPC-facing in-memory MCP proxy harness for list/call mediation.
 - [x] Add a subprocess stdio MCP proxy path that mediates real client/server JSON-RPC traffic.
 - [x] Add a poisoned subprocess MCP demo transcript and release-audit smoke coverage.
+- [x] Add optional subprocess proxy trace output for `trace-inspect` review.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
