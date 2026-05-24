@@ -3,12 +3,12 @@ use agentk::{
     default_log_path, fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file,
     inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
     mediate_mcp_json_reader, mediate_mcp_json_stream, readiness_report, release_audit_report,
-    replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo, run_poisoned_webpage_demo,
-    secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
-    signing_key_status, trusted_signing_key_manifest_keys_from_path,
-    trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
-    verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
-    write_events_jsonl, write_latest_copy,
+    replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo, run_mcp_security_shim_eval,
+    run_poisoned_webpage_demo, secret_reference_env_store_report_from_path,
+    secret_reference_manifest_report_from_path, signing_key_status,
+    trusted_signing_key_manifest_keys_from_path, trusted_signing_key_manifest_report_from_path,
+    verify_jsonl, verify_signatures_jsonl, verify_signatures_jsonl_with_trusted_keys,
+    verify_signing_key_rotation_manifest_file, write_events_jsonl, write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -104,6 +104,15 @@ enum Command {
         #[arg(long, default_value = ".agentk/runs/mcp-killer-demo.jsonl")]
         trace_out: PathBuf,
         /// Emit the redacted inspection report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare poisoned MCP behavior with and without the AgentK shim.
+    McpShimEval {
+        /// Optional JSONL path for the AgentK-mediated eval trace.
+        #[arg(long, default_value = ".agentk/runs/mcp-shim-eval-agentk.jsonl")]
+        trace_out: PathBuf,
+        /// Emit the full eval report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -253,6 +262,7 @@ fn run() -> Result<(), AgentKError> {
         Command::McpLines => mcp_lines(),
         Command::McpServer => mcp_server(),
         Command::McpKillerDemo { trace_out, json } => mcp_killer_demo(trace_out, json),
+        Command::McpShimEval { trace_out, json } => mcp_shim_eval(trace_out, json),
         Command::McpProxyStdio {
             agent_id,
             server_id,
@@ -605,6 +615,40 @@ fn mcp_killer_demo(trace_out: PathBuf, json: bool) -> Result<(), AgentKError> {
     }
 
     println!();
+    println!(
+        "inspect   cargo run -- trace-inspect {}",
+        report.trace_path.display()
+    );
+
+    Ok(())
+}
+
+fn mcp_shim_eval(trace_out: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = run_mcp_security_shim_eval(env!("CARGO_MANIFEST_DIR"), trace_out)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK MCP security shim eval");
+    println!("scenario  {}", report.scenario);
+    println!("safety    fake downstream records execution; no real network or file writes");
+    println!("trace     {}", report.trace_path.display());
+    println!();
+    println!("{:<42} {:<14} AgentK", "check", "baseline");
+    println!("{:-<42} {:-<14} {:-<14}", "", "", "");
+    for check in &report.scorecard {
+        println!(
+            "{:<42} {:<14} {}",
+            check.check, check.baseline, check.agentk
+        );
+    }
+    println!();
+    println!(
+        "verdict   AgentK improved {}/{} checks",
+        report.improved_checks, report.total_checks
+    );
     println!(
         "inspect   cargo run -- trace-inspect {}",
         report.trace_path.display()

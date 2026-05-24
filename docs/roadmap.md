@@ -88,6 +88,7 @@ Status: in progress.
 - [x] Add prompt error redaction and malformed prompt result coverage for the subprocess MCP proxy.
 - [x] Add a killer MCP demo where poisoned output tries exfiltration and an unsafe patch, then AgentK blocks both follow-up calls with trace evidence.
 - [x] Add a one-command MCP killer demo runner for reviewable redacted traces.
+- [x] Add a before/after MCP shim eval scorecard comparing baseline passthrough with AgentK mediation.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
