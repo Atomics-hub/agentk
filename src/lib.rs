@@ -4664,6 +4664,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "docs/threat-model.md"),
         check_required_file(&root, "docs/key-lifecycle.md"),
         check_required_file(&root, "docs/public-readiness.md"),
+        check_required_file(&root, "docs/mcp-proxy.md"),
         check_required_file(&root, "docs/roadmap.md"),
         check_required_file(&root, "examples/mcp-tool-request.json"),
         check_required_file(&root, "examples/mcp-tool-requests.jsonl"),

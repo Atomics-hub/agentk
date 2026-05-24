@@ -79,6 +79,7 @@ Status: in progress.
 - [x] Spawn downstream subprocess MCP servers with an explicit environment boundary.
 - [x] Add CLI allowlisting for downstream subprocess MCP environment variables.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
+- [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
