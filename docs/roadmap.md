@@ -73,6 +73,7 @@ Status: in progress.
 - [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
 - [x] Validate downstream subprocess initialize protocol before exposing tools.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
+- [x] Validate downstream subprocess `tools/call` result shape before recording responses.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
