@@ -1675,6 +1675,7 @@ impl McpSubprocessProxy {
     pub fn spawn(config: McpSubprocessProxyConfig) -> Result<Self, AgentKError> {
         let mut child = Command::new(&config.command)
             .args(&config.args)
+            .env_clear()
             .envs(&config.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -4778,6 +4779,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_transport_guard = mcp_transport_guard_smoke()?;
     let mcp_subprocess_proxy = mcp_subprocess_proxy_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
+    let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
     let replay_stub_outputs_ok = replay.side_effects_stubbed == replay.stub_outputs.len()
@@ -5064,6 +5066,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess env isolation",
+            if mcp_subprocess_proxy_env.explicit_env_passed
+                && mcp_subprocess_proxy_env.ambient_env_stripped
+                && mcp_subprocess_proxy_env.raw_ambient_env_not_returned
+                && mcp_subprocess_proxy_env.raw_ambient_env_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "explicit {}, ambient stripped {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_env.explicit_env_passed,
+                mcp_subprocess_proxy_env.ambient_env_stripped,
+                mcp_subprocess_proxy_env.raw_ambient_env_not_returned,
+                mcp_subprocess_proxy_env.raw_ambient_env_not_logged,
+                mcp_subprocess_proxy_env.event_count
+            ),
+        ),
+        release_audit_check(
             "trace inspect",
             if inspect.signatures_ok {
                 ReadinessStatus::Pass
@@ -5319,6 +5341,15 @@ struct McpSubprocessProxyErrorSmokeReport {
     error_recorded: bool,
     raw_error_not_returned: bool,
     raw_error_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyEnvSmokeReport {
+    explicit_env_passed: bool,
+    ambient_env_stripped: bool,
+    raw_ambient_env_not_returned: bool,
+    raw_ambient_env_not_logged: bool,
     event_count: usize,
 }
 
@@ -5611,6 +5642,74 @@ fn mcp_subprocess_proxy_error_smoke(
         }),
         raw_error_not_returned: !report.output.contains(RAW_ERROR_TEXT),
         raw_error_not_logged: !serialized_events.contains(RAW_ERROR_TEXT),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_env_smoke() -> Result<McpSubprocessProxyEnvSmokeReport, AgentKError> {
+    const RAW_AMBIENT_ENV_MARKER: &str = "AGENTK_AMBIENT_ENV_SHOULD_NOT_LEAK";
+    const ENV_PROBE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      if [ "${HOME+x}" ]; then
+        server_name="AGENTK_AMBIENT_ENV_SHOULD_NOT_LEAK"
+      else
+        server_name="env-isolated-mcp"
+      fi
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"$server_name\",\"version\":\"test\"}}}"
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"demo.env","description":"Reports explicit env probe status."}]}}'
+      ;;
+    *'demo.env'*)
+      if [ "${AGENTK_PROXY_ENV_PROBE:-}" = "explicit" ] && [ -z "${HOME+x}" ]; then
+        printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"explicit env present; ambient env absent"}],"structuredContent":{"explicit_env":"present","ambient_home":false},"isError":false}}'
+      else
+        printf '%s\n' '{"jsonrpc":"2.0","id":3,"error":{"code":-32043,"message":"AGENTK_AMBIENT_ENV_SHOULD_NOT_LEAK"}}'
+      fi
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"demo.env","arguments":{},"agentk":{"intent":"probe subprocess proxy child environment","labels":["trusted"],"capabilities":["tool.invoke:demo.env"]}}}
+"#;
+    let config = McpSubprocessProxyConfig::new("agent://release-audit", "env-probe", "sh")
+        .with_args([
+            "-c".to_string(),
+            ENV_PROBE_SCRIPT.to_string(),
+            "agentk-env-probe".to_string(),
+        ])
+        .with_env("AGENTK_PROXY_ENV_PROBE", "explicit");
+    let report = mcp_subprocess_proxy_json_lines(input, config)?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpSubprocessProxyEnvSmokeReport {
+        explicit_env_passed: responses.get(2).is_some_and(|response| {
+            response["result"]["structuredContent"]["explicit_env"] == serde_json::json!("present")
+        }),
+        ambient_env_stripped: responses.first().is_some_and(|response| {
+            response["result"]["serverInfo"]["name"] == serde_json::json!("env-isolated-mcp")
+        }) && responses.get(2).is_some_and(|response| {
+            response["result"]["structuredContent"]["ambient_home"] == serde_json::json!(false)
+        }),
+        raw_ambient_env_not_returned: !report.output.contains(RAW_AMBIENT_ENV_MARKER),
+        raw_ambient_env_not_logged: !serialized_events.contains(RAW_AMBIENT_ENV_MARKER),
         event_count: report.events.len(),
     })
 }
@@ -9653,6 +9752,18 @@ done
         assert!(report.error_recorded);
         assert!(report.raw_error_not_returned);
         assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 3);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_env_smoke_strips_ambient_env() {
+        let report =
+            mcp_subprocess_proxy_env_smoke().expect("subprocess proxy env smoke should run");
+
+        assert!(report.explicit_env_passed);
+        assert!(report.ambient_env_stripped);
+        assert!(report.raw_ambient_env_not_returned);
+        assert!(report.raw_ambient_env_not_logged);
         assert_eq!(report.event_count, 3);
     }
 
