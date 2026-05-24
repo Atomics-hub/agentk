@@ -192,12 +192,13 @@ cargo run -- mcp-server < examples/mcp-server-session.jsonl
 Run AgentK as a stdio proxy in front of a downstream MCP server process. The
 proxy forwards JSON-RPC to the child server only after mediating `tools/list`
 descriptors, `tools/call` arguments, `resources/list` descriptors, and
-`resources/read` requests. It strips AgentK-only policy metadata before
-forwarding, starts the child with only explicitly configured environment
-variables, records hash evidence for tool and resource responses, and refuses
-denied tool/resource actions before the child sees them. MCP methods that do
-not yet have an AgentK policy contract are rejected instead of being forwarded
-as generic passthrough:
+`resources/read` requests, plus `prompts/list` descriptors and `prompts/get`
+requests. It strips AgentK-only policy metadata before forwarding, starts the
+child with only explicitly configured environment variables, records hash
+evidence for tool, resource, and prompt responses, and refuses denied
+tool/resource/prompt actions before the child sees them. MCP methods that do not
+yet have an AgentK policy contract are rejected instead of being forwarded as
+generic passthrough:
 
 ```sh
 cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
@@ -294,6 +295,8 @@ This repo currently includes:
 - MCP response recording that hashes raw tool output instead of logging it,
 - subprocess MCP resource mediation for `resources/list` and `resources/read`
   with hash-only evidence,
+- subprocess MCP prompt mediation for `prompts/list` and `prompts/get` with
+  hash-only evidence,
 - stdin mediation for one MCP-shaped request,
 - newline-delimited stdin mediation for repeated MCP-shaped requests,
 - a minimal MCP JSON-RPC stdio server exposing `agentk.mediate`, `agentk.mediate_descriptor`, and `agentk.record_response`,
@@ -336,9 +339,10 @@ Implemented today:
 - tainted tool-input blocking at `tool.invoke` boundaries,
 - MCP resource descriptor/read/response evidence with explicit read
   capabilities,
+- MCP prompt descriptor/get/response evidence with explicit get capabilities,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundary, inspect, and MCP server smoke checks.
+- a local release audit that runs formatting, tests, clippy, readiness, replay, signature, signer-pinning, trusted-signer manifest, secret-handle, secret-reference validation, secret-store availability, MCP taint-flow, subprocess MCP boundaries, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 

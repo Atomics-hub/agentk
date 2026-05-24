@@ -46,8 +46,8 @@ are not printed in the error.
 ## Lifecycle
 
 The client must send `initialize` with AgentK's supported MCP protocol version,
-then `notifications/initialized`, before mediated tool or resource traffic is
-proxied.
+then `notifications/initialized`, before mediated tool, resource, or prompt
+traffic is proxied.
 
 Before readiness:
 
@@ -60,14 +60,16 @@ The downstream server's `initialize` response must report the supported
 protocol version before AgentK marks the session initialized. The downstream
 `tools/list` result must be an object with a `tools` array before descriptors
 are exposed. The downstream `resources/list` result must be an object with a
-`resources` array before resource descriptors are exposed.
+`resources` array before resource descriptors are exposed. The downstream
+`prompts/list` result must be an object with a `prompts` array before prompt
+descriptors are exposed.
 
 After readiness, `initialize`, `ping`, `tools/list`, `tools/call`,
-`resources/list`, and `resources/read` requests are the only request methods
-covered by this proxy. Other MCP request methods are rejected with a sanitized
-`Method not found` response until they have an explicit AgentK policy contract.
-The proxy forwards `notifications/initialized` and the cancellation
-notification, but drops other notifications.
+`resources/list`, `resources/read`, `prompts/list`, and `prompts/get` requests
+are the only request methods covered by this proxy. Other MCP request methods
+are rejected with a sanitized `Method not found` response until they have an
+explicit AgentK policy contract. The proxy forwards `notifications/initialized`
+and the cancellation notification, but drops other notifications.
 
 ## Mediation
 
@@ -101,10 +103,21 @@ evidence by hash, AgentK-only metadata is stripped before forwarding, and the
 resource response is recorded as a hash-only `resource.response` event before
 evidence is attached to the client-visible response.
 
+On `prompts/list`, AgentK treats downstream prompt descriptors as untrusted
+external context. It records prompt descriptor hashes, marks suspicious
+descriptor text as `poisoned-suspect`, and drops malformed descriptors instead
+of reflecting raw malformed payloads.
+
+On `prompts/get`, AgentK requires a target-scoped `prompt.get` capability
+before forwarding the request. The prompt name and arguments are represented in
+policy and evidence by hash, AgentK-only metadata is stripped before forwarding,
+and the prompt response is recorded as a hash-only `prompt.response` event
+before evidence is attached to the client-visible response.
+
 ## Redaction And Evidence
 
 AgentK records evidence as hashes and policy decisions, not raw tool or
-resource payloads.
+resource or prompt payloads.
 
 The proxy sanitizes these downstream failures:
 
@@ -118,6 +131,9 @@ The proxy sanitizes these downstream failures:
 - malformed `resources/list` results
 - malformed successful `resources/read` results
 - downstream `resources/read` error bodies
+- malformed `prompts/list` results
+- malformed successful `prompts/get` results
+- downstream `prompts/get` error bodies
 
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and
@@ -127,10 +143,13 @@ represented by a response hash in the AgentK trace.
 Downstream `resources/read` errors follow the same pattern: raw error text is
 not reflected to the client, while hash evidence is kept in the trace.
 
+Downstream `prompts/get` errors also follow this pattern: raw error text is not
+reflected to the client, while hash evidence is kept in the trace.
+
 ## Trace Inspection
 
 Use `--trace-out` to write the AgentK event log for proxied descriptor,
-tool-invoke, resource-read, and response-record events:
+tool-invoke, resource-read, prompt-get, and response-record events:
 
 ```sh
 cargo run -- mcp-proxy-stdio \
@@ -154,6 +173,6 @@ This is the subprocess stdio proxy path. It is suitable for local review,
 release-audit smoke coverage, and integration experiments. A complete
 production MCP transport still needs a hardened server packaging story,
 deployment guidance, and operational key management. The current boundary
-mediates tool listing/calls and resource listing/reads; prompt surfaces and
+mediates tool listing/calls, resource listing/reads, and prompt listing/gets;
 resource subscription flows still need explicit policy contracts and are not
 forwarded as generic passthrough.
