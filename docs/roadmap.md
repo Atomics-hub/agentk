@@ -62,6 +62,7 @@ Status: in progress.
 - [x] Validate MCP `initialize` protocol version before exposing tools.
 - [x] Require the MCP `notifications/initialized` lifecycle signal before exposing tools.
 - [x] Gate pre-ready MCP methods without exposing the method surface.
+- [x] Add an in-memory MCP proxy harness for end-to-end descriptor, invoke, response, and tainted follow-up mediation.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
