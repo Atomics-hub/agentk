@@ -11,6 +11,8 @@ tag from a dirty tree or with undocumented warnings.
       behavior.
 - [ ] `docs/v0.1-target.md` matches the released behavior, accepted limits, and
       blockers.
+- [ ] `docs/v0.1-limit-disposition.md` lists each accepted limit as implemented
+      or deferred, and release notes do not overclaim deferred work.
 - [ ] `docs/key-lifecycle.md` matches the release signing-key process.
 - [ ] `docs/threat-model.md` covers any new syscall, label, policy, evidence, or
       MCP behavior.

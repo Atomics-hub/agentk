@@ -158,7 +158,9 @@ AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-signing-key cargo
 
 Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/v0.1-target.md](docs/v0.1-target.md), and
-[docs/release-checklist.md](docs/release-checklist.md).
+[docs/release-checklist.md](docs/release-checklist.md). Accepted v0.1 limits
+are tracked in
+[docs/v0.1-limit-disposition.md](docs/v0.1-limit-disposition.md).
 
 Mediate a demo MCP-shaped tool request without executing it:
 
