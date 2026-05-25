@@ -71,6 +71,7 @@ Status: in progress.
 - [x] Return sanitized JSON-RPC errors for malformed downstream subprocess responses.
 - [x] Drop malformed downstream tool descriptors with hash-only evidence.
 - [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
+- [x] Bound downstream subprocess response waits with a configurable timeout.
 - [x] Validate downstream subprocess initialize protocol before exposing tools.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [x] Validate downstream subprocess `tools/call` result shape before recording responses.

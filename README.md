@@ -198,7 +198,9 @@ child with only explicitly configured environment variables, validates proxy
 configuration before spawn, records hash evidence for tool, resource, and
 prompt responses, and refuses denied tool/resource/prompt actions before the
 child sees them. MCP methods that do not yet have an AgentK policy contract are
-rejected instead of being forwarded as generic passthrough:
+rejected instead of being forwarded as generic passthrough. Downstream
+responses are bounded by a configurable timeout so a hung child cannot stall
+the proxy indefinitely:
 
 ```sh
 cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
@@ -209,6 +211,8 @@ Use `--allow-env NAME` to copy a named parent environment variable into the
 cleared child environment. Repeat the flag for multiple variables.
 Repeat `--arg` for each downstream argument; hyphen-prefixed child args are
 accepted, for example `--arg -c`.
+Use `--response-timeout-ms` to set the downstream response timeout; the default
+is 30000 ms.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -373,6 +377,7 @@ Implemented today:
 - subprocess MCP lifecycle error redaction for downstream `initialize` and
   `ping` failures,
 - subprocess MCP `tools/list` error redaction before descriptors are exposed,
+- subprocess MCP response timeout handling for hung downstream servers,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
 - a one-command `mcp-killer-demo` runner for reviewable demo traces,
@@ -382,9 +387,9 @@ Implemented today:
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
-  subprocess MCP boundaries, lifecycle/list redaction, config guards,
-  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke
-  checks.
+  subprocess MCP boundaries, lifecycle/list redaction, response timeouts,
+  config guards, no-passthrough checks, the MCP shim eval, inspect, and MCP
+  server smoke checks.
 
 Not implemented yet:
 
