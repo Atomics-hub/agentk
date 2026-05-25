@@ -9,6 +9,8 @@ tag from a dirty tree or with undocumented warnings.
 - [ ] GitHub Actions `audit` is passing on `master`.
 - [ ] `SECURITY.md`, `README.md`, and `docs/roadmap.md` match the released
       behavior.
+- [ ] `docs/v0.1-target.md` matches the released behavior, accepted limits, and
+      blockers.
 - [ ] `docs/key-lifecycle.md` matches the release signing-key process.
 - [ ] `docs/threat-model.md` covers any new syscall, label, policy, evidence, or
       MCP behavior.

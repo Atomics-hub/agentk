@@ -17,6 +17,7 @@ keep the same checks in CI and protect the default branch.
 - [ ] License files present and intentional.
 - [ ] `Cargo.lock` is present for reproducible application builds.
 - [ ] README claims match implemented behavior.
+- [ ] `docs/v0.1-target.md` distinguishes ready behavior from accepted limits.
 - [ ] `docs/key-lifecycle.md` covers signing-key generation, custody, rotation, retirement, revocation, and incident response.
 
 ## Code Quality

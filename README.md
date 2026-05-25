@@ -156,7 +156,8 @@ Run the strict pre-push audit with a configured signing key file:
 AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-signing-key cargo run -- release-audit --strict
 ```
 
-Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md) and
+Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md),
+[docs/v0.1-target.md](docs/v0.1-target.md), and
 [docs/release-checklist.md](docs/release-checklist.md).
 
 Mediate a demo MCP-shaped tool request without executing it:
@@ -341,6 +342,7 @@ This repo currently includes:
 
 Next obvious pieces:
 
+- close the remaining [v0.1 target](docs/v0.1-target.md) gaps,
 - production key storage and operational key lifecycle,
 - fuller MCP proxy/server compliance,
 - filesystem diff capture,

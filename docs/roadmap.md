@@ -2,6 +2,11 @@
 
 AgentK should advance in small, reviewable steps. Security claims only move from planned to implemented when they have tests.
 
+The release-shaped v0.1 target is tracked in
+[`docs/v0.1-target.md`](v0.1-target.md). That document is the decision frame for
+whether the project is moving toward a credible MCP security shim instead of
+accumulating unrelated prototype features.
+
 ## Milestone 0: Local Prototype
 
 Status: in progress.
@@ -158,3 +163,11 @@ Status: in progress.
 - [x] Protect the default branch with the CI `audit` check.
 - [x] Add contributor guidelines for security-sensitive changes.
 - [x] Add a signed release checklist for tagged versions.
+
+## Milestone 6: v0.1 Release Shape
+
+- [x] Add an explicit v0.1 target that defines release-ready behavior,
+      accepted limits, release blockers, and the autonomous work order.
+- [ ] Verify the before/after MCP shim eval remains the clearest public proof.
+- [ ] Close or explicitly defer each accepted v0.1 limit before tagging.
+- [ ] Run the signed release checklist against the final v0.1 commit.
