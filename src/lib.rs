@@ -6435,6 +6435,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
+    let mcp_subprocess_proxy_resource_subscription =
+        mcp_subprocess_proxy_resource_subscription_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
     let mcp_subprocess_proxy_mixed_interop = mcp_subprocess_proxy_mixed_interop_smoke()?;
@@ -6986,6 +6988,28 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp resource subscription no-passthrough",
+            if mcp_subprocess_proxy_resource_subscription.subscribe_blocked
+                && mcp_subprocess_proxy_resource_subscription.unsubscribe_blocked
+                && mcp_subprocess_proxy_resource_subscription.subscription_not_forwarded
+                && mcp_subprocess_proxy_resource_subscription.raw_payload_not_returned
+                && mcp_subprocess_proxy_resource_subscription.raw_payload_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "subscribe {}, unsubscribe {}, child clean {}, redacted {}, events {}",
+                mcp_subprocess_proxy_resource_subscription.subscribe_blocked,
+                mcp_subprocess_proxy_resource_subscription.unsubscribe_blocked,
+                mcp_subprocess_proxy_resource_subscription.subscription_not_forwarded,
+                mcp_subprocess_proxy_resource_subscription.raw_payload_not_returned
+                    && mcp_subprocess_proxy_resource_subscription.raw_payload_not_logged,
+                mcp_subprocess_proxy_resource_subscription.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess resource boundary",
             if mcp_subprocess_proxy_resource.resource_descriptor_mediated
                 && mcp_subprocess_proxy_resource.allowed_forwarded
@@ -7532,6 +7556,16 @@ struct McpProxyConfigGuardSmokeReport {
     unsupported_ready_method_not_forwarded: bool,
     unsupported_payload_not_returned: bool,
     unsupported_payload_not_logged: bool,
+}
+
+#[derive(Debug)]
+struct McpResourceSubscriptionSmokeReport {
+    subscribe_blocked: bool,
+    unsubscribe_blocked: bool,
+    subscription_not_forwarded: bool,
+    raw_payload_not_returned: bool,
+    raw_payload_not_logged: bool,
+    event_count: usize,
 }
 
 #[derive(Debug)]
@@ -8917,6 +8951,111 @@ done
             && !unsupported_report.output.contains(RAW_UNSUPPORTED_PAYLOAD),
         unsupported_payload_not_logged: !unsupported_events.contains(RAW_UNSUPPORTED_METHOD)
             && !unsupported_events.contains(RAW_UNSUPPORTED_PAYLOAD),
+    })
+}
+
+fn mcp_subprocess_proxy_resource_subscription_smoke()
+-> Result<McpResourceSubscriptionSmokeReport, AgentKError> {
+    const RAW_SUBSCRIPTION_PAYLOAD: &str = "RESOURCE_SUBSCRIPTION_SECRET_SHOULD_NOT_REFLECT";
+    const RESOURCE_SUBSCRIPTION_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"resources":{"subscribe":true,"listChanged":true}},"serverInfo":{"name":"resource-subscription-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"resources/subscribe"'*|*'"method":"resources/unsubscribe"'*)
+      printf '%s\n' "resource subscription forwarded" >> "$1"
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"forwarded":true}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-resource-subscription-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/subscribe",
+            "params": {
+                "uri": "demo://subscription/private",
+                "secret": RAW_SUBSCRIPTION_PAYLOAD
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/unsubscribe",
+            "params": {
+                "uri": "demo://subscription/private",
+                "secret": RAW_SUBSCRIPTION_PAYLOAD
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "resource-subscription-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                RESOURCE_SUBSCRIPTION_SCRIPT.to_string(),
+                "agentk-resource-subscription".to_string(),
+                execution_log.display().to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let method_blocked = |response: &serde_json::Value, id: i64| {
+        response["id"] == serde_json::json!(id)
+            && response["error"]["code"] == serde_json::json!(-32601)
+            && response["error"]["data"]["detail"]
+                == serde_json::json!("method is not covered by AgentK MCP proxy policy")
+    };
+
+    Ok(McpResourceSubscriptionSmokeReport {
+        subscribe_blocked: responses
+            .get(1)
+            .is_some_and(|response| method_blocked(response, 2)),
+        unsubscribe_blocked: responses
+            .get(2)
+            .is_some_and(|response| method_blocked(response, 3)),
+        subscription_not_forwarded: !execution_log_content
+            .contains("resource subscription forwarded"),
+        raw_payload_not_returned: !report.output.contains(RAW_SUBSCRIPTION_PAYLOAD),
+        raw_payload_not_logged: !serialized_events.contains(RAW_SUBSCRIPTION_PAYLOAD),
+        event_count: report.events.len(),
     })
 }
 
@@ -15142,6 +15281,19 @@ done
         assert!(report.unsupported_ready_method_not_forwarded);
         assert!(report.unsupported_payload_not_returned);
         assert!(report.unsupported_payload_not_logged);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_resource_subscription_smoke_blocks_passthrough() {
+        let report = mcp_subprocess_proxy_resource_subscription_smoke()
+            .expect("subprocess proxy resource subscription smoke should run");
+
+        assert!(report.subscribe_blocked);
+        assert!(report.unsubscribe_blocked);
+        assert!(report.subscription_not_forwarded);
+        assert!(report.raw_payload_not_returned);
+        assert!(report.raw_payload_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
