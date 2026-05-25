@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentk")]
@@ -133,6 +134,9 @@ enum Command {
         /// Parent environment variable name to copy into the cleared child environment. Repeat for multiple vars.
         #[arg(long = "allow-env", value_name = "NAME")]
         allow_env: Vec<String>,
+        /// Downstream response timeout in milliseconds.
+        #[arg(long, default_value_t = 30000)]
+        response_timeout_ms: u64,
         /// Optional JSONL path for the AgentK proxy flight log.
         #[arg(long)]
         trace_out: Option<PathBuf>,
@@ -269,8 +273,17 @@ fn run() -> Result<(), AgentKError> {
             command,
             args,
             allow_env,
+            response_timeout_ms,
             trace_out,
-        } => mcp_proxy_stdio(agent_id, server_id, command, args, allow_env, trace_out),
+        } => mcp_proxy_stdio(
+            agent_id,
+            server_id,
+            command,
+            args,
+            allow_env,
+            response_timeout_ms,
+            trace_out,
+        ),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -669,9 +682,12 @@ fn mcp_proxy_stdio(
     command: String,
     args: Vec<String>,
     allow_env: Vec<String>,
+    response_timeout_ms: u64,
     trace_out: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
-    let mut config = McpSubprocessProxyConfig::new(agent_id, server_id, command).with_args(args);
+    let mut config = McpSubprocessProxyConfig::new(agent_id, server_id, command)
+        .with_args(args)
+        .with_response_timeout(Duration::from_millis(response_timeout_ms));
     for (name, value) in collect_mcp_proxy_allowed_env(&allow_env, |name| env::var(name).ok())? {
         config = config.with_env(name, value);
     }

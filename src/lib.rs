@@ -10,8 +10,9 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -23,6 +24,7 @@ const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const MCP_JSON_RPC_MAX_ID_BYTES: usize = 128;
 const MCP_STDIN_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -1803,6 +1805,7 @@ pub struct McpSubprocessProxyConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub response_timeout: Duration,
 }
 
 impl McpSubprocessProxyConfig {
@@ -1817,6 +1820,7 @@ impl McpSubprocessProxyConfig {
             command: command.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
+            response_timeout: MCP_SUBPROCESS_RESPONSE_TIMEOUT,
         }
     }
 
@@ -1831,6 +1835,11 @@ impl McpSubprocessProxyConfig {
 
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
+        self.response_timeout = timeout;
         self
     }
 
@@ -1856,6 +1865,11 @@ impl McpSubprocessProxyConfig {
                     "downstream MCP env names must match [A-Za-z_][A-Za-z0-9_]*".to_string(),
                 ));
             }
+        }
+        if self.response_timeout.is_zero() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP response timeout must be positive".to_string(),
+            ));
         }
 
         Ok(())
@@ -1926,7 +1940,8 @@ pub struct McpSubprocessProxy {
     ready: bool,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
+    response_timeout: Duration,
 }
 
 impl fmt::Debug for McpSubprocessProxy {
@@ -1984,7 +1999,8 @@ impl McpSubprocessProxy {
             ready: false,
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout: Some(BufReader::new(stdout)),
+            response_timeout: config.response_timeout,
         })
     }
 
@@ -2682,6 +2698,12 @@ impl McpSubprocessProxy {
         }
         match self.read_json_rpc_response(expected_id) {
             Ok(response) => Ok(response),
+            Err(error) if is_downstream_response_timeout(&error) => {
+                Ok(jsonrpc_downstream_transport_error(
+                    expected_id.clone(),
+                    downstream_response_error_detail(&error),
+                ))
+            }
             Err(error) => Ok(jsonrpc_bad_downstream_response(
                 expected_id.clone(),
                 downstream_response_error_detail(&error),
@@ -2701,56 +2723,91 @@ impl McpSubprocessProxy {
         &mut self,
         expected_id: &serde_json::Value,
     ) -> Result<serde_json::Value, AgentKError> {
-        for _ in 0..32 {
-            let Some(line) = read_mcp_bounded_line(&mut self.stdout)? else {
-                return Err(AgentKError::InvalidMcpRequest(
-                    "downstream MCP server closed stdout before responding".to_string(),
-                ));
-            };
-            if line.too_long {
-                return Err(AgentKError::InvalidMcpRequest(format!(
-                    "downstream MCP response exceeds {MCP_STDIN_MAX_MESSAGE_BYTES} byte JSON-RPC line limit"
-                )));
-            }
-
-            let response: serde_json::Value = serde_json::from_slice(&line.bytes)?;
-            let Some(object) = response.as_object() else {
-                return Err(AgentKError::InvalidMcpRequest(
-                    "downstream MCP response must be a JSON object".to_string(),
-                ));
-            };
-            if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
-                return Err(AgentKError::InvalidMcpRequest(
-                    "downstream MCP response jsonrpc must be \"2.0\"".to_string(),
-                ));
-            }
-            let Some(response_id) = object.get("id") else {
-                continue;
-            };
-            let response_id = jsonrpc_request_id(response_id).map_err(|detail| {
-                AgentKError::InvalidMcpRequest(format!(
-                    "downstream MCP response id is invalid: {detail}"
-                ))
-            })?;
-            if &response_id == expected_id {
-                if object.contains_key("result") == object.contains_key("error") {
-                    return Err(AgentKError::InvalidMcpRequest(
-                        "downstream MCP response must contain exactly one of result or error"
-                            .to_string(),
-                    ));
-                }
-                return Ok(response);
-            }
+        let Some(mut stdout) = self.stdout.take() else {
             return Err(AgentKError::InvalidMcpRequest(
-                "downstream MCP server returned a response id that did not match the request"
-                    .to_string(),
+                "downstream MCP response reader is unavailable".to_string(),
             ));
+        };
+        let expected_id = expected_id.clone();
+        let timeout = self.response_timeout;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = read_json_rpc_response_from(&mut stdout, &expected_id);
+            let _ = sender.send((stdout, result));
+        });
+
+        match receiver.recv_timeout(timeout) {
+            Ok((stdout, result)) => {
+                self.stdout = Some(stdout);
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                Err(AgentKError::InvalidMcpRequest(
+                    downstream_response_timeout_detail(timeout),
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP response reader stopped unexpectedly".to_string(),
+            )),
+        }
+    }
+}
+
+fn read_json_rpc_response_from(
+    stdout: &mut BufReader<ChildStdout>,
+    expected_id: &serde_json::Value,
+) -> Result<serde_json::Value, AgentKError> {
+    for _ in 0..32 {
+        let Some(line) = read_mcp_bounded_line(stdout)? else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP server closed stdout before responding".to_string(),
+            ));
+        };
+        if line.too_long {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "downstream MCP response exceeds {MCP_STDIN_MAX_MESSAGE_BYTES} byte JSON-RPC line limit"
+            )));
         }
 
-        Err(AgentKError::InvalidMcpRequest(
-            "downstream MCP server sent too many notifications before responding".to_string(),
-        ))
+        let response: serde_json::Value = serde_json::from_slice(&line.bytes)?;
+        let Some(object) = response.as_object() else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP response must be a JSON object".to_string(),
+            ));
+        };
+        if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP response jsonrpc must be \"2.0\"".to_string(),
+            ));
+        }
+        let Some(response_id) = object.get("id") else {
+            continue;
+        };
+        let response_id = jsonrpc_request_id(response_id).map_err(|detail| {
+            AgentKError::InvalidMcpRequest(format!(
+                "downstream MCP response id is invalid: {detail}"
+            ))
+        })?;
+        if &response_id == expected_id {
+            if object.contains_key("result") == object.contains_key("error") {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "downstream MCP response must contain exactly one of result or error"
+                        .to_string(),
+                ));
+            }
+            return Ok(response);
+        }
+        return Err(AgentKError::InvalidMcpRequest(
+            "downstream MCP server returned a response id that did not match the request"
+                .to_string(),
+        ));
     }
+
+    Err(AgentKError::InvalidMcpRequest(
+        "downstream MCP server sent too many notifications before responding".to_string(),
+    ))
 }
 
 #[derive(Debug)]
@@ -4344,6 +4401,21 @@ fn downstream_response_error_detail(error: &AgentKError) -> String {
         AgentKError::Io(_) => "downstream MCP transport failed while reading response".to_string(),
         _ => "downstream MCP response could not be mediated".to_string(),
     }
+}
+
+fn downstream_response_timeout_detail(timeout: Duration) -> String {
+    format!(
+        "downstream MCP server timed out before responding within {} ms",
+        timeout.as_millis()
+    )
+}
+
+fn is_downstream_response_timeout(error: &AgentKError) -> bool {
+    matches!(
+        error,
+        AgentKError::InvalidMcpRequest(message)
+            if message.starts_with("downstream MCP server timed out before responding")
+    )
 }
 
 fn invalid_mcp_request_message(error: &AgentKError) -> String {
@@ -6353,6 +6425,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_security_shim_eval = mcp_security_shim_eval_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_lifecycle_error = mcp_subprocess_proxy_lifecycle_error_smoke()?;
+    let mcp_subprocess_proxy_timeout = mcp_subprocess_proxy_timeout_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -6750,6 +6823,24 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess response timeout",
+            if mcp_subprocess_proxy_timeout.timeout_reported
+                && mcp_subprocess_proxy_timeout.raw_request_not_returned
+                && mcp_subprocess_proxy_timeout.raw_request_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "timeout {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_timeout.timeout_reported,
+                mcp_subprocess_proxy_timeout.raw_request_not_returned,
+                mcp_subprocess_proxy_timeout.raw_request_not_logged,
+                mcp_subprocess_proxy_timeout.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess config guard",
             if mcp_subprocess_proxy_config_guard.empty_agent_rejected
                 && mcp_subprocess_proxy_config_guard.empty_server_rejected
@@ -7140,6 +7231,14 @@ struct McpSubprocessProxyLifecycleErrorSmokeReport {
     tools_list_error_sanitized: bool,
     raw_error_not_returned: bool,
     raw_error_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyTimeoutSmokeReport {
+    timeout_reported: bool,
+    raw_request_not_returned: bool,
+    raw_request_not_logged: bool,
     event_count: usize,
 }
 
@@ -7707,6 +7806,82 @@ done
             && !serialized_events.contains(RAW_PING_ERROR)
             && !serialized_events.contains(RAW_TOOLS_LIST_ERROR),
         event_count: lifecycle_report.events.len() + tools_list_report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_timeout_smoke() -> Result<McpSubprocessProxyTimeoutSmokeReport, AgentKError>
+{
+    const RAW_TIMEOUT_PAYLOAD: &str = "RELEASE_AUDIT_TIMEOUT_PAYLOAD_SHOULD_NOT_REFLECT";
+    const TIMEOUT_PROBE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"timeout-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      while IFS= read -r _; do :; done
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    let input = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {
+                "secret": RAW_TIMEOUT_PAYLOAD
+            }
+        })
+    );
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "timeout-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                TIMEOUT_PROBE_SCRIPT.to_string(),
+                "agentk-timeout-probe".to_string(),
+            ])
+            .with_response_timeout(Duration::from_millis(50)),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpSubprocessProxyTimeoutSmokeReport {
+        timeout_reported: responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32004)
+                && response["error"]["message"] == serde_json::json!("Downstream transport failure")
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("timed out before responding"))
+        }),
+        raw_request_not_returned: !report.output.contains(RAW_TIMEOUT_PAYLOAD),
+        raw_request_not_logged: !serialized_events.contains(RAW_TIMEOUT_PAYLOAD),
+        event_count: report.events.len(),
     })
 }
 
@@ -13526,6 +13701,17 @@ done
         assert!(report.tools_list_error_sanitized);
         assert!(report.raw_error_not_returned);
         assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_timeout_smoke_reports_hung_downstream() {
+        let report = mcp_subprocess_proxy_timeout_smoke()
+            .expect("subprocess proxy timeout smoke should run");
+
+        assert!(report.timeout_reported);
+        assert!(report.raw_request_not_returned);
+        assert!(report.raw_request_not_logged);
         assert_eq!(report.event_count, 0);
     }
 

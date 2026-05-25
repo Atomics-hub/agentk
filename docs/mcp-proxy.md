@@ -49,6 +49,11 @@ non-UTF-8 parent values fail before the child process is spawned, and values
 are not printed in the error. The same name validation is enforced on the proxy
 configuration before spawning the child.
 
+Use `--response-timeout-ms` to set the downstream response timeout. The default
+is 30000 ms. If the child does not produce a matching JSON-RPC response before
+the timeout, AgentK terminates the child and returns a sanitized downstream
+transport failure without reflecting the request payload.
+
 The child server's stderr is not forwarded by the proxy. Downstream diagnostic
 streams are outside the MCP protocol and can contain raw secrets, poisoned
 tool output, local paths, or credentials. AgentK keeps the review path on
@@ -136,6 +141,7 @@ The proxy sanitizes these downstream failures:
 - malformed JSON-RPC responses
 - mismatched response ids
 - closed downstream stdout or send failures
+- timed-out downstream responses
 - downstream `initialize` and `ping` error bodies
 - unsupported downstream initialize versions
 - downstream `tools/list` error bodies
