@@ -160,7 +160,9 @@ Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/v0.1-target.md](docs/v0.1-target.md), and
 [docs/release-checklist.md](docs/release-checklist.md). Accepted v0.1 limits
 are tracked in
-[docs/v0.1-limit-disposition.md](docs/v0.1-limit-disposition.md).
+[docs/v0.1-limit-disposition.md](docs/v0.1-limit-disposition.md), and the
+current pre-tag dry run is recorded in
+[docs/v0.1-release-dry-run.md](docs/v0.1-release-dry-run.md).
 
 Mediate a demo MCP-shaped tool request without executing it:
 

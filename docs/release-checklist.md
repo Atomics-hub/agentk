@@ -3,6 +3,10 @@
 AgentK releases should be boring, reproducible, and easy to audit. Do not cut a
 tag from a dirty tree or with undocumented warnings.
 
+Pre-tag dry-run notes live in
+[`docs/v0.1-release-dry-run.md`](v0.1-release-dry-run.md). Update that file if
+the checklist is re-run before tagging.
+
 ## Before Tagging
 
 - [ ] All intended changes are merged through protected `master`.
