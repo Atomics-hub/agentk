@@ -207,6 +207,10 @@ capabilities when relevant, and signature status. It should not require raw
 descriptor text, raw tool arguments, raw tool output, local paths, or private
 environment values to explain what happened.
 
+For the before/after reviewer proof, run `cargo run -- mcp-shim-eval` and use
+[`docs/mcp-shim-eval.md`](mcp-shim-eval.md) to interpret the scorecard and
+trace evidence.
+
 ## Current Limits
 
 This is the subprocess stdio proxy path. It is suitable for local review,

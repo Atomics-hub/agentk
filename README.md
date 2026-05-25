@@ -237,6 +237,9 @@ cargo run -- mcp-shim-eval
 cargo run -- trace-inspect .agentk/runs/mcp-shim-eval-agentk.jsonl
 ```
 
+The reviewer guide for this proof lives in
+[docs/mcp-shim-eval.md](docs/mcp-shim-eval.md).
+
 Run a second proxy transcript where the downstream MCP server returns a
 poisoned JSON-RPC error body. AgentK returns only a sanitized error summary to
 the client while preserving hash evidence in the trace:
