@@ -6429,6 +6429,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_initialize_guard = mcp_subprocess_proxy_initialize_guard_smoke()?;
     let mcp_subprocess_proxy_bad_response = mcp_subprocess_proxy_bad_response_smoke()?;
     let mcp_subprocess_proxy_tool_shape = mcp_subprocess_proxy_tool_shape_smoke()?;
+    let mcp_subprocess_proxy_resource_prompt_shape =
+        mcp_subprocess_proxy_resource_prompt_shape_smoke()?;
     let mcp_subprocess_proxy_timeout = mcp_subprocess_proxy_timeout_smoke()?;
     let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
@@ -6864,6 +6866,30 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_returned,
                 mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_logged,
                 mcp_subprocess_proxy_tool_shape.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess resource/prompt shape guard",
+            if mcp_subprocess_proxy_resource_prompt_shape.resources_list_shape_rejected
+                && mcp_subprocess_proxy_resource_prompt_shape.resources_read_shape_rejected
+                && mcp_subprocess_proxy_resource_prompt_shape.prompts_list_shape_rejected
+                && mcp_subprocess_proxy_resource_prompt_shape.prompts_get_shape_rejected
+                && mcp_subprocess_proxy_resource_prompt_shape.raw_shape_payload_not_returned
+                && mcp_subprocess_proxy_resource_prompt_shape.raw_shape_payload_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "resource list {}, resource read {}, prompt list {}, prompt get {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_resource_prompt_shape.resources_list_shape_rejected,
+                mcp_subprocess_proxy_resource_prompt_shape.resources_read_shape_rejected,
+                mcp_subprocess_proxy_resource_prompt_shape.prompts_list_shape_rejected,
+                mcp_subprocess_proxy_resource_prompt_shape.prompts_get_shape_rejected,
+                mcp_subprocess_proxy_resource_prompt_shape.raw_shape_payload_not_returned,
+                mcp_subprocess_proxy_resource_prompt_shape.raw_shape_payload_not_logged,
+                mcp_subprocess_proxy_resource_prompt_shape.event_count
             ),
         ),
         release_audit_check(
@@ -7416,6 +7442,17 @@ struct McpSubprocessProxyBadResponseSmokeReport {
 struct McpSubprocessProxyToolShapeSmokeReport {
     tools_list_shape_rejected: bool,
     tool_call_shape_rejected: bool,
+    raw_shape_payload_not_returned: bool,
+    raw_shape_payload_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyResourcePromptShapeSmokeReport {
+    resources_list_shape_rejected: bool,
+    resources_read_shape_rejected: bool,
+    prompts_list_shape_rejected: bool,
+    prompts_get_shape_rejected: bool,
     raw_shape_payload_not_returned: bool,
     raw_shape_payload_not_logged: bool,
     event_count: usize,
@@ -8270,6 +8307,215 @@ done
         raw_shape_payload_not_logged: !serialized_events.contains(RAW_TOOLS_LIST)
             && !serialized_events.contains(RAW_TOOL_CALL_RESULT),
         event_count: tools_list_report.events.len() + tool_call_report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_resource_prompt_shape_smoke()
+-> Result<McpSubprocessProxyResourcePromptShapeSmokeReport, AgentKError> {
+    const RAW_RESOURCES_LIST: &str = "RELEASE_AUDIT_RESOURCES_LIST_SHAPE_SHOULD_NOT_REFLECT";
+    const RAW_RESOURCE_READ_RESULT: &str = "RELEASE_AUDIT_RESOURCE_READ_RESULT_SHOULD_NOT_REFLECT";
+    const RAW_PROMPTS_LIST: &str = "RELEASE_AUDIT_PROMPTS_LIST_SHAPE_SHOULD_NOT_REFLECT";
+    const RAW_PROMPT_GET_RESULT: &str = "RELEASE_AUDIT_PROMPT_GET_RESULT_SHOULD_NOT_REFLECT";
+    const RESOURCE_SHAPE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"resources":{"listChanged":false}},"serverInfo":{"name":"resource-shape","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"resources/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resources":"RELEASE_AUDIT_RESOURCES_LIST_SHAPE_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *'"method":"resources/read"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"contents":"RELEASE_AUDIT_RESOURCE_READ_RESULT_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    const PROMPT_SHAPE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"prompts":{"listChanged":false}},"serverInfo":{"name":"prompt-shape","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"prompts/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":"RELEASE_AUDIT_PROMPTS_LIST_SHAPE_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *'"method":"prompts/get"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"messages":"RELEASE_AUDIT_PROMPT_GET_RESULT_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let uri = "demo://resource/public";
+    let uri_hash = hash_json(&uri.to_string());
+    let resource_capability =
+        format!("resource.read:resource-shape:resource_uri_sha256:{uri_hash}");
+    let resource_input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/list",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {
+                "uri": uri,
+                "agentk": {
+                    "intent": "release-audit malformed MCP resource read",
+                    "labels": ["trusted"],
+                    "capabilities": [resource_capability]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let resource_report = mcp_subprocess_proxy_json_lines(
+        &resource_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "resource-shape", "sh").with_args([
+            "-c".to_string(),
+            RESOURCE_SHAPE_SCRIPT.to_string(),
+            "agentk-resource-shape".to_string(),
+        ]),
+    )?;
+    let resource_responses = resource_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let prompt_name = "demo.prompt";
+    let name_hash = hash_json(&prompt_name.to_string());
+    let prompt_capability = format!("prompt.get:prompt-shape:prompt_name_sha256:{name_hash}");
+    let prompt_input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "prompts/list",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "prompts/get",
+            "params": {
+                "name": prompt_name,
+                "arguments": { "topic": "public" },
+                "agentk": {
+                    "intent": "release-audit malformed MCP prompt get",
+                    "labels": ["trusted"],
+                    "capabilities": [prompt_capability]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let prompt_report = mcp_subprocess_proxy_json_lines(
+        &prompt_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "prompt-shape", "sh").with_args([
+            "-c".to_string(),
+            PROMPT_SHAPE_SCRIPT.to_string(),
+            "agentk-prompt-shape".to_string(),
+        ]),
+    )?;
+    let prompt_responses = prompt_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = format!("{}{}", resource_report.output, prompt_report.output);
+    let serialized_events =
+        serde_json::to_string(&(&resource_report.events, &prompt_report.events))?;
+
+    Ok(McpSubprocessProxyResourcePromptShapeSmokeReport {
+        resources_list_shape_rejected: resource_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!(
+                        "downstream MCP resources/list result.resources must be an array"
+                    )
+        }),
+        resources_read_shape_rejected: resource_responses.get(2).is_some_and(|response| {
+            response["id"] == serde_json::json!(3)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!(
+                        "downstream MCP resources/read result.contents must be an array"
+                    )
+        }),
+        prompts_list_shape_rejected: prompt_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!(
+                        "downstream MCP prompts/list result.prompts must be an array"
+                    )
+        }),
+        prompts_get_shape_rejected: prompt_responses.get(2).is_some_and(|response| {
+            response["id"] == serde_json::json!(3)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!(
+                        "downstream MCP prompts/get result.messages must be an array"
+                    )
+        }),
+        raw_shape_payload_not_returned: !output.contains(RAW_RESOURCES_LIST)
+            && !output.contains(RAW_RESOURCE_READ_RESULT)
+            && !output.contains(RAW_PROMPTS_LIST)
+            && !output.contains(RAW_PROMPT_GET_RESULT),
+        raw_shape_payload_not_logged: !serialized_events.contains(RAW_RESOURCES_LIST)
+            && !serialized_events.contains(RAW_RESOURCE_READ_RESULT)
+            && !serialized_events.contains(RAW_PROMPTS_LIST)
+            && !serialized_events.contains(RAW_PROMPT_GET_RESULT),
+        event_count: resource_report.events.len() + prompt_report.events.len(),
     })
 }
 
@@ -14659,6 +14905,20 @@ done
         assert!(report.raw_shape_payload_not_returned);
         assert!(report.raw_shape_payload_not_logged);
         assert_eq!(report.event_count, 1);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_resource_prompt_shape_smoke_rejects_malformed_results() {
+        let report = mcp_subprocess_proxy_resource_prompt_shape_smoke()
+            .expect("subprocess proxy resource/prompt shape smoke should run");
+
+        assert!(report.resources_list_shape_rejected);
+        assert!(report.resources_read_shape_rejected);
+        assert!(report.prompts_list_shape_rejected);
+        assert!(report.prompts_get_shape_rejected);
+        assert!(report.raw_shape_payload_not_returned);
+        assert!(report.raw_shape_payload_not_logged);
+        assert_eq!(report.event_count, 2);
     }
 
     #[test]

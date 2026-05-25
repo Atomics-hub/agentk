@@ -174,6 +174,10 @@ verify that raw downstream response payloads are not reflected to the client or
 written into AgentK evidence.
 It also covers malformed `tools/list` and successful `tools/call` result shapes
 so invalid downstream payloads cannot be exposed as mediated tool output.
+Release-audit also covers malformed `resources/list`, successful
+`resources/read`, `prompts/list`, and successful `prompts/get` result shapes so
+resource and prompt payloads fail closed with sanitized errors and hash-only
+evidence.
 
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and

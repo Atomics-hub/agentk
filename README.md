@@ -409,9 +409,10 @@ Implemented today:
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
-  tool-shape guards, bad-response redaction, response timeouts, transport-close
-  checks, mixed interop, notification-burst/flood checks, config guards,
-  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke checks.
+  tool/resource/prompt shape guards, bad-response redaction, response timeouts,
+  transport-close checks, mixed interop, notification-burst/flood checks,
+  config guards, no-passthrough checks, the MCP shim eval, inspect, and MCP
+  server smoke checks.
 
 Not implemented yet:
 
