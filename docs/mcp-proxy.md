@@ -95,6 +95,9 @@ unsupported notification in one session.
 Release-audit also covers downstream notification bursts before a response.
 Those notifications are tolerated while waiting for the matching response, but
 their raw payloads are not returned to the client or written to AgentK evidence.
+The proxy also bounds skipped downstream notifications while waiting for a
+response, returning a sanitized bad-downstream-response error instead of
+letting a notification flood stall the request indefinitely.
 
 ## Mediation
 

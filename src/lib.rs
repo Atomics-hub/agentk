@@ -25,6 +25,7 @@ const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const MCP_JSON_RPC_MAX_ID_BYTES: usize = 128;
 const MCP_STDIN_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -2759,7 +2760,7 @@ fn read_json_rpc_response_from(
     stdout: &mut BufReader<ChildStdout>,
     expected_id: &serde_json::Value,
 ) -> Result<serde_json::Value, AgentKError> {
-    for _ in 0..32 {
+    for _ in 0..MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS {
         let Some(line) = read_mcp_bounded_line(stdout)? else {
             return Err(AgentKError::InvalidMcpRequest(
                 "downstream MCP server closed stdout before responding".to_string(),
@@ -2805,9 +2806,9 @@ fn read_json_rpc_response_from(
         ));
     }
 
-    Err(AgentKError::InvalidMcpRequest(
-        "downstream MCP server sent too many notifications before responding".to_string(),
-    ))
+    Err(AgentKError::InvalidMcpRequest(format!(
+        "downstream MCP server sent more than {MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS} notifications before responding"
+    )))
 }
 
 #[derive(Debug)]
@@ -6433,6 +6434,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
     let mcp_subprocess_proxy_mixed_interop = mcp_subprocess_proxy_mixed_interop_smoke()?;
     let mcp_subprocess_proxy_notification_burst = mcp_subprocess_proxy_notification_burst_smoke()?;
+    let mcp_subprocess_proxy_notification_flood = mcp_subprocess_proxy_notification_flood_smoke()?;
     let mcp_subprocess_proxy_prompt_error = mcp_subprocess_proxy_prompt_error_smoke()?;
     let inspect = inspect_jsonl(&latest)?;
     let replay = replay_jsonl(&latest)?;
@@ -7010,6 +7012,24 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess notification flood",
+            if mcp_subprocess_proxy_notification_flood.notification_flood_bounded
+                && mcp_subprocess_proxy_notification_flood.raw_notification_not_returned
+                && mcp_subprocess_proxy_notification_flood.raw_notification_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "bounded {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_notification_flood.notification_flood_bounded,
+                mcp_subprocess_proxy_notification_flood.raw_notification_not_returned,
+                mcp_subprocess_proxy_notification_flood.raw_notification_not_logged,
+                mcp_subprocess_proxy_notification_flood.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess prompt error redaction",
             if mcp_subprocess_proxy_prompt_error.descriptor_mediated
                 && mcp_subprocess_proxy_prompt_error.error_sanitized
@@ -7401,6 +7421,14 @@ struct McpMixedInteropSmokeReport {
 struct McpNotificationBurstSmokeReport {
     notification_burst_tolerated: bool,
     descriptor_mediated: bool,
+    raw_notification_not_returned: bool,
+    raw_notification_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpNotificationFloodSmokeReport {
+    notification_flood_bounded: bool,
     raw_notification_not_returned: bool,
     raw_notification_not_logged: bool,
     event_count: usize,
@@ -8884,6 +8912,73 @@ done
         raw_notification_not_returned: !report.output.contains(RAW_NOTIFICATION),
         raw_notification_not_logged: !serialized_events.contains(RAW_NOTIFICATION)
             && !serialized_events.contains(RAW_DESCRIPTOR),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_notification_flood_smoke()
+-> Result<McpNotificationFloodSmokeReport, AgentKError> {
+    const RAW_NOTIFICATION: &str = "DOWNSTREAM_NOTIFICATION_FLOOD_SHOULD_NOT_REFLECT";
+    let notification_count = MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS + 1;
+    let notification_flood_script = format!(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-11-25","capabilities":{{"tools":{{"listChanged":false}}}},"serverInfo":{{"name":"notification-flood","version":"test"}}}}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      i=0
+      while [ "$i" -lt {notification_count} ]; do
+        printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/progress","params":{{"message":"DOWNSTREAM_NOTIFICATION_FLOOD_SHOULD_NOT_REFLECT"}}}}'
+        i=$((i + 1))
+      done
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"demo.echo","description":"Echo public demo payloads.","inputSchema":{{"type":"object"}}}}]}}}}'
+      ;;
+    *)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":999,"error":{{"code":-32601,"message":"unknown fake request"}}}}'
+      ;;
+  esac
+done
+"#
+    );
+    let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+    let report = mcp_subprocess_proxy_json_lines(
+        input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "notification-flood", "sh")
+            .with_args([
+                "-c".to_string(),
+                notification_flood_script,
+                "agentk-notification-flood".to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpNotificationFloodSmokeReport {
+        notification_flood_bounded: responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["message"] == serde_json::json!("Bad downstream response")
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| {
+                        detail.contains("sent more than")
+                            && detail.contains("notifications before responding")
+                    })
+        }),
+        raw_notification_not_returned: !report.output.contains(RAW_NOTIFICATION),
+        raw_notification_not_logged: !serialized_events.contains(RAW_NOTIFICATION),
         event_count: report.events.len(),
     })
 }
@@ -14323,6 +14418,18 @@ done
         assert!(report.raw_notification_not_returned);
         assert!(report.raw_notification_not_logged);
         assert_eq!(report.event_count, 1);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_notification_flood_smoke_bounds_downstream_notifications()
+    {
+        let report = mcp_subprocess_proxy_notification_flood_smoke()
+            .expect("subprocess proxy notification flood smoke should run");
+
+        assert!(report.notification_flood_bounded);
+        assert!(report.raw_notification_not_returned);
+        assert!(report.raw_notification_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
