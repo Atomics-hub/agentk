@@ -384,6 +384,8 @@ Implemented today:
   `ping` failures,
 - subprocess MCP initialize protocol guards before the proxy becomes ready,
 - subprocess MCP `tools/list` error redaction before descriptors are exposed,
+- subprocess MCP tool-shape guards for malformed `tools/list` and successful
+  `tools/call` results,
 - subprocess MCP bad-response redaction for malformed JSON and mismatched
   response ids,
 - subprocess MCP response timeout handling for hung downstream servers,
@@ -398,9 +400,9 @@ Implemented today:
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
-  bad-response redaction, response timeouts, transport-close checks, mixed interop,
-  notification-burst/flood checks, config guards, no-passthrough checks, the
-  MCP shim eval, inspect, and MCP server smoke checks.
+  tool-shape guards, bad-response redaction, response timeouts, transport-close
+  checks, mixed interop, notification-burst/flood checks, config guards,
+  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 

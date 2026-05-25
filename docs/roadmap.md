@@ -78,6 +78,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for downstream initialize protocol rejection.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [x] Validate downstream subprocess `tools/call` result shape before recording responses.
+- [x] Add release-audit smoke coverage for downstream tool result shape guards.
 - [x] Sanitize downstream subprocess lifecycle error bodies before returning them.
 - [x] Sanitize downstream subprocess `tools/list` error bodies before returning them.
 - [x] Sanitize downstream subprocess `tools/call` error bodies before returning them.

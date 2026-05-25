@@ -172,6 +172,8 @@ The proxy sanitizes these downstream failures:
 Release-audit includes malformed JSON and mismatched response-id coverage to
 verify that raw downstream response payloads are not reflected to the client or
 written into AgentK evidence.
+It also covers malformed `tools/list` and successful `tools/call` result shapes
+so invalid downstream payloads cannot be exposed as mediated tool output.
 
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and
