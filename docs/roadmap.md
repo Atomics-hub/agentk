@@ -168,6 +168,6 @@ Status: in progress.
 
 - [x] Add an explicit v0.1 target that defines release-ready behavior,
       accepted limits, release blockers, and the autonomous work order.
-- [ ] Verify the before/after MCP shim eval remains the clearest public proof.
+- [x] Verify the before/after MCP shim eval remains the clearest public proof.
 - [ ] Close or explicitly defer each accepted v0.1 limit before tagging.
 - [ ] Run the signed release checklist against the final v0.1 commit.
