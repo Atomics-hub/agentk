@@ -88,6 +88,10 @@ are rejected with a sanitized `Method not found` response until they have an
 explicit AgentK policy contract. The proxy forwards `notifications/initialized`
 and the cancellation notification, but drops other notifications.
 
+Release-audit includes a mixed subprocess transcript that exercises tools,
+resources, prompts, an allowed cancellation notification, and a dropped
+unsupported notification in one session.
+
 ## Mediation
 
 On `tools/list`, AgentK treats downstream tool descriptors as untrusted

@@ -94,6 +94,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for subprocess MCP resource mediation.
 - [x] Mediate downstream subprocess MCP `prompts/list` and `prompts/get` with hash-only evidence.
 - [x] Add release-audit smoke coverage for subprocess MCP prompt mediation.
+- [x] Add release-audit smoke coverage for mixed subprocess MCP interoperability.
 - [x] Add prompt error redaction and malformed prompt result coverage for the subprocess MCP proxy.
 - [x] Add a killer MCP demo where poisoned output tries exfiltration and an unsafe patch, then AgentK blocks both follow-up calls with trace evidence.
 - [x] Add a one-command MCP killer demo runner for reviewable redacted traces.
