@@ -80,6 +80,8 @@ are exposed. The downstream `resources/list` result must be an object with a
 `resources` array before resource descriptors are exposed. The downstream
 `prompts/list` result must be an object with a `prompts` array before prompt
 descriptors are exposed.
+Release-audit covers unsupported downstream initialize versions and verifies
+that the proxy remains not-ready instead of exposing downstream descriptors.
 
 After readiness, `initialize`, `ping`, `tools/list`, `tools/call`,
 `resources/list`, `resources/read`, `prompts/list`, and `prompts/get` requests

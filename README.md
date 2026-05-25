@@ -382,6 +382,7 @@ Implemented today:
 - subprocess MCP stderr suppression for downstream diagnostics,
 - subprocess MCP lifecycle error redaction for downstream `initialize` and
   `ping` failures,
+- subprocess MCP initialize protocol guards before the proxy becomes ready,
 - subprocess MCP `tools/list` error redaction before descriptors are exposed,
 - subprocess MCP bad-response redaction for malformed JSON and mismatched
   response ids,
@@ -396,8 +397,8 @@ Implemented today:
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
-  subprocess MCP boundaries, lifecycle/list redaction, bad-response redaction,
-  response timeouts, transport-close checks, mixed interop,
+  subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
+  bad-response redaction, response timeouts, transport-close checks, mixed interop,
   notification-burst/flood checks, config guards, no-passthrough checks, the
   MCP shim eval, inspect, and MCP server smoke checks.
 

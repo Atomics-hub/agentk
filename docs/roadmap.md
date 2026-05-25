@@ -75,6 +75,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for downstream subprocess transport close.
 - [x] Bound downstream subprocess response waits with a configurable timeout.
 - [x] Validate downstream subprocess initialize protocol before exposing tools.
+- [x] Add release-audit smoke coverage for downstream initialize protocol rejection.
 - [x] Validate downstream subprocess `tools/list` shape before exposing tools.
 - [x] Validate downstream subprocess `tools/call` result shape before recording responses.
 - [x] Sanitize downstream subprocess lifecycle error bodies before returning them.
