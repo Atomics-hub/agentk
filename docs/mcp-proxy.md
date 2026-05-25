@@ -92,6 +92,10 @@ Release-audit includes a mixed subprocess transcript that exercises tools,
 resources, prompts, an allowed cancellation notification, and a dropped
 unsupported notification in one session.
 
+Release-audit also covers downstream notification bursts before a response.
+Those notifications are tolerated while waiting for the matching response, but
+their raw payloads are not returned to the client or written to AgentK evidence.
+
 ## Mediation
 
 On `tools/list`, AgentK treats downstream tool descriptors as untrusted

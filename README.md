@@ -375,6 +375,8 @@ Implemented today:
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
 - mixed subprocess MCP interoperability coverage across tools, resources,
   prompts, and notifications,
+- downstream subprocess MCP notification-burst handling without raw payload
+  reflection,
 - subprocess MCP stderr suppression for downstream diagnostics,
 - subprocess MCP lifecycle error redaction for downstream `initialize` and
   `ping` failures,
@@ -391,8 +393,9 @@ Implemented today:
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, response timeouts,
-  transport-close checks, mixed interop, config guards, no-passthrough checks,
-  the MCP shim eval, inspect, and MCP server smoke checks.
+  transport-close checks, mixed interop, notification-burst checks, config
+  guards, no-passthrough checks, the MCP shim eval, inspect, and MCP server
+  smoke checks.
 
 Not implemented yet:
 
