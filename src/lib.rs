@@ -6428,6 +6428,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_lifecycle_error = mcp_subprocess_proxy_lifecycle_error_smoke()?;
     let mcp_subprocess_proxy_initialize_guard = mcp_subprocess_proxy_initialize_guard_smoke()?;
     let mcp_subprocess_proxy_bad_response = mcp_subprocess_proxy_bad_response_smoke()?;
+    let mcp_subprocess_proxy_tool_shape = mcp_subprocess_proxy_tool_shape_smoke()?;
     let mcp_subprocess_proxy_timeout = mcp_subprocess_proxy_timeout_smoke()?;
     let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
@@ -6843,6 +6844,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy_bad_response.raw_response_not_returned,
                 mcp_subprocess_proxy_bad_response.raw_response_not_logged,
                 mcp_subprocess_proxy_bad_response.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess tool shape guard",
+            if mcp_subprocess_proxy_tool_shape.tools_list_shape_rejected
+                && mcp_subprocess_proxy_tool_shape.tool_call_shape_rejected
+                && mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_returned
+                && mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "list rejected {}, call rejected {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_tool_shape.tools_list_shape_rejected,
+                mcp_subprocess_proxy_tool_shape.tool_call_shape_rejected,
+                mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_returned,
+                mcp_subprocess_proxy_tool_shape.raw_shape_payload_not_logged,
+                mcp_subprocess_proxy_tool_shape.event_count
             ),
         ),
         release_audit_check(
@@ -7388,6 +7409,15 @@ struct McpSubprocessProxyBadResponseSmokeReport {
     mismatched_id_sanitized: bool,
     raw_response_not_returned: bool,
     raw_response_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyToolShapeSmokeReport {
+    tools_list_shape_rejected: bool,
+    tool_call_shape_rejected: bool,
+    raw_shape_payload_not_returned: bool,
+    raw_shape_payload_not_logged: bool,
     event_count: usize,
 }
 
@@ -8136,6 +8166,110 @@ done
         raw_response_not_returned: !report.output.contains(RAW_DOWNSTREAM_RESPONSE),
         raw_response_not_logged: !serialized_events.contains(RAW_DOWNSTREAM_RESPONSE),
         event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_tool_shape_smoke()
+-> Result<McpSubprocessProxyToolShapeSmokeReport, AgentKError> {
+    const RAW_TOOLS_LIST: &str = "RELEASE_AUDIT_TOOLS_LIST_SHAPE_SHOULD_NOT_REFLECT";
+    const RAW_TOOL_CALL_RESULT: &str = "RELEASE_AUDIT_TOOL_CALL_RESULT_SHOULD_NOT_REFLECT";
+    const TOOLS_LIST_SHAPE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"tools-list-shape","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":"RELEASE_AUDIT_TOOLS_LIST_SHAPE_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    const TOOL_CALL_SHAPE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"tool-call-shape","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":"RELEASE_AUDIT_TOOL_CALL_RESULT_SHOULD_NOT_REFLECT"}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    let tools_list_input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+    let tools_list_report = mcp_subprocess_proxy_json_lines(
+        tools_list_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "tools-list-shape", "sh").with_args(
+            [
+                "-c".to_string(),
+                TOOLS_LIST_SHAPE_SCRIPT.to_string(),
+                "agentk-tools-list-shape".to_string(),
+            ],
+        ),
+    )?;
+    let tools_list_responses = tools_list_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let tool_call_input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"demo.echo","arguments":{"message":"public"},"agentk":{"intent":"invoke malformed tool result through AgentK","labels":["trusted"],"capabilities":["tool.invoke:demo.echo"]}}}
+"#;
+    let tool_call_report = mcp_subprocess_proxy_json_lines(
+        tool_call_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "tool-call-shape", "sh").with_args(
+            [
+                "-c".to_string(),
+                TOOL_CALL_SHAPE_SCRIPT.to_string(),
+                "agentk-tool-call-shape".to_string(),
+            ],
+        ),
+    )?;
+    let tool_call_responses = tool_call_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = format!("{}{}", tools_list_report.output, tool_call_report.output);
+    let serialized_events =
+        serde_json::to_string(&(&tools_list_report.events, &tool_call_report.events))?;
+
+    Ok(McpSubprocessProxyToolShapeSmokeReport {
+        tools_list_shape_rejected: tools_list_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!("downstream MCP tools/list result.tools must be an array")
+        }),
+        tool_call_shape_rejected: tool_call_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!("downstream MCP tools/call result must be an object")
+        }),
+        raw_shape_payload_not_returned: !output.contains(RAW_TOOLS_LIST)
+            && !output.contains(RAW_TOOL_CALL_RESULT),
+        raw_shape_payload_not_logged: !serialized_events.contains(RAW_TOOLS_LIST)
+            && !serialized_events.contains(RAW_TOOL_CALL_RESULT),
+        event_count: tools_list_report.events.len() + tool_call_report.events.len(),
     })
 }
 
@@ -14513,6 +14647,18 @@ done
         assert!(report.raw_response_not_returned);
         assert!(report.raw_response_not_logged);
         assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_tool_shape_smoke_rejects_malformed_tool_results() {
+        let report = mcp_subprocess_proxy_tool_shape_smoke()
+            .expect("subprocess proxy tool shape smoke should run");
+
+        assert!(report.tools_list_shape_rejected);
+        assert!(report.tool_call_shape_rejected);
+        assert!(report.raw_shape_payload_not_returned);
+        assert!(report.raw_shape_payload_not_logged);
+        assert_eq!(report.event_count, 1);
     }
 
     #[test]
