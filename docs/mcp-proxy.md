@@ -89,6 +89,8 @@ are the only request methods covered by this proxy. Other MCP request methods
 are rejected with a sanitized `Method not found` response until they have an
 explicit AgentK policy contract. The proxy forwards `notifications/initialized`
 and the cancellation notification, but drops other notifications.
+`resources/subscribe` and `resources/unsubscribe` are explicitly unsupported
+for v0.1 and release-audit verifies that they are not forwarded as passthrough.
 
 Release-audit includes a mixed subprocess transcript that exercises tools,
 resources, prompts, an allowed cancellation notification, and a dropped

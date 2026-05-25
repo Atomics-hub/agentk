@@ -399,6 +399,8 @@ Implemented today:
   `tools/call` results,
 - subprocess MCP bad-response redaction for malformed JSON and mismatched
   response ids,
+- subprocess MCP resource subscription no-passthrough coverage for unsupported
+  `resources/subscribe` and `resources/unsubscribe`,
 - subprocess MCP response timeout handling for hung downstream servers,
 - subprocess MCP transport-close handling for child exits and broken pipes,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
@@ -412,9 +414,10 @@ Implemented today:
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
   tool/resource/prompt shape guards, bad-response redaction, response timeouts,
-  transport-close checks, mixed interop, public interop transcripts,
-  notification-burst/flood checks, config guards, no-passthrough checks, the MCP
-  shim eval, inspect, and MCP server smoke checks.
+  transport-close checks, mixed interop, public interop transcripts, resource
+  subscription no-passthrough, notification-burst/flood checks, config guards,
+  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke
+  checks.
 
 Not implemented yet:
 
