@@ -378,6 +378,7 @@ Implemented today:
   `ping` failures,
 - subprocess MCP `tools/list` error redaction before descriptors are exposed,
 - subprocess MCP response timeout handling for hung downstream servers,
+- subprocess MCP transport-close handling for child exits and broken pipes,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
   unsafe patch attempts,
 - a one-command `mcp-killer-demo` runner for reviewable demo traces,
@@ -388,8 +389,8 @@ Implemented today:
   signature, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, response timeouts,
-  config guards, no-passthrough checks, the MCP shim eval, inspect, and MCP
-  server smoke checks.
+  transport-close checks, config guards, no-passthrough checks, the MCP shim
+  eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
