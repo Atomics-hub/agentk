@@ -69,6 +69,7 @@ Status: in progress.
 - [x] Add optional subprocess proxy trace output for `trace-inspect` review.
 - [x] Strip AgentK-only metadata from subprocess proxy forwarded traffic.
 - [x] Return sanitized JSON-RPC errors for malformed downstream subprocess responses.
+- [x] Add release-audit smoke coverage for malformed and mismatched downstream responses.
 - [x] Drop malformed downstream tool descriptors with hash-only evidence.
 - [x] Return sanitized JSON-RPC errors when downstream subprocess transport closes mid-session.
 - [x] Add release-audit smoke coverage for downstream subprocess transport close.

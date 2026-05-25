@@ -6426,6 +6426,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_security_shim_eval = mcp_security_shim_eval_smoke(root)?;
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_lifecycle_error = mcp_subprocess_proxy_lifecycle_error_smoke()?;
+    let mcp_subprocess_proxy_bad_response = mcp_subprocess_proxy_bad_response_smoke()?;
     let mcp_subprocess_proxy_timeout = mcp_subprocess_proxy_timeout_smoke()?;
     let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
@@ -6801,6 +6802,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy_lifecycle_error.raw_error_not_returned,
                 mcp_subprocess_proxy_lifecycle_error.raw_error_not_logged,
                 mcp_subprocess_proxy_lifecycle_error.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess bad response redaction",
+            if mcp_subprocess_proxy_bad_response.invalid_json_sanitized
+                && mcp_subprocess_proxy_bad_response.mismatched_id_sanitized
+                && mcp_subprocess_proxy_bad_response.raw_response_not_returned
+                && mcp_subprocess_proxy_bad_response.raw_response_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "invalid json {}, mismatched id {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_bad_response.invalid_json_sanitized,
+                mcp_subprocess_proxy_bad_response.mismatched_id_sanitized,
+                mcp_subprocess_proxy_bad_response.raw_response_not_returned,
+                mcp_subprocess_proxy_bad_response.raw_response_not_logged,
+                mcp_subprocess_proxy_bad_response.event_count
             ),
         ),
         release_audit_check(
@@ -7328,6 +7349,15 @@ struct McpSubprocessProxyLifecycleErrorSmokeReport {
     tools_list_error_sanitized: bool,
     raw_error_not_returned: bool,
     raw_error_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyBadResponseSmokeReport {
+    invalid_json_sanitized: bool,
+    mismatched_id_sanitized: bool,
+    raw_response_not_returned: bool,
+    raw_response_not_logged: bool,
     event_count: usize,
 }
 
@@ -7945,6 +7975,74 @@ done
             && !serialized_events.contains(RAW_PING_ERROR)
             && !serialized_events.contains(RAW_TOOLS_LIST_ERROR),
         event_count: lifecycle_report.events.len() + tools_list_report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_bad_response_smoke()
+-> Result<McpSubprocessProxyBadResponseSmokeReport, AgentKError> {
+    const RAW_DOWNSTREAM_RESPONSE: &str = "DOWNSTREAM_BAD_RESPONSE_SHOULD_NOT_REFLECT";
+    const BAD_RESPONSE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"bad-response-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"id":2'*'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":"DOWNSTREAM_BAD_RESPONSE_SHOULD_NOT_REFLECT'
+      ;;
+    *'"id":3'*'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":"wrong-response-id","result":{"secret":"DOWNSTREAM_BAD_RESPONSE_SHOULD_NOT_REFLECT"}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}
+"#;
+    let report = mcp_subprocess_proxy_json_lines(
+        input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "bad-response-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                BAD_RESPONSE_SCRIPT.to_string(),
+                "agentk-bad-response-probe".to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpSubprocessProxyBadResponseSmokeReport {
+        invalid_json_sanitized: responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["message"] == serde_json::json!("Bad downstream response")
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("invalid JSON"))
+        }),
+        mismatched_id_sanitized: responses.get(2).is_some_and(|response| {
+            response["id"] == serde_json::json!(3)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["message"] == serde_json::json!("Bad downstream response")
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("response id"))
+        }),
+        raw_response_not_returned: !report.output.contains(RAW_DOWNSTREAM_RESPONSE),
+        raw_response_not_logged: !serialized_events.contains(RAW_DOWNSTREAM_RESPONSE),
+        event_count: report.events.len(),
     })
 }
 
@@ -14297,6 +14395,18 @@ done
         assert!(report.tools_list_error_sanitized);
         assert!(report.raw_error_not_returned);
         assert!(report.raw_error_not_logged);
+        assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_bad_response_smoke_redacts_downstream_payloads() {
+        let report = mcp_subprocess_proxy_bad_response_smoke()
+            .expect("subprocess proxy bad response smoke should run");
+
+        assert!(report.invalid_json_sanitized);
+        assert!(report.mismatched_id_sanitized);
+        assert!(report.raw_response_not_returned);
+        assert!(report.raw_response_not_logged);
         assert_eq!(report.event_count, 0);
     }
 
