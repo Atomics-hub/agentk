@@ -92,7 +92,10 @@ and the cancellation notification, but drops other notifications.
 
 Release-audit includes a mixed subprocess transcript that exercises tools,
 resources, prompts, an allowed cancellation notification, and a dropped
-unsupported notification in one session.
+unsupported notification in one session. It also runs the public
+`examples/mcp-interop-session.jsonl` transcript against
+`examples/mcp-interop-server.sh`, including poisoned tool/resource/prompt output
+followed by blocked network-egress and unsafe-patch attempts.
 
 Release-audit also covers downstream notification bursts before a response.
 Those notifications are tolerated while waiting for the matching response, but
