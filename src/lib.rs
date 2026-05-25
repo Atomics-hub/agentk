@@ -6426,6 +6426,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_error = mcp_subprocess_proxy_error_smoke(root)?;
     let mcp_subprocess_proxy_lifecycle_error = mcp_subprocess_proxy_lifecycle_error_smoke()?;
     let mcp_subprocess_proxy_timeout = mcp_subprocess_proxy_timeout_smoke()?;
+    let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -6841,6 +6842,24 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess transport close",
+            if mcp_subprocess_proxy_transport_close.close_reported
+                && mcp_subprocess_proxy_transport_close.raw_request_not_returned
+                && mcp_subprocess_proxy_transport_close.raw_request_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "close {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_transport_close.close_reported,
+                mcp_subprocess_proxy_transport_close.raw_request_not_returned,
+                mcp_subprocess_proxy_transport_close.raw_request_not_logged,
+                mcp_subprocess_proxy_transport_close.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess config guard",
             if mcp_subprocess_proxy_config_guard.empty_agent_rejected
                 && mcp_subprocess_proxy_config_guard.empty_server_rejected
@@ -7237,6 +7256,14 @@ struct McpSubprocessProxyLifecycleErrorSmokeReport {
 #[derive(Debug)]
 struct McpSubprocessProxyTimeoutSmokeReport {
     timeout_reported: bool,
+    raw_request_not_returned: bool,
+    raw_request_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyTransportCloseSmokeReport {
+    close_reported: bool,
     raw_request_not_returned: bool,
     raw_request_not_logged: bool,
     event_count: usize,
@@ -7881,6 +7908,79 @@ done
         }),
         raw_request_not_returned: !report.output.contains(RAW_TIMEOUT_PAYLOAD),
         raw_request_not_logged: !serialized_events.contains(RAW_TIMEOUT_PAYLOAD),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_transport_close_smoke()
+-> Result<McpSubprocessProxyTransportCloseSmokeReport, AgentKError> {
+    const RAW_CLOSE_PAYLOAD: &str = "RELEASE_AUDIT_CLOSE_PAYLOAD_SHOULD_NOT_REFLECT";
+    const CLOSE_PROBE_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"close-probe","version":"test"}}}'
+      exit 0
+      ;;
+  esac
+done
+"#;
+    let input = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {
+                "secret": RAW_CLOSE_PAYLOAD
+            }
+        })
+    );
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "close-probe", "sh").with_args([
+            "-c".to_string(),
+            CLOSE_PROBE_SCRIPT.to_string(),
+            "agentk-close-probe".to_string(),
+        ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpSubprocessProxyTransportCloseSmokeReport {
+        close_reported: responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && matches!(response["error"]["code"].as_i64(), Some(-32003 | -32004))
+                && matches!(
+                    response["error"]["message"].as_str(),
+                    Some("Bad downstream response" | "Downstream transport failure")
+                )
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| {
+                        detail.contains("closed stdout")
+                            || detail.contains("failed while sending request")
+                    })
+        }),
+        raw_request_not_returned: !report.output.contains(RAW_CLOSE_PAYLOAD),
+        raw_request_not_logged: !serialized_events.contains(RAW_CLOSE_PAYLOAD),
         event_count: report.events.len(),
     })
 }
@@ -13710,6 +13810,17 @@ done
             .expect("subprocess proxy timeout smoke should run");
 
         assert!(report.timeout_reported);
+        assert!(report.raw_request_not_returned);
+        assert!(report.raw_request_not_logged);
+        assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_transport_close_smoke_reports_child_exit() {
+        let report = mcp_subprocess_proxy_transport_close_smoke()
+            .expect("subprocess proxy transport close smoke should run");
+
+        assert!(report.close_reported);
         assert!(report.raw_request_not_returned);
         assert!(report.raw_request_not_logged);
         assert_eq!(report.event_count, 0);
