@@ -384,6 +384,8 @@ Implemented today:
 - MCP prompt descriptor/get/response evidence with explicit get capabilities,
 - mixed subprocess MCP interoperability coverage across tools, resources,
   prompts, and notifications,
+- public MCP interoperability transcript coverage that blocks poisoned follow-up
+  network egress and unsafe patch attempts,
 - downstream subprocess MCP notification-burst handling without raw payload
   reflection,
 - downstream subprocess MCP notification-flood bounds without raw payload
@@ -410,9 +412,9 @@ Implemented today:
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
   tool/resource/prompt shape guards, bad-response redaction, response timeouts,
-  transport-close checks, mixed interop, notification-burst/flood checks,
-  config guards, no-passthrough checks, the MCP shim eval, inspect, and MCP
-  server smoke checks.
+  transport-close checks, mixed interop, public interop transcripts,
+  notification-burst/flood checks, config guards, no-passthrough checks, the MCP
+  shim eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
