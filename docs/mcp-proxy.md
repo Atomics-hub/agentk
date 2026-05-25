@@ -167,6 +167,10 @@ The proxy sanitizes these downstream failures:
 - downstream `prompts/get` error bodies
 - child stderr diagnostics
 
+Release-audit includes malformed JSON and mismatched response-id coverage to
+verify that raw downstream response payloads are not reflected to the client or
+written into AgentK evidence.
+
 For downstream tool errors, AgentK returns a sanitized error summary with the
 downstream error code and redaction flags. Raw downstream error `message` and
 `data` fields are not returned to the client. The original error body is still
