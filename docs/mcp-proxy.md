@@ -221,3 +221,6 @@ mediates tool listing/calls, resource listing/reads, and prompt listing/gets;
 child stderr is suppressed rather than treated as evidence. Resource
 subscription flows still need explicit policy contracts and are not forwarded
 as generic passthrough.
+
+The v0.1 release disposition for these limits is tracked in
+[`docs/v0.1-limit-disposition.md`](v0.1-limit-disposition.md).
