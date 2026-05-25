@@ -170,4 +170,5 @@ Status: in progress.
       accepted limits, release blockers, and the autonomous work order.
 - [x] Verify the before/after MCP shim eval remains the clearest public proof.
 - [x] Close or explicitly defer each accepted v0.1 limit before tagging.
+- [x] Run a signed release checklist dry run against current master.
 - [ ] Run the signed release checklist against the final v0.1 commit.
