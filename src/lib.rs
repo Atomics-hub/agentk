@@ -3577,11 +3577,10 @@ fn mediate_mcp_resource_read_in_session(
         Syscall {
             kind: SyscallKind::ResourceRead,
             target: resource_ref.clone(),
-            intent: if request.intent.trim().is_empty() {
-                "MCP resources/read through AgentK proxy".to_string()
-            } else {
-                request.intent
-            },
+            intent: mcp_proxy_safe_intent(
+                "MCP resources/read through AgentK proxy",
+                &request.intent,
+            ),
             labels,
             inputs: vec![format!("resource_uri_sha256:{uri_hash}")],
         },
@@ -3701,11 +3700,7 @@ fn mediate_mcp_prompt_get_in_session(
         Syscall {
             kind: SyscallKind::PromptGet,
             target: prompt_ref.clone(),
-            intent: if request.intent.trim().is_empty() {
-                "MCP prompts/get through AgentK proxy".to_string()
-            } else {
-                request.intent
-            },
+            intent: mcp_proxy_safe_intent("MCP prompts/get through AgentK proxy", &request.intent),
             labels,
             inputs: vec![
                 format!("prompt_name_sha256:{name_hash}"),
@@ -5210,6 +5205,18 @@ fn mcp_proxy_agentk_context_with_default(
     Ok((intent, labels, capabilities))
 }
 
+fn mcp_proxy_safe_intent(default_intent: &str, client_intent: &str) -> String {
+    let client_intent = client_intent.trim();
+    if client_intent.is_empty() || client_intent == default_intent {
+        return default_intent.to_string();
+    }
+
+    format!(
+        "{default_intent}; client_intent_sha256:{}",
+        hash_json(&client_intent)
+    )
+}
+
 fn json_array_of_labels(value: &serde_json::Value, field: &str) -> Result<BTreeSet<Label>, String> {
     let Some(items) = value.as_array() else {
         return Err(format!("{field} must be an array"));
@@ -5421,11 +5428,7 @@ fn mcp_request_into_syscall(request: McpToolRequest) -> (String, Vec<String>, Sy
     let syscall = Syscall {
         kind: SyscallKind::ToolInvoke,
         target: request.tool,
-        intent: if request.intent.trim().is_empty() {
-            "mediate MCP tool invocation".to_string()
-        } else {
-            request.intent
-        },
+        intent: mcp_proxy_safe_intent("mediate MCP tool invocation", &request.intent),
         labels: request.labels,
         inputs: vec![format!("args_sha256:{}", hash_json(&request.arguments))],
     };
@@ -6531,6 +6534,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_metadata_guard = mcp_subprocess_proxy_metadata_guard_smoke()?;
+    let mcp_subprocess_proxy_intent_redaction = mcp_subprocess_proxy_intent_redaction_smoke()?;
     let mcp_subprocess_proxy_resource_subscription =
         mcp_subprocess_proxy_resource_subscription_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -7105,6 +7109,30 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 mcp_subprocess_proxy_metadata_guard.raw_metadata_not_returned
                     && mcp_subprocess_proxy_metadata_guard.raw_metadata_not_logged,
                 mcp_subprocess_proxy_metadata_guard.event_count
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess intent redaction",
+            if mcp_subprocess_proxy_intent_redaction.tool_intent_hashed
+                && mcp_subprocess_proxy_intent_redaction.resource_intent_hashed
+                && mcp_subprocess_proxy_intent_redaction.prompt_intent_hashed
+                && mcp_subprocess_proxy_intent_redaction.metadata_stripped
+                && mcp_subprocess_proxy_intent_redaction.raw_intent_not_returned
+                && mcp_subprocess_proxy_intent_redaction.raw_intent_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "tool {}, resource {}, prompt {}, child clean {}, redacted {}, events {}",
+                mcp_subprocess_proxy_intent_redaction.tool_intent_hashed,
+                mcp_subprocess_proxy_intent_redaction.resource_intent_hashed,
+                mcp_subprocess_proxy_intent_redaction.prompt_intent_hashed,
+                mcp_subprocess_proxy_intent_redaction.metadata_stripped,
+                mcp_subprocess_proxy_intent_redaction.raw_intent_not_returned
+                    && mcp_subprocess_proxy_intent_redaction.raw_intent_not_logged,
+                mcp_subprocess_proxy_intent_redaction.event_count
             ),
         ),
         release_audit_check(
@@ -7691,6 +7719,17 @@ struct McpSubprocessProxyMetadataGuardSmokeReport {
     invalid_metadata_not_forwarded: bool,
     raw_metadata_not_returned: bool,
     raw_metadata_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyIntentRedactionSmokeReport {
+    tool_intent_hashed: bool,
+    resource_intent_hashed: bool,
+    prompt_intent_hashed: bool,
+    metadata_stripped: bool,
+    raw_intent_not_returned: bool,
+    raw_intent_not_logged: bool,
     event_count: usize,
 }
 
@@ -9215,6 +9254,152 @@ done
             .contains("invalid metadata forwarded"),
         raw_metadata_not_returned: !report.output.contains(RAW_METADATA_LABEL),
         raw_metadata_not_logged: !serialized_events.contains(RAW_METADATA_LABEL),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_intent_redaction_smoke()
+-> Result<McpSubprocessProxyIntentRedactionSmokeReport, AgentKError> {
+    const RAW_INTENT: &str = "AGENTK_METADATA_INTENT_SHOULD_NOT_REFLECT";
+    const INTENT_REDACTION_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"resources":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"intent-redaction-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/call"'*)
+      case "$line" in
+        *AGENTK_METADATA_INTENT_SHOULD_NOT_REFLECT*|*agentk*) printf '%s\n' "tool metadata leaked" >> "$1" ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"tool intent redaction ok"}],"structuredContent":{"ok":true},"isError":false}}'
+      ;;
+    *'"method":"resources/read"'*)
+      case "$line" in
+        *AGENTK_METADATA_INTENT_SHOULD_NOT_REFLECT*|*agentk*) printf '%s\n' "resource metadata leaked" >> "$1" ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"contents":[{"uri":"demo://intent/public","mimeType":"text/plain","text":"resource intent redaction ok"}]}}'
+      ;;
+    *'"method":"prompts/get"'*)
+      case "$line" in
+        *AGENTK_METADATA_INTENT_SHOULD_NOT_REFLECT*|*agentk*) printf '%s\n' "prompt metadata leaked" >> "$1" ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"messages":[{"role":"user","content":{"type":"text","text":"prompt intent redaction ok"}}]}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-intent-redaction-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let resource_uri = "demo://intent/public";
+    let resource_capability = format!(
+        "resource.read:intent-redaction-probe:resource_uri_sha256:{}",
+        hash_json(&resource_uri)
+    );
+    let prompt_name = "intent.prompt";
+    let prompt_capability = format!(
+        "prompt.get:intent-redaction-probe:prompt_name_sha256:{}",
+        hash_json(&prompt_name)
+    );
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "demo.intent",
+                "arguments": {},
+                "agentk": {
+                    "intent": RAW_INTENT,
+                    "labels": ["trusted"],
+                    "capabilities": ["tool.invoke:demo.intent"]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {
+                "uri": resource_uri,
+                "agentk": {
+                    "intent": RAW_INTENT,
+                    "labels": ["trusted"],
+                    "capabilities": [resource_capability]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "prompts/get",
+            "params": {
+                "name": prompt_name,
+                "arguments": {},
+                "agentk": {
+                    "intent": RAW_INTENT,
+                    "labels": ["trusted"],
+                    "capabilities": [prompt_capability]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "intent-redaction-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                INTENT_REDACTION_SCRIPT.to_string(),
+                "agentk-intent-redaction".to_string(),
+                execution_log.display().to_string(),
+            ]),
+    )?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let intent_hash_ref = format!("client_intent_sha256:{}", hash_json(&RAW_INTENT));
+    let event_has_hashed_intent = |kind: SyscallKind| {
+        report.events.iter().any(|event| {
+            event.syscall.kind == kind
+                && event.syscall.intent.contains(&intent_hash_ref)
+                && !event.syscall.intent.contains(RAW_INTENT)
+        })
+    };
+
+    Ok(McpSubprocessProxyIntentRedactionSmokeReport {
+        tool_intent_hashed: event_has_hashed_intent(SyscallKind::ToolInvoke),
+        resource_intent_hashed: event_has_hashed_intent(SyscallKind::ResourceRead),
+        prompt_intent_hashed: event_has_hashed_intent(SyscallKind::PromptGet),
+        metadata_stripped: !execution_log_content.contains("metadata leaked"),
+        raw_intent_not_returned: !report.output.contains(RAW_INTENT),
+        raw_intent_not_logged: !serialized_events.contains(RAW_INTENT),
         event_count: report.events.len(),
     })
 }
@@ -15579,6 +15764,20 @@ done
         assert!(report.raw_metadata_not_returned);
         assert!(report.raw_metadata_not_logged);
         assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_intent_redaction_smoke_hashes_client_intent() {
+        let report = mcp_subprocess_proxy_intent_redaction_smoke()
+            .expect("subprocess proxy intent redaction smoke should run");
+
+        assert!(report.tool_intent_hashed);
+        assert!(report.resource_intent_hashed);
+        assert!(report.prompt_intent_hashed);
+        assert!(report.metadata_stripped);
+        assert!(report.raw_intent_not_returned);
+        assert!(report.raw_intent_not_logged);
+        assert_eq!(report.event_count, 6);
     }
 
     #[test]
