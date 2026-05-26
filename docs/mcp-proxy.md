@@ -120,6 +120,10 @@ downstream server. The metadata supplies local policy context:
 - `labels`
 - `capabilities`
 
+Invalid AgentK-only metadata fails before forwarding. Label parsing errors use
+generic diagnostics so malformed labels cannot reflect raw marker text back to
+the client.
+
 If policy denies the call, AgentK returns an MCP-shaped blocked result and does
 not forward the request to the child process.
 
@@ -173,6 +177,7 @@ The proxy sanitizes these downstream failures:
 - malformed successful `prompts/get` results
 - downstream `prompts/get` error bodies
 - child stderr diagnostics
+- invalid AgentK-only metadata such as unsupported labels
 
 Release-audit includes malformed JSON and mismatched response-id coverage to
 verify that raw downstream response payloads are not reflected to the client or
