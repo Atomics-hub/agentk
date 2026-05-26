@@ -517,6 +517,12 @@ fn replay(path: PathBuf) -> Result<(), AgentKError> {
     println!("events    {}", report.events_replayed);
     println!("blocked   {}", report.blocked);
     println!("stubbed   {}", report.side_effects_stubbed);
+    if !report.blocked_rules.is_empty() {
+        println!("blocked rules");
+        for (rule, count) in &report.blocked_rules {
+            println!("  {rule}: {count}");
+        }
+    }
     for output in &report.stub_outputs {
         println!(
             "stub      #{} {} {} -> {}",
