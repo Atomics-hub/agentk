@@ -148,6 +148,7 @@ Status: in progress.
 - [x] Add local key generation command.
 - [x] Add signature verification CLI output.
 - [x] Add trusted public-key pinning for signature verification.
+- [x] Summarize signature signer fingerprints without printing raw keys.
 - [x] Add a public trusted-signer manifest for verifier pinning.
 - [x] Add signed key rotation manifest.
 - [x] Add key rotation manifest verification.

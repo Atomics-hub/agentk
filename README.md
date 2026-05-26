@@ -67,6 +67,10 @@ Verify receipt and secret-handle signatures:
 cargo run -- verify-signatures .agentk/runs/latest.jsonl
 ```
 
+Signature verification prints redacted signer fingerprints with receipt and
+secret-handle counts, so reviewers can see which signing identities produced
+evidence without printing raw public keys.
+
 Pin verification to an expected public signing key:
 
 ```sh
@@ -320,7 +324,8 @@ This repo currently includes:
 - a redacted secret-reference store availability command,
 - a hash-chained flight recorder,
 - log verification,
-- receipt and secret-handle signature verification with optional trusted-key pinning,
+- receipt and secret-handle signature verification with optional trusted-key
+  pinning and redacted signer summaries,
 - a redacted public trusted-signer manifest for verifier pinning,
 - redacted flight-log inspection for human review,
 - deterministic side-effect-free replay,
@@ -423,7 +428,7 @@ Implemented today:
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
-  signature, signer-pinning, trusted-signer manifest, secret-handle,
+  signature, signer summaries, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
   tool/resource/prompt shape guards, bad-response redaction, response timeouts,
