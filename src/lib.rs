@@ -5440,6 +5440,7 @@ fn mcp_request_into_syscall(request: McpToolRequest) -> (String, Vec<String>, Sy
 pub struct ReplayReport {
     pub events_replayed: u64,
     pub blocked: usize,
+    pub blocked_rules: BTreeMap<String, usize>,
     pub side_effects_stubbed: usize,
     pub stub_outputs: Vec<ReplayStubOutput>,
     pub final_hash: String,
@@ -5537,15 +5538,7 @@ pub fn inspect_events(
                 && is_side_effecting_syscall(&event.syscall.kind)
         })
         .count();
-    let mut blocked_rules = BTreeMap::new();
-    for event in events
-        .iter()
-        .filter(|event| event.decision.verdict == Verdict::Deny)
-    {
-        *blocked_rules
-            .entry(event.decision.rule.clone())
-            .or_insert(0) += 1;
-    }
+    let blocked_rules = blocked_rules_for_events(events);
     let events = events.iter().map(inspect_event_summary).collect::<Vec<_>>();
     let syscall_summary = inspect_syscall_summary(&events);
     let evidence_summary = inspect_evidence_summary(&events);
@@ -5566,6 +5559,19 @@ pub fn inspect_events(
         events,
         signature_failures: signatures.failures,
     })
+}
+
+fn blocked_rules_for_events(events: &[Event]) -> BTreeMap<String, usize> {
+    let mut blocked_rules = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.decision.verdict == Verdict::Deny)
+    {
+        *blocked_rules
+            .entry(event.decision.rule.clone())
+            .or_insert(0) += 1;
+    }
+    blocked_rules
 }
 
 fn inspect_syscall_summary(
@@ -5694,6 +5700,7 @@ pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError>
         .iter()
         .filter(|event| event.decision.verdict == Verdict::Deny)
         .count();
+    let blocked_rules = blocked_rules_for_events(&events);
     let stub_outputs = events
         .iter()
         .filter(|event| {
@@ -5706,6 +5713,7 @@ pub fn replay_jsonl(path: impl AsRef<Path>) -> Result<ReplayReport, AgentKError>
     Ok(ReplayReport {
         events_replayed: verify.events_checked,
         blocked,
+        blocked_rules,
         side_effects_stubbed: stub_outputs.len(),
         stub_outputs,
         final_hash: verify.final_hash,
@@ -6552,6 +6560,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             .stub_outputs
             .iter()
             .all(|output| is_safe_evidence_ref(&output.output_ref));
+    let replay_blocked_rules_ok = replay.blocked_rules.values().sum::<usize>() == replay.blocked
+        && (replay.blocked == 0 || !replay.blocked_rules.is_empty());
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
     let behavior_fork = fork_replay_behavior_jsonl(
         &latest,
@@ -7371,15 +7381,16 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "replay latest",
-            if replay_stub_outputs_ok {
+            if replay_stub_outputs_ok && replay_blocked_rules_ok {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "{} events, {} blocked, {} stubbed, {} stub outputs",
+                "{} events, {} blocked, {} blocked rules, {} stubbed, {} stub outputs",
                 replay.events_replayed,
                 replay.blocked,
+                replay.blocked_rules.len(),
                 replay.side_effects_stubbed,
                 replay.stub_outputs.len()
             ),
@@ -15180,6 +15191,8 @@ done
 
         assert_eq!(replay.events_replayed, 4);
         assert_eq!(replay.blocked, 2);
+        assert_eq!(replay.blocked_rules.get("secret-fd-required"), Some(&1));
+        assert_eq!(replay.blocked_rules.get("taint-sensitive-egress"), Some(&1));
         assert_eq!(replay.side_effects_stubbed, 1);
         assert_eq!(replay.stub_outputs.len(), 1);
         assert_eq!(replay.stub_outputs[0].step, 2);
@@ -15239,6 +15252,7 @@ done
 
         assert_eq!(replay.events_replayed, 3);
         assert_eq!(replay.blocked, 0);
+        assert!(replay.blocked_rules.is_empty());
         assert_eq!(replay.side_effects_stubbed, 3);
         assert_eq!(replay.stub_outputs.len(), 3);
         assert_eq!(replay.stub_outputs[0].syscall, "model.call");

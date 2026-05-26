@@ -375,7 +375,8 @@ Implemented today:
 - trace inspection summaries that group blocked events by policy rule,
 - trace inspection summaries that group boundary events by syscall and evidence
   ref type,
-- deterministic replay that stubs side effects,
+- deterministic replay that stubs side effects and summarizes blocked policy
+  rules,
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
