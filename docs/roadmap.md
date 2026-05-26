@@ -95,6 +95,7 @@ Status: in progress.
 - [x] Accept hyphen-prefixed downstream subprocess MCP command arguments.
 - [x] Validate subprocess MCP proxy config before spawning the child.
 - [x] Add release-audit smoke coverage for subprocess MCP proxy config guards.
+- [x] Add release-audit smoke coverage for invalid AgentK metadata redaction.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Add release-audit smoke coverage for unsupported subprocess MCP no-passthrough.

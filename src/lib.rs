@@ -53,6 +53,18 @@ impl Label {
             Self::PoisonedSuspect => "poisoned-suspect",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "trusted" => Some(Self::Trusted),
+            "untrusted" => Some(Self::Untrusted),
+            "external" => Some(Self::External),
+            "private" => Some(Self::Private),
+            "secret" => Some(Self::Secret),
+            "poisoned-suspect" => Some(Self::PoisonedSuspect),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Label {
@@ -5187,8 +5199,7 @@ fn mcp_proxy_agentk_context_with_default(
         None => default_intent.to_string(),
     };
     let labels = match metadata.get("labels") {
-        Some(value) => serde_json::from_value::<BTreeSet<Label>>(value.clone())
-            .map_err(|error| format!("params.agentk.labels: {error}"))?,
+        Some(value) => json_array_of_labels(value, "params.agentk.labels")?,
         None => labels(&[Label::Trusted]),
     };
     let capabilities = match metadata.get("capabilities") {
@@ -5197,6 +5208,25 @@ fn mcp_proxy_agentk_context_with_default(
     };
 
     Ok((intent, labels, capabilities))
+}
+
+fn json_array_of_labels(value: &serde_json::Value, field: &str) -> Result<BTreeSet<Label>, String> {
+    let Some(items) = value.as_array() else {
+        return Err(format!("{field} must be an array"));
+    };
+
+    let mut labels = BTreeSet::new();
+    for item in items {
+        let Some(item) = item.as_str() else {
+            return Err(format!("{field} items must be strings"));
+        };
+        let Some(label) = Label::from_name(item) else {
+            return Err(format!("{field} contains an unsupported label"));
+        };
+        labels.insert(label);
+    }
+
+    Ok(labels)
 }
 
 fn json_array_of_strings(value: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {
@@ -6500,6 +6530,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_transport_close = mcp_subprocess_proxy_transport_close_smoke()?;
     let mcp_subprocess_proxy_env = mcp_subprocess_proxy_env_smoke()?;
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
+    let mcp_subprocess_proxy_metadata_guard = mcp_subprocess_proxy_metadata_guard_smoke()?;
     let mcp_subprocess_proxy_resource_subscription =
         mcp_subprocess_proxy_resource_subscription_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -7050,6 +7081,30 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                     && mcp_subprocess_proxy_config_guard.spawn_command_not_reflected
                     && mcp_subprocess_proxy_config_guard.unsupported_payload_not_returned
                     && mcp_subprocess_proxy_config_guard.unsupported_payload_not_logged
+            ),
+        ),
+        release_audit_check(
+            "mcp subprocess metadata guard",
+            if mcp_subprocess_proxy_metadata_guard.tool_metadata_rejected
+                && mcp_subprocess_proxy_metadata_guard.resource_metadata_rejected
+                && mcp_subprocess_proxy_metadata_guard.prompt_metadata_rejected
+                && mcp_subprocess_proxy_metadata_guard.invalid_metadata_not_forwarded
+                && mcp_subprocess_proxy_metadata_guard.raw_metadata_not_returned
+                && mcp_subprocess_proxy_metadata_guard.raw_metadata_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "tool {}, resource {}, prompt {}, child clean {}, redacted {}, events {}",
+                mcp_subprocess_proxy_metadata_guard.tool_metadata_rejected,
+                mcp_subprocess_proxy_metadata_guard.resource_metadata_rejected,
+                mcp_subprocess_proxy_metadata_guard.prompt_metadata_rejected,
+                mcp_subprocess_proxy_metadata_guard.invalid_metadata_not_forwarded,
+                mcp_subprocess_proxy_metadata_guard.raw_metadata_not_returned
+                    && mcp_subprocess_proxy_metadata_guard.raw_metadata_not_logged,
+                mcp_subprocess_proxy_metadata_guard.event_count
             ),
         ),
         release_audit_check(
@@ -7626,6 +7681,17 @@ struct McpProxyConfigGuardSmokeReport {
     unsupported_ready_method_not_forwarded: bool,
     unsupported_payload_not_returned: bool,
     unsupported_payload_not_logged: bool,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyMetadataGuardSmokeReport {
+    tool_metadata_rejected: bool,
+    resource_metadata_rejected: bool,
+    prompt_metadata_rejected: bool,
+    invalid_metadata_not_forwarded: bool,
+    raw_metadata_not_returned: bool,
+    raw_metadata_not_logged: bool,
+    event_count: usize,
 }
 
 #[derive(Debug)]
@@ -9021,6 +9087,135 @@ done
             && !unsupported_report.output.contains(RAW_UNSUPPORTED_PAYLOAD),
         unsupported_payload_not_logged: !unsupported_events.contains(RAW_UNSUPPORTED_METHOD)
             && !unsupported_events.contains(RAW_UNSUPPORTED_PAYLOAD),
+    })
+}
+
+fn mcp_subprocess_proxy_metadata_guard_smoke()
+-> Result<McpSubprocessProxyMetadataGuardSmokeReport, AgentKError> {
+    const RAW_METADATA_LABEL: &str = "AGENTK_BAD_METADATA_LABEL_SHOULD_NOT_REFLECT";
+    const METADATA_GUARD_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"resources":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"metadata-guard-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/call"'*|*'"method":"resources/read"'*|*'"method":"prompts/get"'*)
+      printf '%s\n' "invalid metadata forwarded" >> "$1"
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"forwarded":true}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-metadata-guard-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let invalid_metadata = serde_json::json!({
+        "intent": "invalid metadata should fail before forwarding",
+        "labels": [RAW_METADATA_LABEL],
+        "capabilities": [
+            "tool.invoke:demo.metadata",
+            "resource.read:metadata-guard-probe:resource_uri_sha256:unused",
+            "prompt.get:metadata-guard-probe:prompt_name_sha256:unused"
+        ]
+    });
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "demo.metadata",
+                "arguments": {},
+                "agentk": invalid_metadata.clone()
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {
+                "uri": "demo://metadata/private",
+                "agentk": invalid_metadata.clone()
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "prompts/get",
+            "params": {
+                "name": "metadata.prompt",
+                "arguments": {},
+                "agentk": invalid_metadata.clone()
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "metadata-guard-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                METADATA_GUARD_SCRIPT.to_string(),
+                "agentk-metadata-guard".to_string(),
+                execution_log.display().to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let invalid_metadata_rejected = |response: &serde_json::Value, id: i64| {
+        response["id"] == serde_json::json!(id)
+            && response["error"]["code"] == serde_json::json!(-32602)
+            && response["error"]["data"]["detail"]
+                == serde_json::json!("params.agentk.labels contains an unsupported label")
+    };
+
+    Ok(McpSubprocessProxyMetadataGuardSmokeReport {
+        tool_metadata_rejected: responses
+            .get(1)
+            .is_some_and(|response| invalid_metadata_rejected(response, 2)),
+        resource_metadata_rejected: responses
+            .get(2)
+            .is_some_and(|response| invalid_metadata_rejected(response, 3)),
+        prompt_metadata_rejected: responses
+            .get(3)
+            .is_some_and(|response| invalid_metadata_rejected(response, 4)),
+        invalid_metadata_not_forwarded: !execution_log_content
+            .contains("invalid metadata forwarded"),
+        raw_metadata_not_returned: !report.output.contains(RAW_METADATA_LABEL),
+        raw_metadata_not_logged: !serialized_events.contains(RAW_METADATA_LABEL),
+        event_count: report.events.len(),
     })
 }
 
@@ -15370,6 +15565,20 @@ done
         assert!(report.unsupported_ready_method_not_forwarded);
         assert!(report.unsupported_payload_not_returned);
         assert!(report.unsupported_payload_not_logged);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_metadata_guard_smoke_redacts_invalid_agentk_metadata() {
+        let report = mcp_subprocess_proxy_metadata_guard_smoke()
+            .expect("subprocess proxy metadata guard smoke should run");
+
+        assert!(report.tool_metadata_rejected);
+        assert!(report.resource_metadata_rejected);
+        assert!(report.prompt_metadata_rejected);
+        assert!(report.invalid_metadata_not_forwarded);
+        assert!(report.raw_metadata_not_returned);
+        assert!(report.raw_metadata_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
