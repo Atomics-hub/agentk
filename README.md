@@ -105,6 +105,10 @@ Fork-replay the latest flight log against another policy:
 cargo run -- fork-replay .agentk/runs/latest.jsonl --policy examples/policies/research-agent.toml
 ```
 
+Fork replay reports both per-event decision changes and a stable decision
+summary, such as `deny:rule->allow:rule`, so policy drift is visible without
+manual counting.
+
 Fork-replay with changed hashed behavior outputs:
 
 ```sh
@@ -320,7 +324,7 @@ This repo currently includes:
 - a redacted public trusted-signer manifest for verifier pinning,
 - redacted flight-log inspection for human review,
 - deterministic side-effect-free replay,
-- fork replay with policy comparison,
+- fork replay with policy comparison and decision-change summaries,
 - an MCP proxy MVP that mediates `tool.invoke` without execution,
 - MCP descriptor mediation that hashes untrusted tool metadata before model exposure,
 - MCP response recording that hashes raw tool output instead of logging it,
@@ -377,7 +381,7 @@ Implemented today:
   ref type,
 - deterministic replay that stubs side effects and summarizes blocked policy
   rules,
-- fork replay with policy comparison,
+- fork replay with policy comparison and decision-change summaries,
 - MCP-shaped tool mediation without execution,
 - MCP descriptor and response hash evidence without raw descriptor/response logging,
 - conservative MCP tool-output labels for recorded responses,
