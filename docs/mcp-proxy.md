@@ -120,6 +120,11 @@ downstream server. The metadata supplies local policy context:
 - `labels`
 - `capabilities`
 
+Client-provided `intent` text is represented in evidence as a
+`client_intent_sha256` hash instead of raw text. The proxy keeps a method-level
+default intent for human review while avoiding raw request metadata in client
+responses and trace logs.
+
 Invalid AgentK-only metadata fails before forwarding. Label parsing errors use
 generic diagnostics so malformed labels cannot reflect raw marker text back to
 the client.
@@ -178,6 +183,7 @@ The proxy sanitizes these downstream failures:
 - downstream `prompts/get` error bodies
 - child stderr diagnostics
 - invalid AgentK-only metadata such as unsupported labels
+- client-provided AgentK intent text
 
 Release-audit includes malformed JSON and mismatched response-id coverage to
 verify that raw downstream response payloads are not reflected to the client or

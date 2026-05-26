@@ -405,6 +405,8 @@ Implemented today:
   `resources/subscribe` and `resources/unsubscribe`,
 - subprocess MCP invalid AgentK metadata redaction before unsafe requests are
   forwarded,
+- subprocess MCP client intent hashing so AgentK-only metadata does not leak
+  through trace evidence,
 - subprocess MCP response timeout handling for hung downstream servers,
 - subprocess MCP transport-close handling for child exits and broken pipes,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
@@ -420,8 +422,8 @@ Implemented today:
   tool/resource/prompt shape guards, bad-response redaction, response timeouts,
   transport-close checks, mixed interop, public interop transcripts, resource
   subscription no-passthrough, notification-burst/flood checks, config and
-  metadata guards, no-passthrough checks, the MCP shim eval, inspect, and MCP
-  server smoke checks.
+  metadata guards, client-intent redaction, no-passthrough checks, the MCP shim
+  eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 
