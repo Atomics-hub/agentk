@@ -373,6 +373,8 @@ Implemented today:
 - local log verification,
 - redacted flight-log inspection that replaces raw input refs with hash evidence,
 - trace inspection summaries that group blocked events by policy rule,
+- trace inspection summaries that group boundary events by syscall and evidence
+  ref type,
 - deterministic replay that stubs side effects,
 - fork replay with policy comparison,
 - MCP-shaped tool mediation without execution,

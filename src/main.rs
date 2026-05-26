@@ -443,6 +443,21 @@ fn trace_inspect(path: PathBuf, json: bool) -> Result<(), AgentKError> {
             println!("  {rule}: {count}");
         }
     }
+    if !report.syscall_summary.is_empty() {
+        println!("syscall summary");
+        for (syscall, summary) in &report.syscall_summary {
+            println!(
+                "  {:<17} allow {:<3} block {:<3} targets {}",
+                syscall, summary.allowed, summary.blocked, summary.targets
+            );
+        }
+    }
+    if !report.evidence_summary.is_empty() {
+        println!("evidence refs");
+        for (kind, count) in &report.evidence_summary {
+            println!("  {kind}: {count}");
+        }
+    }
     println!();
 
     for event in &report.events {

@@ -124,6 +124,7 @@ Status: in progress.
 - [x] Add redacted flight-log inspect output for human review.
 - [x] Include policy reasons and missing capabilities in trace-inspect summaries.
 - [x] Summarize blocked policy rules in trace-inspect output.
+- [x] Summarize syscall and evidence-ref counts in trace-inspect output.
 - [x] Record stub outputs for model/tool/network syscalls.
 - [x] Fork replay with changed model/tool behavior.
 - [x] Emit divergence reports.

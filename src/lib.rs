@@ -5440,8 +5440,24 @@ pub struct FlightLogInspectReport {
     pub blocked: usize,
     pub side_effects_stubbed: usize,
     pub blocked_rules: BTreeMap<String, usize>,
+    pub syscall_summary: BTreeMap<String, FlightLogSyscallSummary>,
+    pub evidence_summary: BTreeMap<String, usize>,
     pub events: Vec<FlightLogEventSummary>,
     pub signature_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlightLogSyscallSummary {
+    pub allowed: usize,
+    pub blocked: usize,
+    pub targets: usize,
+}
+
+#[derive(Debug, Default)]
+struct FlightLogSyscallSummaryBuilder {
+    allowed: usize,
+    blocked: usize,
+    targets: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -5497,7 +5513,9 @@ pub fn inspect_events(
             .entry(event.decision.rule.clone())
             .or_insert(0) += 1;
     }
-    let events = events.iter().map(inspect_event_summary).collect();
+    let events = events.iter().map(inspect_event_summary).collect::<Vec<_>>();
+    let syscall_summary = inspect_syscall_summary(&events);
+    let evidence_summary = inspect_evidence_summary(&events);
 
     Ok(FlightLogInspectReport {
         path,
@@ -5510,9 +5528,56 @@ pub fn inspect_events(
         blocked,
         side_effects_stubbed,
         blocked_rules,
+        syscall_summary,
+        evidence_summary,
         events,
         signature_failures: signatures.failures,
     })
+}
+
+fn inspect_syscall_summary(
+    events: &[FlightLogEventSummary],
+) -> BTreeMap<String, FlightLogSyscallSummary> {
+    let mut builders = BTreeMap::<String, FlightLogSyscallSummaryBuilder>::new();
+
+    for event in events {
+        let builder = builders.entry(event.syscall.clone()).or_default();
+        match event.verdict {
+            Verdict::Allow => builder.allowed += 1,
+            Verdict::Deny => builder.blocked += 1,
+        }
+        builder.targets.insert(event.target.clone());
+    }
+
+    builders
+        .into_iter()
+        .map(|(syscall, builder)| {
+            (
+                syscall,
+                FlightLogSyscallSummary {
+                    allowed: builder.allowed,
+                    blocked: builder.blocked,
+                    targets: builder.targets.len(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn inspect_evidence_summary(events: &[FlightLogEventSummary]) -> BTreeMap<String, usize> {
+    let mut evidence = BTreeMap::new();
+
+    for event in events {
+        for reference in &event.evidence_refs {
+            let kind = reference
+                .split_once(':')
+                .map(|(kind, _)| kind)
+                .unwrap_or("unknown");
+            *evidence.entry(kind.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    evidence
 }
 
 fn inspect_event_summary(event: &Event) -> FlightLogEventSummary {
@@ -7201,19 +7266,24 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "trace inspect",
-            if inspect.signatures_ok {
+            if inspect.signatures_ok
+                && !inspect.syscall_summary.is_empty()
+                && !inspect.evidence_summary.is_empty()
+            {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "{} events, {} redacted",
+                "{} events, {} redacted, {} syscall kinds, {} evidence kinds",
                 inspect.events_checked,
                 inspect
                     .events
                     .iter()
                     .filter(|event| event.redacted_inputs)
-                    .count()
+                    .count(),
+                inspect.syscall_summary.len(),
+                inspect.evidence_summary.len()
             ),
         ),
         release_audit_check(
@@ -14639,6 +14709,10 @@ done
         assert_eq!(report.allowed, 1);
         assert_eq!(report.blocked, 0);
         assert!(report.signatures_ok);
+        assert_eq!(report.evidence_summary.get("input_sha256"), Some(&1));
+        assert_eq!(report.syscall_summary["tool.invoke"].allowed, 1);
+        assert_eq!(report.syscall_summary["tool.invoke"].blocked, 0);
+        assert_eq!(report.syscall_summary["tool.invoke"].targets, 1);
         assert_eq!(
             report.events[0].reason,
             "tool invocation covered by a scoped receipt"
@@ -14677,6 +14751,9 @@ done
             inspect.events[0].evidence_refs[0],
             format!("response_sha256:{}", report.response_hash)
         );
+        assert_eq!(inspect.evidence_summary.get("response_sha256"), Some(&1));
+        assert_eq!(inspect.syscall_summary["tool.response"].allowed, 1);
+        assert_eq!(inspect.syscall_summary["tool.response"].blocked, 0);
 
         let _ = fs::remove_file(path);
     }
@@ -14710,6 +14787,7 @@ done
             report.events[0].missing_capability.as_deref(),
             Some("tool.invoke:demo.echo")
         );
+        assert_eq!(report.syscall_summary["tool.invoke"].blocked, 1);
 
         let _ = fs::remove_file(path);
     }
@@ -15118,6 +15196,17 @@ done
                 && event.target == "repo.apply_patch"
                 && event.rule == "tool-tainted-input"
         }));
+        assert_eq!(report.inspect.syscall_summary["tool.invoke"].allowed, 1);
+        assert_eq!(report.inspect.syscall_summary["tool.invoke"].blocked, 2);
+        assert_eq!(report.inspect.evidence_summary.get("args_sha256"), Some(&3));
+        assert_eq!(
+            report.inspect.evidence_summary.get("descriptor_sha256"),
+            Some(&3)
+        );
+        assert_eq!(
+            report.inspect.evidence_summary.get("response_sha256"),
+            Some(&1)
+        );
 
         let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
         assert!(!trace.contains("DEMO_PRIVATE_MARKER"));
@@ -15444,6 +15533,13 @@ done
                 .flat_map(|event| event.evidence_refs.iter())
                 .any(|input| input.starts_with("response_sha256:"))
         );
+        assert_eq!(inspect.syscall_summary["tool.describe"].allowed, 2);
+        assert_eq!(inspect.syscall_summary["tool.invoke"].allowed, 1);
+        assert_eq!(inspect.syscall_summary["tool.invoke"].blocked, 1);
+        assert_eq!(inspect.syscall_summary["tool.response"].allowed, 1);
+        assert_eq!(inspect.evidence_summary.get("descriptor_sha256"), Some(&2));
+        assert_eq!(inspect.evidence_summary.get("args_sha256"), Some(&2));
+        assert_eq!(inspect.evidence_summary.get("response_sha256"), Some(&1));
 
         let _ = fs::remove_file(trace_path);
     }
