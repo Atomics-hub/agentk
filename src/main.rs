@@ -544,6 +544,12 @@ fn fork_replay(path: PathBuf, policy: PathBuf, json: bool) -> Result<(), AgentKE
     println!("AgentK fork replay complete");
     println!("events    {}", report.events_replayed);
     println!("changed   {}", report.changed);
+    if !report.decision_summary.is_empty() {
+        println!("decision summary");
+        for (transition, count) in &report.decision_summary {
+            println!("  {transition}: {count}");
+        }
+    }
     for change in report.changes {
         println!(
             "change    #{} {} {}: {}:{} -> {}:{}",

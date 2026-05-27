@@ -131,6 +131,7 @@ Status: in progress.
 - [x] Summarize syscall and evidence-ref counts in trace-inspect output.
 - [x] Record stub outputs for model/tool/network syscalls.
 - [x] Summarize blocked policy rules in deterministic replay output.
+- [x] Summarize decision transitions in fork replay output.
 - [x] Fork replay with changed model/tool behavior.
 - [x] Emit divergence reports.
 

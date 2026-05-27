@@ -130,7 +130,7 @@ Replay modes:
 
 - trace inspect: verify the log and emit a redacted human-review summary,
 - deterministic replay: verify the log and stub model/tool/network side effects with synthetic output refs,
-- fork replay: compare recorded decisions against a different policy.
+- fork replay: compare recorded decisions against a different policy and summarize decision transitions.
 - behavior fork replay: compare recorded stub output refs against changed hashed output refs.
 
 `agentk verify-signatures` verifies receipt and secret-handle signatures. Reviewers can pass one or more `--trusted-public-key` values, or `--trusted-key-manifest examples/trusted-signers.toml`, to pin verification to known release signer identities; mathematically valid signatures from unknown keys then fail review. `agentk trusted-signers-check` validates a trusted-signer manifest and reports only version and key count.
@@ -139,9 +139,11 @@ Replay modes:
 
 `agentk replay` records deterministic `stub_output_sha256` evidence refs for allowed `model.call`, `tool.invoke`, and `network.send` events. Blocked side effects stay blocked, do not get stub outputs, and are summarized by policy rule.
 
+`agentk fork-replay` compares the recorded log against another policy and reports both per-event changes and transition counts such as `deny:rule->allow:rule`. This makes policy drift reviewable without manually counting every changed event.
+
 `agentk fork-replay-behavior` accepts a JSON array of changed hashed output refs and emits a divergence report. Overrides are bound to the recorded step, syscall, and target, and raw output strings are rejected.
 
-`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, signer-pinning and trusted-signer manifest smoke coverage, brokered secret-handle, secret-reference validation, and secret-store availability smoke tests, MCP taint-flow, subprocess MCP boundary, lifecycle-redaction, initialize-guard, tool/resource/prompt shape guards, bad-response redaction, response-timeout, transport-close, mixed-interop, public interop transcript, resource subscription no-passthrough, notification-burst/flood, no-passthrough, config-guard, AgentK metadata-redaction, client-intent hashing, and invalid-client-param smoke tests, redacted inspect, replay blocked-rule summaries, fork replay, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
+`agentk release-audit` packages the local release ritual into one report. It runs readiness, git hygiene checks, formatting, tests, clippy, a fresh demo trace, signature verification, signer-pinning and trusted-signer manifest smoke coverage, brokered secret-handle, secret-reference validation, and secret-store availability smoke tests, MCP taint-flow, subprocess MCP boundary, lifecycle-redaction, initialize-guard, tool/resource/prompt shape guards, bad-response redaction, response-timeout, transport-close, mixed-interop, public interop transcript, resource subscription no-passthrough, notification-burst/flood, no-passthrough, config-guard, AgentK metadata-redaction, client-intent hashing, and invalid-client-param smoke tests, redacted inspect, replay blocked-rule summaries, fork replay decision summaries, behavior fork replay, and an MCP server smoke test. It does not configure remotes or push.
 
 ### MCP Proxy MVP
 

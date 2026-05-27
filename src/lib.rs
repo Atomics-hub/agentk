@@ -5754,6 +5754,7 @@ fn is_side_effecting_syscall(kind: &SyscallKind) -> bool {
 pub struct ForkReplayReport {
     pub events_replayed: u64,
     pub changed: usize,
+    pub decision_summary: BTreeMap<String, usize>,
     pub changes: Vec<ForkReplayChange>,
 }
 
@@ -5823,8 +5824,21 @@ pub fn fork_replay_jsonl(
     Ok(ForkReplayReport {
         events_replayed: events.len() as u64,
         changed: changes.len(),
+        decision_summary: fork_replay_decision_summary(&changes),
         changes,
     })
+}
+
+fn fork_replay_decision_summary(changes: &[ForkReplayChange]) -> BTreeMap<String, usize> {
+    let mut summary = BTreeMap::new();
+    for change in changes {
+        let transition = format!(
+            "{}:{}->{}:{}",
+            change.original_verdict, change.original_rule, change.fork_verdict, change.fork_rule
+        );
+        *summary.entry(transition).or_insert(0) += 1;
+    }
+    summary
 }
 
 pub fn fork_replay_behavior_jsonl(
@@ -6571,6 +6585,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let replay_blocked_rules_ok = replay.blocked_rules.values().sum::<usize>() == replay.blocked
         && (replay.blocked == 0 || !replay.blocked_rules.is_empty());
     let fork = fork_replay_jsonl(&latest, root.join("examples/policies/research-agent.toml"))?;
+    let fork_decision_summary_ok = fork.decision_summary.values().sum::<usize>() == fork.changed;
     let behavior_fork = fork_replay_behavior_jsonl(
         &latest,
         root.join("examples/replay-behavior-overrides.json"),
@@ -7429,14 +7444,16 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "fork replay research policy",
-            if fork.changed == 0 {
+            if fork.changed == 0 && fork_decision_summary_ok {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Warn
             },
             format!(
-                "{} events, {} decision changes",
-                fork.events_replayed, fork.changed
+                "{} events, {} decision changes, {} summary entries",
+                fork.events_replayed,
+                fork.changed,
+                fork.decision_summary.len()
             ),
         ),
         release_audit_check(
@@ -16389,6 +16406,12 @@ effect = "allow""#,
 
         assert_eq!(report.events_replayed, 1);
         assert_eq!(report.changed, 1);
+        assert_eq!(
+            report
+                .decision_summary
+                .get("deny:tool-invoke-capability-missing->allow:tool-invoke-capability-missing"),
+            Some(&1)
+        );
         assert_eq!(report.changes[0].original_verdict, Verdict::Deny);
         assert_eq!(report.changes[0].fork_verdict, Verdict::Allow);
 
