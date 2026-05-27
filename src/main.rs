@@ -1022,6 +1022,79 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
+    fn mcp_proxy_trace_out_test_path(label: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "agentk-mcp-proxy-stdio-{label}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(unix)]
+    fn mcp_proxy_trace_out_probe_server() -> String {
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"trace-out-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"demo.echo","description":"Echo public payloads.","inputSchema":{"type":"object"}}]}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#
+        .to_string()
+    }
+
+    #[cfg(unix)]
+    fn mcp_proxy_trace_out_probe_input() -> &'static str {
+        r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#
+    }
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct FailOnSecondNewlineWriter {
+        bytes: Vec<u8>,
+        newline_count: usize,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for FailOnSecondNewlineWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            for byte in buf {
+                if *byte == b'\n' {
+                    self.newline_count += 1;
+                    if self.newline_count == 2 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "test writer failure after mediated event",
+                        ));
+                    }
+                }
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn mcp_proxy_stdio_accepts_hyphen_prefixed_child_args() {
         let cli = Cli::try_parse_from([
@@ -1045,40 +1118,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mcp_proxy_stdio_trace_out_writes_verifiable_events() {
-        let trace_path = env::temp_dir().join(format!(
-            "agentk-mcp-proxy-stdio-trace-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after epoch")
-                .as_nanos()
-        ));
+        let trace_path = mcp_proxy_trace_out_test_path("trace");
         let _ = fs::remove_file(&trace_path);
 
-        let server = r#"
-while IFS= read -r line; do
-  case "$line" in
-    *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"trace-out-probe","version":"test"}}}'
-      ;;
-    *'"method":"notifications/initialized"'*)
-      ;;
-    *'"method":"tools/list"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"demo.echo","description":"Echo public payloads.","inputSchema":{"type":"object"}}]}}'
-      ;;
-    *)
-      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
-      ;;
-  esac
-done
-"#;
-        let input = r#"
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
-{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-"#;
+        let server = mcp_proxy_trace_out_probe_server();
+        let input = mcp_proxy_trace_out_probe_input();
         let config = McpSubprocessProxyConfig::new("agent://test", "trace-out-probe", "sh")
-            .with_args(["-c".to_string(), server.to_string()]);
+            .with_args(["-c".to_string(), server]);
         let mut output = Vec::new();
 
         mcp_proxy_stdio_with_io(
@@ -1092,6 +1138,38 @@ done
         let responses = String::from_utf8(output).expect("proxy output should be utf8");
         assert!(responses.contains("\"tools\""));
         let verify = verify_jsonl(&trace_path).expect("trace-out should be verifiable");
+        assert_eq!(verify.events_checked, 1);
+
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_proxy_stdio_trace_out_survives_writer_failure_after_event() {
+        let trace_path = mcp_proxy_trace_out_test_path("writer-failure");
+        let _ = fs::remove_file(&trace_path);
+
+        let server = mcp_proxy_trace_out_probe_server();
+        let input = mcp_proxy_trace_out_probe_input();
+        let config = McpSubprocessProxyConfig::new("agent://test", "trace-out-probe", "sh")
+            .with_args(["-c".to_string(), server]);
+        let mut output = FailOnSecondNewlineWriter::default();
+
+        let error = mcp_proxy_stdio_with_io(
+            config,
+            Some(trace_path.clone()),
+            BufReader::new(input.as_bytes()),
+            &mut output,
+        )
+        .expect_err("client writer failure should surface");
+
+        assert!(
+            error
+                .to_string()
+                .contains("test writer failure after mediated event")
+        );
+        assert_eq!(output.newline_count, 2);
+        let verify = verify_jsonl(&trace_path).expect("trace-out should survive writer failure");
         assert_eq!(verify.events_checked, 1);
 
         let _ = fs::remove_file(trace_path);
