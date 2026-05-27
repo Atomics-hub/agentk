@@ -99,6 +99,7 @@ AGENTK_SIGNING_KEY_FILE set  -> file signing key
 unset                        -> static development key
 invalid                      -> readiness failure
 AGENTK_REQUIRE_SIGNING_KEY=1 -> readiness failure unless AGENTK_SIGNING_KEY_HEX or AGENTK_SIGNING_KEY_FILE is valid
+AGENTK_RELEASE_REMOTE_APPROVED=1 -> strict release gate accepts approved git remote
 ```
 
 On Unix, readiness also verifies that an `AGENTK_SIGNING_KEY_FILE` path is owner-only and that its parent directory is not group/other writable, so loose custody permissions block release gates without printing the local path.
