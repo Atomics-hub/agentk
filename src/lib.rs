@@ -6543,6 +6543,8 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-killer-demo-server.sh"),
         check_required_file(&root, "examples/mcp-proxy-poisoned-error-session.jsonl"),
         check_required_file(&root, "examples/mcp-poisoned-error-server.sh"),
+        check_required_file(&root, "examples/mcp-close-session.jsonl"),
+        check_required_file(&root, "examples/mcp-close-server.sh"),
         check_required_file(&root, "examples/mcp-timeout-session.jsonl"),
         check_required_file(&root, "examples/mcp-timeout-server.sh"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
@@ -6678,6 +6680,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
     let mcp_subprocess_proxy_mixed_interop = mcp_subprocess_proxy_mixed_interop_smoke()?;
     let mcp_public_interop_transcript = mcp_public_interop_transcript_smoke(root)?;
+    let mcp_public_close_transcript = mcp_public_close_transcript_smoke(root)?;
     let mcp_public_timeout_transcript = mcp_public_timeout_transcript_smoke(root)?;
     let mcp_subprocess_proxy_pre_ready_notification =
         mcp_subprocess_proxy_pre_ready_notification_smoke()?;
@@ -7469,6 +7472,31 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp public close transcript",
+            if mcp_public_close_transcript.descriptor_mediated
+                && mcp_public_close_transcript.allowed_call_reached_downstream
+                && mcp_public_close_transcript.close_reported
+                && mcp_public_close_transcript.metadata_stripped
+                && mcp_public_close_transcript.raw_argument_not_returned
+                && mcp_public_close_transcript.raw_argument_not_logged
+                && mcp_public_close_transcript.event_count >= 2
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "descriptor {}, call {}, close {}, child clean {}, redacted {}, events {}",
+                mcp_public_close_transcript.descriptor_mediated,
+                mcp_public_close_transcript.allowed_call_reached_downstream,
+                mcp_public_close_transcript.close_reported,
+                mcp_public_close_transcript.metadata_stripped,
+                mcp_public_close_transcript.raw_argument_not_returned
+                    && mcp_public_close_transcript.raw_argument_not_logged,
+                mcp_public_close_transcript.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp public timeout transcript",
             if mcp_public_timeout_transcript.descriptor_mediated
                 && mcp_public_timeout_transcript.allowed_call_reached_downstream
@@ -8046,6 +8074,17 @@ struct McpPublicInteropTranscriptSmokeReport {
     raw_responses_not_logged: bool,
     raw_denied_payloads_not_returned: bool,
     raw_denied_payloads_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpPublicCloseTranscriptSmokeReport {
+    descriptor_mediated: bool,
+    allowed_call_reached_downstream: bool,
+    close_reported: bool,
+    metadata_stripped: bool,
+    raw_argument_not_returned: bool,
+    raw_argument_not_logged: bool,
     event_count: usize,
 }
 
@@ -10699,6 +10738,60 @@ fn mcp_public_interop_transcript_smoke(
             && !report.output.contains(RAW_PATCH_PAYLOAD),
         raw_denied_payloads_not_logged: !serialized_events.contains(RAW_PRIVATE_PAYLOAD)
             && !serialized_events.contains(RAW_PATCH_PAYLOAD),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_public_close_transcript_smoke(
+    root: &Path,
+) -> Result<McpPublicCloseTranscriptSmokeReport, AgentKError> {
+    const RAW_CLOSE_ARGUMENT: &str = "CLOSE_ARGUMENT_SHOULD_NOT_REFLECT";
+
+    let input = fs::read_to_string(root.join("examples/mcp-close-session.jsonl"))?;
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-public-close-transcript-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let config = McpSubprocessProxyConfig::new("agent://release-audit", "close-demo", "sh")
+        .with_args([root
+            .join("examples/mcp-close-server.sh")
+            .display()
+            .to_string()])
+        .with_env(
+            "AGENTK_FAKE_MCP_EXEC_LOG",
+            execution_log.display().to_string(),
+        );
+    let report = mcp_subprocess_proxy_json_lines(&input, config)?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpPublicCloseTranscriptSmokeReport {
+        descriptor_mediated: responses.get(1).is_some_and(|response| {
+            response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
+                && response["result"]["tools"][0]["agentk"]["descriptor_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.len() == 64)
+        }),
+        allowed_call_reached_downstream: execution_log_content.contains("close tool called"),
+        close_reported: responses.get(2).is_some_and(|response| {
+            response["id"] == serde_json::json!(3)
+                && response["error"]["code"] == serde_json::json!(-32003)
+                && response["error"]["message"] == serde_json::json!("Bad downstream response")
+                && response["error"]["data"]["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("closed stdout before responding"))
+        }),
+        metadata_stripped: !execution_log_content.contains("metadata leaked")
+            && !execution_log_content.contains("agentk"),
+        raw_argument_not_returned: !report.output.contains(RAW_CLOSE_ARGUMENT),
+        raw_argument_not_logged: !serialized_events.contains(RAW_CLOSE_ARGUMENT),
         event_count: report.events.len(),
     })
 }
@@ -16637,6 +16730,21 @@ done
         assert!(report.raw_denied_payloads_not_returned);
         assert!(report.raw_denied_payloads_not_logged);
         assert_eq!(report.event_count, 13);
+    }
+
+    #[test]
+    fn release_audit_public_mcp_close_transcript_reports_sanitized_close() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let report = mcp_public_close_transcript_smoke(root)
+            .expect("public MCP close transcript smoke should run");
+
+        assert!(report.descriptor_mediated);
+        assert!(report.allowed_call_reached_downstream);
+        assert!(report.close_reported);
+        assert!(report.metadata_stripped);
+        assert!(report.raw_argument_not_returned);
+        assert!(report.raw_argument_not_logged);
+        assert_eq!(report.event_count, 2);
     }
 
     #[test]
