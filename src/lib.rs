@@ -5931,9 +5931,17 @@ pub struct SignatureVerifyReport {
     pub secret_handles_checked: u64,
     pub public_keys_seen: Vec<String>,
     pub trusted_public_keys: usize,
+    pub signer_summary: BTreeMap<String, SignatureSignerSummary>,
     pub signer_identity_pinned: bool,
     pub ok: bool,
     pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SignatureSignerSummary {
+    pub receipts_checked: u64,
+    pub secret_handles_checked: u64,
+    pub trusted: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -6110,6 +6118,7 @@ pub fn verify_event_signatures_with_trusted_keys(
     let mut receipts_checked = 0_u64;
     let mut secret_handles_checked = 0_u64;
     let mut public_keys_seen = BTreeSet::new();
+    let mut signer_summary = BTreeMap::new();
     let mut failures = Vec::new();
 
     for trusted_key in trusted_public_keys {
@@ -6126,6 +6135,12 @@ pub fn verify_event_signatures_with_trusted_keys(
         if let Some(receipt) = &event.decision.receipt {
             receipts_checked += 1;
             public_keys_seen.insert(receipt.public_key.clone());
+            record_signature_signer_summary(
+                &mut signer_summary,
+                &receipt.public_key,
+                SignatureProofKind::Receipt,
+                &trusted_key_set,
+            );
             failures.extend(validate_trusted_public_key(
                 event.step,
                 "receipt",
@@ -6151,6 +6166,12 @@ pub fn verify_event_signatures_with_trusted_keys(
         if let Some(handle) = &event.decision.secret_handle {
             secret_handles_checked += 1;
             public_keys_seen.insert(handle.public_key.clone());
+            record_signature_signer_summary(
+                &mut signer_summary,
+                &handle.public_key,
+                SignatureProofKind::SecretHandle,
+                &trusted_key_set,
+            );
             failures.extend(validate_trusted_public_key(
                 event.step,
                 "secret handle",
@@ -6183,10 +6204,65 @@ pub fn verify_event_signatures_with_trusted_keys(
         secret_handles_checked,
         public_keys_seen: public_keys_seen.into_iter().collect(),
         trusted_public_keys: trusted_key_set.len(),
+        signer_summary,
         signer_identity_pinned: !trusted_key_set.is_empty(),
         ok: failures.is_empty(),
         failures,
     })
+}
+
+enum SignatureProofKind {
+    Receipt,
+    SecretHandle,
+}
+
+fn record_signature_signer_summary(
+    signer_summary: &mut BTreeMap<String, SignatureSignerSummary>,
+    public_key: &str,
+    proof_kind: SignatureProofKind,
+    trusted_public_keys: &BTreeSet<String>,
+) {
+    let entry = signer_summary
+        .entry(signature_signer_summary_key(public_key))
+        .or_default();
+    match proof_kind {
+        SignatureProofKind::Receipt => entry.receipts_checked += 1,
+        SignatureProofKind::SecretHandle => entry.secret_handles_checked += 1,
+    }
+    if normalized_public_key_hex(public_key)
+        .is_some_and(|public_key| trusted_public_keys.contains(&public_key))
+    {
+        entry.trusted = true;
+    }
+}
+
+fn signature_signer_summary_key(public_key: &str) -> String {
+    let signer_ref = normalized_public_key_hex(public_key)
+        .unwrap_or_else(|| format!("malformed:{}", hash_json(&public_key)));
+    format!("public_key_sha256:{}", hash_json(&signer_ref))
+}
+
+fn signature_signer_summary_matches_report(report: &SignatureVerifyReport) -> bool {
+    let receipts = report
+        .signer_summary
+        .values()
+        .map(|summary| summary.receipts_checked)
+        .sum::<u64>();
+    let secret_handles = report
+        .signer_summary
+        .values()
+        .map(|summary| summary.secret_handles_checked)
+        .sum::<u64>();
+    let prefix = "public_key_sha256:";
+
+    receipts == report.receipts_checked
+        && secret_handles == report.secret_handles_checked
+        && report.signer_summary.len() == report.public_keys_seen.len()
+        && report.signer_summary.keys().all(|key| {
+            key.strip_prefix(prefix).is_some_and(|hash| {
+                hash.len() == 64 && hash.chars().all(|value| value.is_ascii_hexdigit())
+            })
+        })
 }
 
 fn validate_trusted_public_key(
@@ -6536,6 +6612,12 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let signatures = verify_signatures_jsonl(&latest)?;
     let pinned_signatures =
         verify_signatures_jsonl_with_trusted_keys(&latest, &signatures.public_keys_seen)?;
+    let signature_signer_summary_ok = signature_signer_summary_matches_report(&signatures);
+    let pinned_signer_summary_ok = signature_signer_summary_matches_report(&pinned_signatures)
+        && pinned_signatures
+            .signer_summary
+            .values()
+            .all(|summary| summary.trusted);
     let trusted_signers =
         trusted_signing_key_manifest_report_from_path(root.join("examples/trusted-signers.toml"))?;
     let trusted_signer_keys =
@@ -6613,14 +6695,16 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "verify signatures",
-            if signatures.ok {
+            if signatures.ok && signature_signer_summary_ok {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "{} receipts, {} handles",
-                signatures.receipts_checked, signatures.secret_handles_checked
+                "{} receipts, {} handles, {} signer summaries",
+                signatures.receipts_checked,
+                signatures.secret_handles_checked,
+                signatures.signer_summary.len()
             ),
         ),
         release_audit_check(
@@ -6628,15 +6712,17 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             if pinned_signatures.ok
                 && pinned_signatures.signer_identity_pinned
                 && !pinned_signatures.public_keys_seen.is_empty()
+                && pinned_signer_summary_ok
             {
                 ReadinessStatus::Pass
             } else {
                 ReadinessStatus::Fail
             },
             format!(
-                "{} signers, {} trusted",
+                "{} signers, {} trusted, {} summaries",
                 pinned_signatures.public_keys_seen.len(),
-                pinned_signatures.trusted_public_keys
+                pinned_signatures.trusted_public_keys,
+                pinned_signatures.signer_summary.len()
             ),
         ),
         release_audit_check(
@@ -15539,6 +15625,19 @@ done
         assert_eq!(report.secret_handles_checked, 0);
         assert_eq!(report.public_keys_seen.len(), 1);
         assert_eq!(report.trusted_public_keys, 0);
+        assert_eq!(report.signer_summary.len(), 1);
+        let (signer, summary) = report
+            .signer_summary
+            .iter()
+            .next()
+            .expect("signer summary should include the demo signer");
+        assert!(signer.starts_with("public_key_sha256:"));
+        assert_eq!(summary.receipts_checked, 2);
+        assert_eq!(summary.secret_handles_checked, 0);
+        assert!(!summary.trusted);
+        let summary_json =
+            serde_json::to_string(&report.signer_summary).expect("summary should serialize");
+        assert!(!summary_json.contains(&report.public_keys_seen[0]));
         assert!(!report.signer_identity_pinned);
         assert!(report.failures.is_empty());
 
@@ -15559,6 +15658,13 @@ done
         assert!(pinned.ok, "{:?}", pinned.failures);
         assert_eq!(pinned.public_keys_seen, vec![trusted_key]);
         assert_eq!(pinned.trusted_public_keys, 1);
+        assert_eq!(pinned.signer_summary.len(), 1);
+        assert!(
+            pinned
+                .signer_summary
+                .values()
+                .all(|summary| summary.trusted)
+        );
         assert!(pinned.signer_identity_pinned);
 
         let wrong_key = hex::encode(
@@ -15572,6 +15678,12 @@ done
         assert!(!rejected.ok);
         assert_eq!(rejected.trusted_public_keys, 1);
         assert!(rejected.signer_identity_pinned);
+        assert!(
+            rejected
+                .signer_summary
+                .values()
+                .all(|summary| !summary.trusted)
+        );
         assert!(
             rejected
                 .failures

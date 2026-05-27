@@ -392,6 +392,15 @@ fn verify_signatures(
     println!("trusted   {}", report.trusted_public_keys);
     println!("pinned    {}", report.signer_identity_pinned);
     println!("ok        {}", report.ok);
+    if !report.signer_summary.is_empty() {
+        println!("signer summary");
+        for (signer, summary) in &report.signer_summary {
+            println!(
+                "  {signer} receipts {} handles {} trusted {}",
+                summary.receipts_checked, summary.secret_handles_checked, summary.trusted
+            );
+        }
+    }
 
     for failure in &report.failures {
         println!("failure   {failure}");
