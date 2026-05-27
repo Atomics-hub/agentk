@@ -398,6 +398,8 @@ Implemented today:
   prompts, and notifications,
 - public MCP interoperability transcript coverage that blocks poisoned follow-up
   network egress and unsafe patch attempts,
+- subprocess MCP pre-ready notification guards so client notifications cannot
+  bypass lifecycle gating,
 - downstream subprocess MCP notification-burst handling without raw payload
   reflection,
 - downstream subprocess MCP notification-flood bounds without raw payload
@@ -433,10 +435,10 @@ Implemented today:
   subprocess MCP boundaries, lifecycle/list redaction, initialize guards,
   tool/resource/prompt shape guards, bad-response redaction, response timeouts,
   transport-close checks, mixed interop, public interop transcripts, resource
-  subscription no-passthrough, notification-burst/flood checks, config and
-  metadata guards, client-intent redaction, invalid client-parameter guards,
-  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke
-  checks.
+  subscription no-passthrough, pre-ready notification guards,
+  notification-burst/flood checks, config and metadata guards,
+  client-intent redaction, invalid client-parameter guards, no-passthrough
+  checks, the MCP shim eval, inspect, and MCP server smoke checks.
 
 Not implemented yet:
 

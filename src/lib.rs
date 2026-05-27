@@ -6653,6 +6653,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_prompt = mcp_subprocess_proxy_prompt_smoke()?;
     let mcp_subprocess_proxy_mixed_interop = mcp_subprocess_proxy_mixed_interop_smoke()?;
     let mcp_public_interop_transcript = mcp_public_interop_transcript_smoke(root)?;
+    let mcp_subprocess_proxy_pre_ready_notification =
+        mcp_subprocess_proxy_pre_ready_notification_smoke()?;
     let mcp_subprocess_proxy_notification_burst = mcp_subprocess_proxy_notification_burst_smoke()?;
     let mcp_subprocess_proxy_notification_flood = mcp_subprocess_proxy_notification_flood_smoke()?;
     let mcp_subprocess_proxy_prompt_error = mcp_subprocess_proxy_prompt_error_smoke()?;
@@ -7431,6 +7433,26 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess pre-ready notification",
+            if mcp_subprocess_proxy_pre_ready_notification.pre_ready_notification_dropped
+                && mcp_subprocess_proxy_pre_ready_notification.lifecycle_completed
+                && mcp_subprocess_proxy_pre_ready_notification.raw_notification_not_returned
+                && mcp_subprocess_proxy_pre_ready_notification.raw_notification_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "dropped {}, lifecycle {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_pre_ready_notification.pre_ready_notification_dropped,
+                mcp_subprocess_proxy_pre_ready_notification.lifecycle_completed,
+                mcp_subprocess_proxy_pre_ready_notification.raw_notification_not_returned,
+                mcp_subprocess_proxy_pre_ready_notification.raw_notification_not_logged,
+                mcp_subprocess_proxy_pre_ready_notification.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess notification burst",
             if mcp_subprocess_proxy_notification_burst.notification_burst_tolerated
                 && mcp_subprocess_proxy_notification_burst.descriptor_mediated
@@ -7965,6 +7987,15 @@ struct McpPublicInteropTranscriptSmokeReport {
 struct McpNotificationBurstSmokeReport {
     notification_burst_tolerated: bool,
     descriptor_mediated: bool,
+    raw_notification_not_returned: bool,
+    raw_notification_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpPreReadyNotificationSmokeReport {
+    pre_ready_notification_dropped: bool,
+    lifecycle_completed: bool,
     raw_notification_not_returned: bool,
     raw_notification_not_logged: bool,
     event_count: usize,
@@ -10480,6 +10511,113 @@ fn mcp_public_interop_transcript_smoke(
             && !report.output.contains(RAW_PATCH_PAYLOAD),
         raw_denied_payloads_not_logged: !serialized_events.contains(RAW_PRIVATE_PAYLOAD)
             && !serialized_events.contains(RAW_PATCH_PAYLOAD),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_pre_ready_notification_smoke()
+-> Result<McpPreReadyNotificationSmokeReport, AgentKError> {
+    const RAW_NOTIFICATION: &str = "PRE_READY_NOTIFICATION_SHOULD_NOT_REFLECT";
+    const PRE_READY_NOTIFICATION_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *agentk*|*PRE_READY_NOTIFICATION_SHOULD_NOT_REFLECT*) printf '%s\n' "$line" >> "$1" ;;
+  esac
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"pre-ready-notification","version":"test"}}}'
+      ;;
+    *'"method":"notifications/cancelled"'*)
+      printf '%s\n' "pre-ready notification forwarded" >> "$1"
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-pre-ready-notification-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {
+                "requestId": 2,
+                "reason": RAW_NOTIFICATION,
+                "agentk": {
+                    "secret": RAW_NOTIFICATION
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "ping",
+            "params": {}
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "pre-ready-notification", "sh")
+            .with_args([
+                "-c".to_string(),
+                PRE_READY_NOTIFICATION_SCRIPT.to_string(),
+                "agentk-pre-ready-notification".to_string(),
+                execution_log.display().to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let serialized_events = serde_json::to_string(&report.events)?;
+
+    Ok(McpPreReadyNotificationSmokeReport {
+        pre_ready_notification_dropped: !execution_log_content
+            .contains("pre-ready notification forwarded"),
+        lifecycle_completed: responses.len() == 2
+            && responses.first().is_some_and(|response| {
+                response["result"]["serverInfo"]["name"]
+                    == serde_json::json!("pre-ready-notification")
+            })
+            && responses.get(1).is_some_and(|response| {
+                response["id"] == serde_json::json!(2)
+                    && response["result"] == serde_json::json!({})
+            }),
+        raw_notification_not_returned: !report.output.contains(RAW_NOTIFICATION),
+        raw_notification_not_logged: !execution_log_content.contains(RAW_NOTIFICATION)
+            && !execution_log_content.contains("agentk")
+            && !serialized_events.contains(RAW_NOTIFICATION),
         event_count: report.events.len(),
     })
 }
@@ -16211,6 +16349,18 @@ done
         assert!(report.raw_denied_payloads_not_returned);
         assert!(report.raw_denied_payloads_not_logged);
         assert_eq!(report.event_count, 13);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_pre_ready_notification_smoke_drops_payload() {
+        let report = mcp_subprocess_proxy_pre_ready_notification_smoke()
+            .expect("subprocess proxy pre-ready notification smoke should run");
+
+        assert!(report.pre_ready_notification_dropped);
+        assert!(report.lifecycle_completed);
+        assert!(report.raw_notification_not_returned);
+        assert!(report.raw_notification_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
