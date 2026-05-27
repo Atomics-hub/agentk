@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"demo.close","arguments":{"input_ref":"CLOSE_ARGUMENT_SHOULD_NOT_REFLECT"},"agentk":{"intent":"exercise downstream close after an allowed tool boundary","labels":["trusted"],"capabilities":["tool.invoke:demo.close"]}}}
