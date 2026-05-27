@@ -7059,7 +7059,9 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
         ),
         release_audit_check(
             "mcp subprocess initialize guard",
-            if mcp_subprocess_proxy_initialize_guard.unsupported_protocol_rejected
+            if mcp_subprocess_proxy_initialize_guard.client_protocol_rejected
+                && mcp_subprocess_proxy_initialize_guard.client_initialize_not_forwarded
+                && mcp_subprocess_proxy_initialize_guard.unsupported_protocol_rejected
                 && mcp_subprocess_proxy_initialize_guard.session_not_ready
                 && mcp_subprocess_proxy_initialize_guard.raw_protocol_not_returned
                 && mcp_subprocess_proxy_initialize_guard.raw_protocol_not_logged
@@ -7069,8 +7071,10 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "protocol rejected {}, session ready blocked {}, returned redacted {}, evidence redacted {}, events {}",
+                "client protocol {}, downstream protocol {}, child clean {}, session ready blocked {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_initialize_guard.client_protocol_rejected,
                 mcp_subprocess_proxy_initialize_guard.unsupported_protocol_rejected,
+                mcp_subprocess_proxy_initialize_guard.client_initialize_not_forwarded,
                 mcp_subprocess_proxy_initialize_guard.session_not_ready,
                 mcp_subprocess_proxy_initialize_guard.raw_protocol_not_returned,
                 mcp_subprocess_proxy_initialize_guard.raw_protocol_not_logged,
@@ -7832,6 +7836,8 @@ struct McpSubprocessProxyLifecycleErrorSmokeReport {
 
 #[derive(Debug)]
 struct McpSubprocessProxyInitializeGuardSmokeReport {
+    client_protocol_rejected: bool,
+    client_initialize_not_forwarded: bool,
     unsupported_protocol_rejected: bool,
     session_not_ready: bool,
     raw_protocol_not_returned: bool,
@@ -8570,7 +8576,21 @@ done
 
 fn mcp_subprocess_proxy_initialize_guard_smoke()
 -> Result<McpSubprocessProxyInitializeGuardSmokeReport, AgentKError> {
+    const RAW_CLIENT_PROTOCOL: &str = "UNSUPPORTED_CLIENT_VERSION_SHOULD_NOT_REFLECT";
     const RAW_DOWNSTREAM_PROTOCOL: &str = "UNSUPPORTED_DOWNSTREAM_VERSION_SHOULD_NOT_REFLECT";
+    const CLIENT_INIT_GUARD_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' "client initialize forwarded" >> "$1"
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"client-init-guard","version":"test"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
     const INIT_GUARD_SCRIPT: &str = r#"
 while IFS= read -r line; do
   case "$line" in
@@ -8588,13 +8608,55 @@ while IFS= read -r line; do
   esac
 done
 "#;
-    let input = r#"
+    let client_execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-client-init-guard-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let client_input = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": RAW_CLIENT_PROTOCOL
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })
+    );
+    let client_report = mcp_subprocess_proxy_json_lines(
+        &client_input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "client-init-guard", "sh")
+            .with_args([
+                "-c".to_string(),
+                CLIENT_INIT_GUARD_SCRIPT.to_string(),
+                "agentk-client-init-guard".to_string(),
+                client_execution_log.display().to_string(),
+            ]),
+    )?;
+    let client_responses = client_report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let client_execution_log_content =
+        fs::read_to_string(&client_execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&client_execution_log);
+    let serialized_client_events = serde_json::to_string(&client_report.events)?;
+
+    let downstream_input = r#"
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
 {"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 "#;
-    let report = mcp_subprocess_proxy_json_lines(
-        input,
+    let downstream_report = mcp_subprocess_proxy_json_lines(
+        downstream_input,
         McpSubprocessProxyConfig::new("agent://release-audit", "unsupported-init", "sh").with_args(
             [
                 "-c".to_string(),
@@ -8603,15 +8665,26 @@ done
             ],
         ),
     )?;
-    let responses = report
+    let downstream_responses = downstream_report
         .output
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
-    let serialized_events = serde_json::to_string(&report.events)?;
+    let serialized_downstream_events = serde_json::to_string(&downstream_report.events)?;
 
     Ok(McpSubprocessProxyInitializeGuardSmokeReport {
-        unsupported_protocol_rejected: responses.first().is_some_and(|response| {
+        client_protocol_rejected: client_responses.first().is_some_and(|response| {
+            response["id"] == serde_json::json!(1)
+                && response["error"]["code"] == serde_json::json!(-32602)
+                && response["error"]["message"] == serde_json::json!("Invalid params")
+                && response["error"]["data"]["detail"]
+                    == serde_json::json!(format!(
+                        "params.protocolVersion must be {MCP_PROTOCOL_VERSION}"
+                    ))
+        }),
+        client_initialize_not_forwarded: !client_execution_log_content
+            .contains("client initialize forwarded"),
+        unsupported_protocol_rejected: downstream_responses.first().is_some_and(|response| {
             response["id"] == serde_json::json!(1)
                 && response["error"]["code"] == serde_json::json!(-32003)
                 && response["error"]["message"] == serde_json::json!("Bad downstream response")
@@ -8620,14 +8693,21 @@ done
                         "downstream MCP initialize protocolVersion must be {MCP_PROTOCOL_VERSION}"
                     ))
         }),
-        session_not_ready: responses.get(1).is_some_and(|response| {
+        session_not_ready: client_responses.get(1).is_some_and(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["error"]["code"] == serde_json::json!(-32002)
+                && response["error"]["message"] == serde_json::json!("Server not initialized")
+        }) && downstream_responses.get(1).is_some_and(|response| {
             response["id"] == serde_json::json!(2)
                 && response["error"]["code"] == serde_json::json!(-32002)
                 && response["error"]["message"] == serde_json::json!("Server not initialized")
         }),
-        raw_protocol_not_returned: !report.output.contains(RAW_DOWNSTREAM_PROTOCOL),
-        raw_protocol_not_logged: !serialized_events.contains(RAW_DOWNSTREAM_PROTOCOL),
-        event_count: report.events.len(),
+        raw_protocol_not_returned: !client_report.output.contains(RAW_CLIENT_PROTOCOL)
+            && !downstream_report.output.contains(RAW_DOWNSTREAM_PROTOCOL),
+        raw_protocol_not_logged: !client_execution_log_content.contains(RAW_CLIENT_PROTOCOL)
+            && !serialized_client_events.contains(RAW_CLIENT_PROTOCOL)
+            && !serialized_downstream_events.contains(RAW_DOWNSTREAM_PROTOCOL),
+        event_count: client_report.events.len() + downstream_report.events.len(),
     })
 }
 
@@ -16230,10 +16310,12 @@ done
     }
 
     #[test]
-    fn release_audit_subprocess_mcp_proxy_initialize_guard_smoke_rejects_bad_downstream_protocol() {
+    fn release_audit_subprocess_mcp_proxy_initialize_guard_smoke_rejects_bad_protocols() {
         let report = mcp_subprocess_proxy_initialize_guard_smoke()
             .expect("subprocess proxy initialize guard smoke should run");
 
+        assert!(report.client_protocol_rejected);
+        assert!(report.client_initialize_not_forwarded);
         assert!(report.unsupported_protocol_rejected);
         assert!(report.session_not_ready);
         assert!(report.raw_protocol_not_returned);
