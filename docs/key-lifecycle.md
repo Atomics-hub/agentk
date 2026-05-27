@@ -42,7 +42,10 @@ release evidence.
 Release gates must require a configured signer:
 
 ```sh
-AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-release-signing-key cargo run --locked -- release-audit --strict
+AGENTK_REQUIRE_SIGNING_KEY=1 \
+AGENTK_RELEASE_REMOTE_APPROVED=1 \
+AGENTK_SIGNING_KEY_FILE=../agentk-release-signing-key \
+cargo run --locked -- release-audit --strict
 ```
 
 The static development signer is acceptable only for demos and CI smoke checks.

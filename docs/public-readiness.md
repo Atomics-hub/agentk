@@ -5,7 +5,9 @@ keep the same checks in CI and protect the default branch.
 
 ## Pre-Public Repository Hygiene
 
-- [ ] No git remote configured.
+- [ ] No git remote configured before first public push, or
+      `AGENTK_RELEASE_REMOTE_APPROVED=1` is set only after explicit release
+      approval and branch-protection review.
 - [ ] No generated `.agentk/` logs tracked.
 - [ ] No local paths, usernames, real URLs, or private traces in docs/tests.
 - [ ] No API keys, tokens, certs, private keys, or `.env` files.
@@ -82,7 +84,10 @@ Before first public push:
 ```txt
 git remote -v
 git status --short
-AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-signing-key cargo run -- release-audit --strict
+AGENTK_REQUIRE_SIGNING_KEY=1 \
+AGENTK_RELEASE_REMOTE_APPROVED=1 \
+AGENTK_SIGNING_KEY_FILE=../agentk-signing-key \
+cargo run -- release-audit --strict
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features

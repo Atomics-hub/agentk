@@ -180,6 +180,7 @@ Status: in progress.
 - [x] Protect the default branch with the CI `audit` check.
 - [x] Add contributor guidelines for security-sensitive changes.
 - [x] Add a signed release checklist for tagged versions.
+- [x] Add an explicit remote-approval signal for strict release gates.
 
 ## Milestone 6: v0.1 Release Shape
 

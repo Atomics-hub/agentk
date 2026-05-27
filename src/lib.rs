@@ -30,6 +30,7 @@ const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
 pub const REQUIRE_SIGNING_KEY_ENV: &str = "AGENTK_REQUIRE_SIGNING_KEY";
+pub const RELEASE_REMOTE_APPROVED_ENV: &str = "AGENTK_RELEASE_REMOTE_APPROVED";
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -11463,15 +11464,7 @@ fn check_git_remote(root: &Path) -> ReadinessCheck {
     {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                readiness_check("git remote", ReadinessStatus::Pass, "no remotes configured")
-            } else {
-                readiness_check(
-                    "git remote",
-                    ReadinessStatus::Warn,
-                    "remote configured; verify release approval and branch protection",
-                )
-            }
+            check_git_remote_output(&stdout, release_remote_approved())
         }
         Ok(output) => readiness_check(
             "git remote",
@@ -11483,6 +11476,32 @@ fn check_git_remote(root: &Path) -> ReadinessCheck {
             ReadinessStatus::Warn,
             format!("could not run git: {error}"),
         ),
+    }
+}
+
+fn release_remote_approved() -> bool {
+    env_flag_enabled(env::var(RELEASE_REMOTE_APPROVED_ENV).ok().as_deref())
+}
+
+fn check_git_remote_output(stdout: &str, release_remote_approved: bool) -> ReadinessCheck {
+    if stdout.trim().is_empty() {
+        readiness_check("git remote", ReadinessStatus::Pass, "no remotes configured")
+    } else if release_remote_approved {
+        readiness_check(
+            "git remote",
+            ReadinessStatus::Pass,
+            format!(
+                "remote configured with explicit release approval via {RELEASE_REMOTE_APPROVED_ENV}; verify branch protection"
+            ),
+        )
+    } else {
+        readiness_check(
+            "git remote",
+            ReadinessStatus::Warn,
+            format!(
+                "remote configured; set {RELEASE_REMOTE_APPROVED_ENV}=1 only after release approval and branch protection review"
+            ),
+        )
     }
 }
 
@@ -17178,6 +17197,25 @@ done
         for value in [None, Some(""), Some("0"), Some("false"), Some("off")] {
             assert!(!env_flag_enabled(value), "{value:?}");
         }
+    }
+
+    #[test]
+    fn git_remote_warning_requires_explicit_release_approval() {
+        let no_remote = check_git_remote_output("", false);
+        assert_eq!(no_remote.status, ReadinessStatus::Pass);
+
+        let configured_remote = "origin\thttps://github.com/Atomics-hub/agentk.git (fetch)\n";
+        let without_approval = check_git_remote_output(configured_remote, false);
+        assert_eq!(without_approval.status, ReadinessStatus::Warn);
+        assert!(
+            without_approval
+                .detail
+                .contains(RELEASE_REMOTE_APPROVED_ENV)
+        );
+
+        let with_approval = check_git_remote_output(configured_remote, true);
+        assert_eq!(with_approval.status, ReadinessStatus::Pass);
+        assert!(with_approval.detail.contains(RELEASE_REMOTE_APPROVED_ENV));
     }
 
     #[test]

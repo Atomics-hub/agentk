@@ -161,7 +161,10 @@ cargo run -- release-audit
 Run the strict pre-push audit with a configured signing key file:
 
 ```sh
-AGENTK_REQUIRE_SIGNING_KEY=1 AGENTK_SIGNING_KEY_FILE=../agentk-signing-key cargo run -- release-audit --strict
+AGENTK_REQUIRE_SIGNING_KEY=1 \
+AGENTK_RELEASE_REMOTE_APPROVED=1 \
+AGENTK_SIGNING_KEY_FILE=../agentk-signing-key \
+cargo run -- release-audit --strict
 ```
 
 Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md),
@@ -452,7 +455,7 @@ Not implemented yet:
 - real sandboxing,
 - eBPF/cgroup enforcement.
 
-By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_FILE` to a private key file created by `agentk keygen`, or set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. On Unix, readiness also fails if the configured key file is readable by group/other users or if its parent directory is group/other writable. The CLI only prints the public key.
+By default AgentK signs evidence with a static development key. Set `AGENTK_SIGNING_KEY_FILE` to a private key file created by `agentk keygen`, or set `AGENTK_SIGNING_KEY_HEX` to a 32-byte hex Ed25519 signing key for non-demo runs. Set `AGENTK_REQUIRE_SIGNING_KEY=1` in release gates to fail readiness if the configured signer falls back to the development key. Set `AGENTK_RELEASE_REMOTE_APPROVED=1` only after release approval and branch-protection review so strict release gates can pass with the approved public remote configured. On Unix, readiness also fails if the configured key file is readable by group/other users or if its parent directory is group/other writable. The CLI only prints the public key.
 
 See [SECURITY.md](SECURITY.md), [docs/threat-model.md](docs/threat-model.md), [docs/key-lifecycle.md](docs/key-lifecycle.md), [docs/mcp-proxy.md](docs/mcp-proxy.md), and [docs/public-readiness.md](docs/public-readiness.md).
 
