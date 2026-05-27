@@ -421,6 +421,7 @@ Implemented today:
   through trace evidence,
 - subprocess MCP invalid client-parameter guards before empty identifiers can
   reach downstream servers,
+- compact denial summaries on blocked MCP tool, resource, and prompt responses,
 - subprocess MCP response timeout handling for hung downstream servers,
 - subprocess MCP transport-close handling for child exits and broken pipes,
 - a runnable MCP killer demo that blocks poisoned-output exfiltration and
@@ -437,8 +438,9 @@ Implemented today:
   transport-close checks, mixed interop, public interop transcripts, resource
   subscription no-passthrough, pre-ready notification guards,
   notification-burst/flood checks, config and metadata guards,
-  client-intent redaction, invalid client-parameter guards, no-passthrough
-  checks, the MCP shim eval, inspect, and MCP server smoke checks.
+  client-intent redaction, invalid client-parameter guards, denial summaries,
+  no-passthrough checks, the MCP shim eval, inspect, and MCP server smoke
+  checks.
 
 Not implemented yet:
 

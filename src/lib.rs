@@ -4305,10 +4305,23 @@ fn jsonrpc_downstream_tool_error(
     )
 }
 
+fn agentk_denial_summary(event: &Event) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": event.decision.verdict,
+        "rule": &event.decision.rule,
+        "reason": &event.decision.reason,
+        "missing_capability": event.decision.missing_capability.as_deref(),
+        "syscall": event.syscall.kind.to_string(),
+        "target": &event.syscall.target,
+    })
+}
+
 fn jsonrpc_agentk_blocked_resource_read(
     id: serde_json::Value,
     report: McpResourceReadReport,
 ) -> serde_json::Value {
+    let denial = agentk_denial_summary(&report.event);
+
     jsonrpc_error(
         id,
         -32006,
@@ -4320,6 +4333,7 @@ fn jsonrpc_agentk_blocked_resource_read(
                 "mediated": true,
                 "downstream_forwarded": false,
                 "server_executed": false,
+                "denial": denial,
                 "read": report
             }
         })),
@@ -4347,6 +4361,8 @@ fn jsonrpc_agentk_blocked_prompt_get(
     id: serde_json::Value,
     report: McpPromptGetReport,
 ) -> serde_json::Value {
+    let denial = agentk_denial_summary(&report.event);
+
     jsonrpc_error(
         id,
         -32009,
@@ -4358,6 +4374,7 @@ fn jsonrpc_agentk_blocked_prompt_get(
                 "mediated": true,
                 "downstream_forwarded": false,
                 "server_executed": false,
+                "denial": denial,
                 "get": report
             }
         })),
@@ -4867,15 +4884,18 @@ fn subprocess_mcp_proxy_prompts_list_response(
 fn subprocess_mcp_proxy_blocked_tool_result(report: McpProxyReport) -> serde_json::Value {
     let target = report.event.syscall.target.clone();
     let rule = report.event.decision.rule.clone();
+    let reason = report.event.decision.reason.clone();
+    let denial = agentk_denial_summary(&report.event);
 
     serde_json::json!({
         "content": [
             {
                 "type": "text",
-                "text": format!("AgentK blocked tool.invoke:{target} via {rule}")
+                "text": format!("AgentK blocked tool.invoke:{target} via {rule}: {reason}")
             }
         ],
         "structuredContent": {
+            "denial": denial,
             "invoke": report,
             "downstream_forwarded": false,
             "server_executed": false
@@ -5263,15 +5283,18 @@ fn in_memory_mcp_proxy_blocked_tool_result(
 ) -> serde_json::Value {
     let target = report.invoke.event.syscall.target.clone();
     let rule = report.invoke.event.decision.rule.clone();
+    let reason = report.invoke.event.decision.reason.clone();
+    let denial = agentk_denial_summary(&report.invoke.event);
 
     serde_json::json!({
         "content": [
             {
                 "type": "text",
-                "text": format!("AgentK blocked tool.invoke:{target} via {rule}")
+                "text": format!("AgentK blocked tool.invoke:{target} via {rule}: {reason}")
             }
         ],
         "structuredContent": {
+            "denial": denial,
             "invoke": report.invoke,
             "response_record": report.response_record,
             "server_executed": report.server_executed
@@ -6907,6 +6930,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_subprocess_proxy.allowed_forwarded
                 && mcp_subprocess_proxy.response_recorded
                 && mcp_subprocess_proxy.denied_blocked
+                && mcp_subprocess_proxy.denial_summary_visible
                 && mcp_subprocess_proxy.denied_not_forwarded
                 && mcp_subprocess_proxy.metadata_stripped
                 && mcp_subprocess_proxy.raw_descriptor_not_logged
@@ -6917,11 +6941,12 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "descriptor {}, allowed {}, response {}, denied {}, child clean {}, redacted {}, events {}",
+                "descriptor {}, allowed {}, response {}, denied {}, summary {}, child clean {}, redacted {}, events {}",
                 mcp_subprocess_proxy.descriptor_mediated,
                 mcp_subprocess_proxy.allowed_forwarded,
                 mcp_subprocess_proxy.response_recorded,
                 mcp_subprocess_proxy.denied_blocked,
+                mcp_subprocess_proxy.denial_summary_visible,
                 mcp_subprocess_proxy.denied_not_forwarded && mcp_subprocess_proxy.metadata_stripped,
                 mcp_subprocess_proxy.raw_descriptor_not_logged
                     && mcp_subprocess_proxy.raw_response_not_logged,
@@ -7308,6 +7333,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_subprocess_proxy_resource.allowed_forwarded
                 && mcp_subprocess_proxy_resource.response_recorded
                 && mcp_subprocess_proxy_resource.denied_blocked
+                && mcp_subprocess_proxy_resource.denial_summary_visible
                 && mcp_subprocess_proxy_resource.denied_not_forwarded
                 && mcp_subprocess_proxy_resource.metadata_stripped
                 && mcp_subprocess_proxy_resource.raw_descriptor_not_logged
@@ -7319,11 +7345,12 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "descriptor {}, allowed {}, response {}, denied {}, child clean {}, redacted {}, events {}",
+                "descriptor {}, allowed {}, response {}, denied {}, summary {}, child clean {}, redacted {}, events {}",
                 mcp_subprocess_proxy_resource.resource_descriptor_mediated,
                 mcp_subprocess_proxy_resource.allowed_forwarded,
                 mcp_subprocess_proxy_resource.response_recorded,
                 mcp_subprocess_proxy_resource.denied_blocked,
+                mcp_subprocess_proxy_resource.denial_summary_visible,
                 mcp_subprocess_proxy_resource.denied_not_forwarded
                     && mcp_subprocess_proxy_resource.metadata_stripped,
                 mcp_subprocess_proxy_resource.raw_descriptor_not_logged
@@ -7338,6 +7365,7 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 && mcp_subprocess_proxy_prompt.allowed_forwarded
                 && mcp_subprocess_proxy_prompt.response_recorded
                 && mcp_subprocess_proxy_prompt.denied_blocked
+                && mcp_subprocess_proxy_prompt.denial_summary_visible
                 && mcp_subprocess_proxy_prompt.denied_not_forwarded
                 && mcp_subprocess_proxy_prompt.metadata_stripped
                 && mcp_subprocess_proxy_prompt.raw_descriptor_not_logged
@@ -7349,11 +7377,12 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "descriptor {}, allowed {}, response {}, denied {}, child clean {}, redacted {}, events {}",
+                "descriptor {}, allowed {}, response {}, denied {}, summary {}, child clean {}, redacted {}, events {}",
                 mcp_subprocess_proxy_prompt.prompt_descriptor_mediated,
                 mcp_subprocess_proxy_prompt.allowed_forwarded,
                 mcp_subprocess_proxy_prompt.response_recorded,
                 mcp_subprocess_proxy_prompt.denied_blocked,
+                mcp_subprocess_proxy_prompt.denial_summary_visible,
                 mcp_subprocess_proxy_prompt.denied_not_forwarded
                     && mcp_subprocess_proxy_prompt.metadata_stripped,
                 mcp_subprocess_proxy_prompt.raw_descriptor_not_logged
@@ -7762,6 +7791,7 @@ struct McpSubprocessProxySmokeReport {
     allowed_forwarded: bool,
     response_recorded: bool,
     denied_blocked: bool,
+    denial_summary_visible: bool,
     denied_not_forwarded: bool,
     metadata_stripped: bool,
     raw_descriptor_not_logged: bool,
@@ -7928,6 +7958,7 @@ struct McpResourceSmokeReport {
     allowed_forwarded: bool,
     response_recorded: bool,
     denied_blocked: bool,
+    denial_summary_visible: bool,
     denied_not_forwarded: bool,
     metadata_stripped: bool,
     raw_descriptor_not_logged: bool,
@@ -7942,6 +7973,7 @@ struct McpPromptSmokeReport {
     allowed_forwarded: bool,
     response_recorded: bool,
     denied_blocked: bool,
+    denial_summary_visible: bool,
     denied_not_forwarded: bool,
     metadata_stripped: bool,
     raw_descriptor_not_logged: bool,
@@ -8253,6 +8285,19 @@ fn mcp_subprocess_proxy_smoke(root: &Path) -> Result<McpSubprocessProxySmokeRepo
                     == serde_json::json!(false)
                 && response["result"]["structuredContent"]["invoke"]["event"]["decision"]["rule"]
                     == serde_json::json!("tool-tainted-input")
+        }),
+        denial_summary_visible: responses.get(3).is_some_and(|response| {
+            response["result"]["structuredContent"]["denial"]["verdict"]
+                == serde_json::json!("deny")
+                && response["result"]["structuredContent"]["denial"]["rule"]
+                    == serde_json::json!("tool-tainted-input")
+                && response["result"]["structuredContent"]["denial"]["syscall"]
+                    == serde_json::json!("tool.invoke")
+                && response["result"]["structuredContent"]["denial"]["target"]
+                    == serde_json::json!("demo.sink")
+                && response["result"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("via tool-tainted-input:"))
         }),
         denied_not_forwarded: !execution_log_content.contains("denied sink executed"),
         metadata_stripped: !execution_log_content.contains("metadata leaked"),
@@ -9983,6 +10028,18 @@ done
                 && response["error"]["data"]["agentk"]["read"]["event"]["decision"]["rule"]
                     == serde_json::json!("resource-read-capability-missing")
         }),
+        denial_summary_visible: responses.get(3).is_some_and(|response| {
+            response["error"]["data"]["agentk"]["denial"]["verdict"] == serde_json::json!("deny")
+                && response["error"]["data"]["agentk"]["denial"]["rule"]
+                    == serde_json::json!("resource-read-capability-missing")
+                && response["error"]["data"]["agentk"]["denial"]["missing_capability"]
+                    .as_str()
+                    .is_some_and(|capability| {
+                        capability.starts_with("resource.read:resource-probe:resource_uri_sha256:")
+                    })
+                && response["error"]["data"]["agentk"]["denial"]["syscall"]
+                    == serde_json::json!("resource.read")
+        }),
         denied_not_forwarded: !execution_log_content.contains("denied resource read executed"),
         metadata_stripped: !execution_log_content.contains("resource metadata leaked"),
         raw_descriptor_not_logged: !serialized_events.contains(RAW_RESOURCE_DESCRIPTOR),
@@ -10133,6 +10190,18 @@ done
                     == serde_json::json!(false)
                 && response["error"]["data"]["agentk"]["get"]["event"]["decision"]["rule"]
                     == serde_json::json!("prompt-get-capability-missing")
+        }),
+        denial_summary_visible: responses.get(3).is_some_and(|response| {
+            response["error"]["data"]["agentk"]["denial"]["verdict"] == serde_json::json!("deny")
+                && response["error"]["data"]["agentk"]["denial"]["rule"]
+                    == serde_json::json!("prompt-get-capability-missing")
+                && response["error"]["data"]["agentk"]["denial"]["missing_capability"]
+                    .as_str()
+                    .is_some_and(|capability| {
+                        capability.starts_with("prompt.get:prompt-probe:prompt_name_sha256:")
+                    })
+                && response["error"]["data"]["agentk"]["denial"]["syscall"]
+                    == serde_json::json!("prompt.get")
         }),
         denied_not_forwarded: !execution_log_content.contains("denied prompt get executed"),
         metadata_stripped: !execution_log_content.contains("prompt metadata leaked"),
@@ -13901,6 +13970,14 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            responses[3]["result"]["structuredContent"]["denial"]["rule"],
+            "tool-tainted-input"
+        );
+        assert_eq!(
+            responses[3]["result"]["structuredContent"]["denial"]["verdict"],
+            "deny"
+        );
+        assert_eq!(
             responses[3]["result"]["structuredContent"]["invoke"]["event"]["decision"]["rule"],
             "tool-tainted-input"
         );
@@ -14367,6 +14444,14 @@ done
             Some(false)
         );
         assert_eq!(
+            responses[3]["result"]["structuredContent"]["denial"]["rule"],
+            "tool-tainted-input"
+        );
+        assert_eq!(
+            responses[3]["result"]["structuredContent"]["denial"]["verdict"],
+            "deny"
+        );
+        assert_eq!(
             responses[3]["result"]["structuredContent"]["invoke"]["event"]["decision"]["rule"],
             "tool-tainted-input"
         );
@@ -14674,6 +14759,18 @@ done
             "resource-read-capability-missing"
         );
         assert_eq!(
+            responses[1]["error"]["data"]["agentk"]["denial"]["rule"],
+            "resource-read-capability-missing"
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["agentk"]["denial"]["verdict"],
+            "deny"
+        );
+        assert_eq!(
+            responses[1]["error"]["data"]["agentk"]["denial"]["syscall"],
+            "resource.read"
+        );
+        assert_eq!(
             responses[1]["error"]["data"]["agentk"]["downstream_forwarded"].as_bool(),
             Some(false)
         );
@@ -14818,6 +14915,18 @@ done
         assert_eq!(
             responses[3]["error"]["data"]["agentk"]["get"]["event"]["decision"]["rule"],
             "prompt-get-capability-missing"
+        );
+        assert_eq!(
+            responses[3]["error"]["data"]["agentk"]["denial"]["rule"],
+            "prompt-get-capability-missing"
+        );
+        assert_eq!(
+            responses[3]["error"]["data"]["agentk"]["denial"]["verdict"],
+            "deny"
+        );
+        assert_eq!(
+            responses[3]["error"]["data"]["agentk"]["denial"]["syscall"],
+            "prompt.get"
         );
 
         let execution_log_content =
@@ -16002,6 +16111,7 @@ done
         assert!(report.allowed_forwarded);
         assert!(report.response_recorded);
         assert!(report.denied_blocked);
+        assert!(report.denial_summary_visible);
         assert!(report.denied_not_forwarded);
         assert!(report.metadata_stripped);
         assert!(report.raw_descriptor_not_logged);
@@ -16286,6 +16396,7 @@ done
         assert!(report.allowed_forwarded);
         assert!(report.response_recorded);
         assert!(report.denied_blocked);
+        assert!(report.denial_summary_visible);
         assert!(report.denied_not_forwarded);
         assert!(report.metadata_stripped);
         assert!(report.raw_descriptor_not_logged);
@@ -16303,6 +16414,7 @@ done
         assert!(report.allowed_forwarded);
         assert!(report.response_recorded);
         assert!(report.denied_blocked);
+        assert!(report.denial_summary_visible);
         assert!(report.denied_not_forwarded);
         assert!(report.metadata_stripped);
         assert!(report.raw_descriptor_not_logged);
