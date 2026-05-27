@@ -13,7 +13,7 @@ use agentk::{
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{self, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -728,18 +728,37 @@ fn mcp_proxy_stdio(
         config = config.with_env(name, value);
     }
 
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    mcp_proxy_stdio_with_io(
+        config,
+        trace_out,
+        BufReader::new(stdin.lock()),
+        stdout.lock(),
+    )
+}
+
+fn mcp_proxy_stdio_with_io<R, W>(
+    config: McpSubprocessProxyConfig,
+    trace_out: Option<PathBuf>,
+    reader: R,
+    writer: W,
+) -> Result<(), AgentKError>
+where
+    R: BufRead,
+    W: Write,
+{
     if let Some(path) = trace_out {
-        let stdin = io::stdin();
-        let stdout = io::stdout();
         let mut proxy = McpSubprocessProxy::spawn(config)?;
-        proxy.proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock())?;
-        write_events_jsonl(proxy.events(), path)?;
+        let stream_result = proxy.proxy_json_stream(reader, writer);
+        let trace_result = write_events_jsonl(proxy.events(), path);
+
+        stream_result?;
+        trace_result?;
         return Ok(());
     }
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    mcp_subprocess_proxy_json_stream(BufReader::new(stdin.lock()), stdout.lock(), config)
+    mcp_subprocess_proxy_json_stream(reader, writer, config)
 }
 
 fn collect_mcp_proxy_allowed_env<F>(
@@ -1001,6 +1020,7 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn mcp_proxy_stdio_accepts_hyphen_prefixed_child_args() {
@@ -1020,6 +1040,61 @@ mod tests {
             panic!("expected mcp-proxy-stdio command");
         };
         assert_eq!(args, vec!["-c".to_string(), "printf ok".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_proxy_stdio_trace_out_writes_verifiable_events() {
+        let trace_path = env::temp_dir().join(format!(
+            "agentk-mcp-proxy-stdio-trace-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        let _ = fs::remove_file(&trace_path);
+
+        let server = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"trace-out-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"demo.echo","description":"Echo public payloads.","inputSchema":{"type":"object"}}]}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+"#;
+        let config = McpSubprocessProxyConfig::new("agent://test", "trace-out-probe", "sh")
+            .with_args(["-c".to_string(), server.to_string()]);
+        let mut output = Vec::new();
+
+        mcp_proxy_stdio_with_io(
+            config,
+            Some(trace_path.clone()),
+            BufReader::new(input.as_bytes()),
+            &mut output,
+        )
+        .expect("stdio proxy should write trace output");
+
+        let responses = String::from_utf8(output).expect("proxy output should be utf8");
+        assert!(responses.contains("\"tools\""));
+        let verify = verify_jsonl(&trace_path).expect("trace-out should be verifiable");
+        assert_eq!(verify.events_checked, 1);
+
+        let _ = fs::remove_file(trace_path);
     }
 
     #[test]

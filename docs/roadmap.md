@@ -101,6 +101,7 @@ Status: in progress.
       forwarding.
 - [x] Surface compact denial summaries in blocked MCP tool/resource/prompt
       responses.
+- [x] Add CLI coverage for the `mcp-proxy-stdio --trace-out` operator path.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Add release-audit smoke coverage for unsupported subprocess MCP no-passthrough.
