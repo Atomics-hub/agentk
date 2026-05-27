@@ -7,6 +7,11 @@ Pre-tag dry-run notes live in
 [`docs/v0.1-release-dry-run.md`](v0.1-release-dry-run.md). Update that file if
 the checklist is re-run before tagging.
 
+The v0.1 GitHub release body draft lives in
+[`docs/v0.1-release-notes.md`](v0.1-release-notes.md). Do not publish it until
+the final release commit, strict release-audit result, signed tag verification,
+and signer evidence are filled in.
+
 ## Before Tagging
 
 - [ ] All intended changes are merged through protected `master`.
@@ -100,6 +105,7 @@ Open an issue or pull request to establish signing first.
 
 ## GitHub Release
 
+- [ ] `docs/v0.1-release-notes.md` is updated for the final commit and tag.
 - [ ] Release notes list implemented behavior only.
 - [ ] Experimental or planned features are clearly marked.
 - [ ] Known limitations from `SECURITY.md` are linked.
