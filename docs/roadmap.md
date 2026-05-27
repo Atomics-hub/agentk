@@ -99,6 +99,8 @@ Status: in progress.
 - [x] Hash client-provided AgentK intent metadata in subprocess MCP evidence.
 - [x] Reject empty subprocess MCP tool, resource, and prompt identifiers before
       forwarding.
+- [x] Surface compact denial summaries in blocked MCP tool/resource/prompt
+      responses.
 - [x] Add an operator contract for subprocess MCP proxy boundaries.
 - [x] Default-deny unsupported subprocess MCP request methods instead of generic passthrough.
 - [x] Add release-audit smoke coverage for unsupported subprocess MCP no-passthrough.
@@ -133,6 +135,7 @@ Status: in progress.
 - [x] Record stub outputs for model/tool/network syscalls.
 - [x] Summarize blocked policy rules in deterministic replay output.
 - [x] Summarize decision transitions in fork replay output.
+- [x] Surface blocked MCP denial details directly at the response boundary.
 - [x] Fork replay with changed model/tool behavior.
 - [x] Emit divergence reports.
 
