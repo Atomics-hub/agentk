@@ -400,6 +400,8 @@ Implemented today:
   network egress and unsafe patch attempts,
 - subprocess MCP pre-ready notification guards so client notifications cannot
   bypass lifecycle gating,
+- subprocess MCP duplicate-initialized notification guards so lifecycle signals
+  cannot be replayed downstream after readiness,
 - downstream subprocess MCP notification-burst handling without raw payload
   reflection,
 - downstream subprocess MCP notification-flood bounds without raw payload

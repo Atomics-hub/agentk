@@ -2169,7 +2169,7 @@ impl McpSubprocessProxy {
         method: &str,
         message: &serde_json::Value,
     ) -> Result<(), AgentKError> {
-        if method == "notifications/initialized" && self.initialized {
+        if method == "notifications/initialized" && self.initialized && !self.ready {
             self.ready = true;
             let _ = self.send_json_rpc_message(message);
         } else if self.ready && mcp_subprocess_proxy_notification_allowed(method) {
@@ -6684,6 +6684,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_public_timeout_transcript = mcp_public_timeout_transcript_smoke(root)?;
     let mcp_subprocess_proxy_pre_ready_notification =
         mcp_subprocess_proxy_pre_ready_notification_smoke()?;
+    let mcp_subprocess_proxy_duplicate_initialized_notification =
+        mcp_subprocess_proxy_duplicate_initialized_notification_smoke()?;
     let mcp_subprocess_proxy_notification_burst = mcp_subprocess_proxy_notification_burst_smoke()?;
     let mcp_subprocess_proxy_notification_flood = mcp_subprocess_proxy_notification_flood_smoke()?;
     let mcp_subprocess_proxy_prompt_error = mcp_subprocess_proxy_prompt_error_smoke()?;
@@ -7542,6 +7544,33 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess duplicate initialized notification",
+            if mcp_subprocess_proxy_duplicate_initialized_notification.first_initialized_forwarded
+                && mcp_subprocess_proxy_duplicate_initialized_notification
+                    .duplicate_initialized_dropped
+                && mcp_subprocess_proxy_duplicate_initialized_notification.lifecycle_completed
+                && mcp_subprocess_proxy_duplicate_initialized_notification
+                    .raw_notification_not_returned
+                && mcp_subprocess_proxy_duplicate_initialized_notification
+                    .raw_notification_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "first forwarded {}, duplicate dropped {}, lifecycle {}, returned redacted {}, evidence redacted {}, events {}",
+                mcp_subprocess_proxy_duplicate_initialized_notification.first_initialized_forwarded,
+                mcp_subprocess_proxy_duplicate_initialized_notification
+                    .duplicate_initialized_dropped,
+                mcp_subprocess_proxy_duplicate_initialized_notification.lifecycle_completed,
+                mcp_subprocess_proxy_duplicate_initialized_notification
+                    .raw_notification_not_returned,
+                mcp_subprocess_proxy_duplicate_initialized_notification.raw_notification_not_logged,
+                mcp_subprocess_proxy_duplicate_initialized_notification.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp subprocess notification burst",
             if mcp_subprocess_proxy_notification_burst.notification_burst_tolerated
                 && mcp_subprocess_proxy_notification_burst.descriptor_mediated
@@ -8111,6 +8140,16 @@ struct McpNotificationBurstSmokeReport {
 #[derive(Debug)]
 struct McpPreReadyNotificationSmokeReport {
     pre_ready_notification_dropped: bool,
+    lifecycle_completed: bool,
+    raw_notification_not_returned: bool,
+    raw_notification_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpDuplicateInitializedNotificationSmokeReport {
+    first_initialized_forwarded: bool,
+    duplicate_initialized_dropped: bool,
     lifecycle_completed: bool,
     raw_notification_not_returned: bool,
     raw_notification_not_logged: bool,
@@ -10954,6 +10993,122 @@ done
         raw_notification_not_logged: !execution_log_content.contains(RAW_NOTIFICATION)
             && !execution_log_content.contains("agentk")
             && !serialized_events.contains(RAW_NOTIFICATION),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_duplicate_initialized_notification_smoke()
+-> Result<McpDuplicateInitializedNotificationSmokeReport, AgentKError> {
+    const RAW_DUPLICATE_NOTIFICATION: &str = "DUPLICATE_INITIALIZED_SHOULD_NOT_REFLECT";
+    const DUPLICATE_INITIALIZED_NOTIFICATION_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *agentk*|*DUPLICATE_INITIALIZED_SHOULD_NOT_REFLECT*) printf '%s\n' "$line" >> "$1" ;;
+  esac
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"duplicate-initialized-notification","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      case "$line" in
+        *DUPLICATE_INITIALIZED_SHOULD_NOT_REFLECT*) printf '%s\n' "duplicate initialized forwarded" >> "$1" ;;
+        *) printf '%s\n' "initialized forwarded" >> "$1" ;;
+      esac
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-duplicate-initialized-notification-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {
+                "reason": RAW_DUPLICATE_NOTIFICATION,
+                "agentk": {
+                    "secret": RAW_DUPLICATE_NOTIFICATION
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "ping",
+            "params": {}
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new(
+            "agent://release-audit",
+            "duplicate-initialized-notification",
+            "sh",
+        )
+        .with_args([
+            "-c".to_string(),
+            DUPLICATE_INITIALIZED_NOTIFICATION_SCRIPT.to_string(),
+            "agentk-duplicate-initialized-notification".to_string(),
+            execution_log.display().to_string(),
+        ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let serialized_events = serde_json::to_string(&report.events)?;
+    let initialized_forward_count = execution_log_content
+        .lines()
+        .filter(|line| *line == "initialized forwarded")
+        .count();
+
+    Ok(McpDuplicateInitializedNotificationSmokeReport {
+        first_initialized_forwarded: initialized_forward_count == 1,
+        duplicate_initialized_dropped: !execution_log_content
+            .contains("duplicate initialized forwarded"),
+        lifecycle_completed: responses.len() == 2
+            && responses.first().is_some_and(|response| {
+                response["result"]["serverInfo"]["name"]
+                    == serde_json::json!("duplicate-initialized-notification")
+            })
+            && responses.get(1).is_some_and(|response| {
+                response["id"] == serde_json::json!(2)
+                    && response["result"] == serde_json::json!({})
+            }),
+        raw_notification_not_returned: !report.output.contains(RAW_DUPLICATE_NOTIFICATION),
+        raw_notification_not_logged: !execution_log_content.contains(RAW_DUPLICATE_NOTIFICATION)
+            && !execution_log_content.contains("agentk")
+            && !serialized_events.contains(RAW_DUPLICATE_NOTIFICATION),
         event_count: report.events.len(),
     })
 }
@@ -16768,6 +16923,19 @@ done
             .expect("subprocess proxy pre-ready notification smoke should run");
 
         assert!(report.pre_ready_notification_dropped);
+        assert!(report.lifecycle_completed);
+        assert!(report.raw_notification_not_returned);
+        assert!(report.raw_notification_not_logged);
+        assert_eq!(report.event_count, 0);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_duplicate_initialized_notification_smoke_drops_payload() {
+        let report = mcp_subprocess_proxy_duplicate_initialized_notification_smoke()
+            .expect("subprocess proxy duplicate initialized notification smoke should run");
+
+        assert!(report.first_initialized_forwarded);
+        assert!(report.duplicate_initialized_dropped);
         assert!(report.lifecycle_completed);
         assert!(report.raw_notification_not_returned);
         assert!(report.raw_notification_not_logged);

@@ -113,6 +113,7 @@ Status: in progress.
 - [x] Add release-audit smoke coverage for mixed subprocess MCP interoperability.
 - [x] Add public MCP interoperability transcript fixtures backed by release-audit.
 - [x] Add release-audit smoke coverage for pre-ready subprocess MCP notification no-passthrough.
+- [x] Add release-audit smoke coverage for duplicate initialized notification no-passthrough.
 - [x] Add release-audit smoke coverage for downstream notification bursts.
 - [x] Add release-audit smoke coverage for bounded downstream notification floods.
 - [x] Add prompt error redaction and malformed prompt result coverage for the subprocess MCP proxy.
