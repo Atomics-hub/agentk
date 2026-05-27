@@ -2326,6 +2326,9 @@ impl McpSubprocessProxy {
                 Some(serde_json::json!({ "detail": "params.name must be a string" })),
             ));
         };
+        if name.trim().is_empty() {
+            return Ok(jsonrpc_invalid_params(id, "params.name must be non-empty"));
+        }
 
         let arguments = params
             .get("arguments")
@@ -2471,6 +2474,9 @@ impl McpSubprocessProxy {
                 Some(serde_json::json!({ "detail": "params.uri must be a string" })),
             ));
         };
+        if uri.trim().is_empty() {
+            return Ok(jsonrpc_invalid_params(id, "params.uri must be non-empty"));
+        }
         let (intent, labels, capabilities) = match mcp_proxy_agentk_context_with_default(
             params,
             "MCP resources/read through AgentK proxy",
@@ -6543,6 +6549,8 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let mcp_subprocess_proxy_config_guard = mcp_subprocess_proxy_config_guard_smoke()?;
     let mcp_subprocess_proxy_metadata_guard = mcp_subprocess_proxy_metadata_guard_smoke()?;
     let mcp_subprocess_proxy_intent_redaction = mcp_subprocess_proxy_intent_redaction_smoke()?;
+    let mcp_subprocess_proxy_invalid_client_params =
+        mcp_subprocess_proxy_invalid_client_params_smoke()?;
     let mcp_subprocess_proxy_resource_subscription =
         mcp_subprocess_proxy_resource_subscription_smoke()?;
     let mcp_subprocess_proxy_resource = mcp_subprocess_proxy_resource_smoke()?;
@@ -7146,6 +7154,30 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "mcp subprocess invalid client params",
+            if mcp_subprocess_proxy_invalid_client_params.tool_name_rejected
+                && mcp_subprocess_proxy_invalid_client_params.resource_uri_rejected
+                && mcp_subprocess_proxy_invalid_client_params.prompt_name_rejected
+                && mcp_subprocess_proxy_invalid_client_params.invalid_requests_not_forwarded
+                && mcp_subprocess_proxy_invalid_client_params.raw_payload_not_returned
+                && mcp_subprocess_proxy_invalid_client_params.raw_payload_not_logged
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "tool {}, resource {}, prompt {}, child clean {}, redacted {}, events {}",
+                mcp_subprocess_proxy_invalid_client_params.tool_name_rejected,
+                mcp_subprocess_proxy_invalid_client_params.resource_uri_rejected,
+                mcp_subprocess_proxy_invalid_client_params.prompt_name_rejected,
+                mcp_subprocess_proxy_invalid_client_params.invalid_requests_not_forwarded,
+                mcp_subprocess_proxy_invalid_client_params.raw_payload_not_returned
+                    && mcp_subprocess_proxy_invalid_client_params.raw_payload_not_logged,
+                mcp_subprocess_proxy_invalid_client_params.event_count
+            ),
+        ),
+        release_audit_check(
             "mcp resource subscription no-passthrough",
             if mcp_subprocess_proxy_resource_subscription.subscribe_blocked
                 && mcp_subprocess_proxy_resource_subscription.unsubscribe_blocked
@@ -7741,6 +7773,17 @@ struct McpSubprocessProxyIntentRedactionSmokeReport {
     metadata_stripped: bool,
     raw_intent_not_returned: bool,
     raw_intent_not_logged: bool,
+    event_count: usize,
+}
+
+#[derive(Debug)]
+struct McpSubprocessProxyInvalidClientParamsSmokeReport {
+    tool_name_rejected: bool,
+    resource_uri_rejected: bool,
+    prompt_name_rejected: bool,
+    invalid_requests_not_forwarded: bool,
+    raw_payload_not_returned: bool,
+    raw_payload_not_logged: bool,
     event_count: usize,
 }
 
@@ -9411,6 +9454,152 @@ done
         metadata_stripped: !execution_log_content.contains("metadata leaked"),
         raw_intent_not_returned: !report.output.contains(RAW_INTENT),
         raw_intent_not_logged: !serialized_events.contains(RAW_INTENT),
+        event_count: report.events.len(),
+    })
+}
+
+fn mcp_subprocess_proxy_invalid_client_params_smoke()
+-> Result<McpSubprocessProxyInvalidClientParamsSmokeReport, AgentKError> {
+    const RAW_INVALID_PAYLOAD: &str = "INVALID_CLIENT_PARAM_SECRET_SHOULD_NOT_REFLECT";
+    const INVALID_CLIENT_PARAMS_SCRIPT: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"resources":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"invalid-client-param-probe","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"tools/call"'*|*'"method":"resources/read"'*|*'"method":"prompts/get"'*)
+      printf '%s\n' "invalid client params forwarded" >> "$1"
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"forwarded":true}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unknown fake request"}}'
+      ;;
+  esac
+done
+"#;
+
+    let execution_log = env::temp_dir().join(format!(
+        "agentk-subprocess-invalid-client-params-smoke-{}-{}.log",
+        std::process::id(),
+        unix_timestamp()
+    ));
+    let empty_resource_uri = String::new();
+    let resource_capability = format!(
+        "resource.read:invalid-client-param-probe:resource_uri_sha256:{}",
+        hash_json(&empty_resource_uri)
+    );
+    let empty_prompt_name = String::new();
+    let prompt_capability = format!(
+        "prompt.get:invalid-client-param-probe:prompt_name_sha256:{}",
+        hash_json(&empty_prompt_name)
+    );
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "",
+                "arguments": {
+                    "secret": RAW_INVALID_PAYLOAD
+                },
+                "agentk": {
+                    "intent": "empty tool name must fail before forwarding",
+                    "labels": ["trusted"],
+                    "capabilities": ["tool.invoke:"]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": {
+                "uri": "",
+                "secret": RAW_INVALID_PAYLOAD,
+                "agentk": {
+                    "intent": "empty resource URI must fail before forwarding",
+                    "labels": ["trusted"],
+                    "capabilities": [resource_capability]
+                }
+            }
+        })
+        .to_string(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "prompts/get",
+            "params": {
+                "name": "",
+                "arguments": {
+                    "secret": RAW_INVALID_PAYLOAD
+                },
+                "agentk": {
+                    "intent": "empty prompt name must fail before forwarding",
+                    "labels": ["trusted"],
+                    "capabilities": [prompt_capability]
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let report = mcp_subprocess_proxy_json_lines(
+        &input,
+        McpSubprocessProxyConfig::new("agent://release-audit", "invalid-client-param-probe", "sh")
+            .with_args([
+                "-c".to_string(),
+                INVALID_CLIENT_PARAMS_SCRIPT.to_string(),
+                "agentk-invalid-client-params".to_string(),
+                execution_log.display().to_string(),
+            ]),
+    )?;
+    let responses = report
+        .output
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serialized_events = serde_json::to_string(&report.events)?;
+    let execution_log_content = fs::read_to_string(&execution_log).unwrap_or_default();
+    let _ = fs::remove_file(&execution_log);
+    let invalid_param_rejected = |response: &serde_json::Value, id: i64, detail: &str| -> bool {
+        response["id"] == serde_json::json!(id)
+            && response["error"]["code"] == serde_json::json!(-32602)
+            && response["error"]["data"]["detail"] == serde_json::json!(detail)
+    };
+
+    Ok(McpSubprocessProxyInvalidClientParamsSmokeReport {
+        tool_name_rejected: responses.get(1).is_some_and(|response| {
+            invalid_param_rejected(response, 2, "params.name must be non-empty")
+        }),
+        resource_uri_rejected: responses.get(2).is_some_and(|response| {
+            invalid_param_rejected(response, 3, "params.uri must be non-empty")
+        }),
+        prompt_name_rejected: responses.get(3).is_some_and(|response| {
+            invalid_param_rejected(response, 4, "params.name must be non-empty")
+        }),
+        invalid_requests_not_forwarded: !execution_log_content
+            .contains("invalid client params forwarded"),
+        raw_payload_not_returned: !report.output.contains(RAW_INVALID_PAYLOAD),
+        raw_payload_not_logged: !serialized_events.contains(RAW_INVALID_PAYLOAD),
         event_count: report.events.len(),
     })
 }
@@ -15792,6 +15981,20 @@ done
         assert!(report.raw_intent_not_returned);
         assert!(report.raw_intent_not_logged);
         assert_eq!(report.event_count, 6);
+    }
+
+    #[test]
+    fn release_audit_subprocess_mcp_proxy_invalid_client_params_smoke_fails_closed() {
+        let report = mcp_subprocess_proxy_invalid_client_params_smoke()
+            .expect("subprocess proxy invalid client params smoke should run");
+
+        assert!(report.tool_name_rejected);
+        assert!(report.resource_uri_rejected);
+        assert!(report.prompt_name_rejected);
+        assert!(report.invalid_requests_not_forwarded);
+        assert!(report.raw_payload_not_returned);
+        assert!(report.raw_payload_not_logged);
+        assert_eq!(report.event_count, 0);
     }
 
     #[test]
