@@ -2773,12 +2773,19 @@ fn dashboard_reviewer_token_carrier_error(
 }
 
 fn dashboard_scope_query_param_error(request: &DashboardHttpRequest) -> Result<(), AgentKError> {
-    for name in ["reviewer", "requester"] {
-        if dashboard_query_param_count(&request.target, name)? > 1 {
+    let reviewer_count = dashboard_query_param_count(&request.target, "reviewer")?;
+    let requester_count = dashboard_query_param_count(&request.target, "requester")?;
+    for (name, count) in [("reviewer", reviewer_count), ("requester", requester_count)] {
+        if count > 1 {
             return Err(AgentKError::InvalidMcpRequest(format!(
                 "dashboard {name} query parameter must appear at most once"
             )));
         }
+    }
+    if reviewer_count == 1 && requester_count == 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard scope query must use either reviewer or requester, not both".to_string(),
+        ));
     }
     Ok(())
 }
@@ -8821,6 +8828,27 @@ can_deny = []
             assert!(duplicate_scope_body.contains("query parameter"));
             assert!(duplicate_scope_body.contains("at most once"));
             assert!(!duplicate_scope_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+        }
+
+        let mixed_scope_targets = [
+            "/api/review?reviewer=VALUE_SHOULD_NOT_REFLECT&requester=VALUE_SHOULD_NOT_REFLECT",
+            "/?reviewer=VALUE_SHOULD_NOT_REFLECT&requester=VALUE_SHOULD_NOT_REFLECT",
+        ];
+        for target in mixed_scope_targets {
+            let mixed_scope = dashboard_http_response(
+                &dashboard_test_request("GET", target, Vec::new()),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                None,
+                None,
+            );
+            assert_eq!(mixed_scope.status, "400 Bad Request");
+            let mixed_scope_body =
+                String::from_utf8(mixed_scope.body).expect("scope error body should be utf8");
+            assert!(mixed_scope_body.contains("dashboard scope query"));
+            assert!(mixed_scope_body.contains("either reviewer or requester"));
+            assert!(!mixed_scope_body.contains("VALUE_SHOULD_NOT_REFLECT"));
         }
 
         let reviewer_token_param = "reviewer_token";

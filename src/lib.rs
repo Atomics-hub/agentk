@@ -16067,7 +16067,8 @@ reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`, and reviewer-scoped reads must choose one
 reviewer token carrier instead of sending both header and query forms; the
 chosen reviewer read carrier may appear only once. Scoped `reviewer` and
-`requester` query parameters may also appear only once. Decisions are appended to
+`requester` query parameters may appear only once and cannot be combined in one
+request. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
 dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
 and reviewer decisions maintain the live durable team store. Dashboard and MCP

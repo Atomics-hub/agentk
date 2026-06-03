@@ -216,7 +216,8 @@ The safest first productization slice is the local team sidecar path:
     `/api/review?reviewer=<id>`. Token-protected reviewer reads reject requests
     that send both `X-AgentK-Reviewer-Token` and the `reviewer_token` query
     parameter, duplicated reviewer token carriers fail closed, and duplicated
-    `reviewer` or `requester` scope selectors fail closed.
+    `reviewer` or `requester` scope selectors fail closed. Dashboard reads also
+    reject requests that combine reviewer and requester scope selectors.
 18. Trace events now carry hash-bound AgentK agent identity for new logs, while
     old logs without that field still verify. The served dashboard and review
     API use that identity for requester views at `/?requester=<agent-id>` and
