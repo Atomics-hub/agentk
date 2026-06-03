@@ -263,4 +263,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject non-UTF-8 MCP HTTP request and header lines as bad framing.
 - [x] Require CRLF MCP HTTP request and header line framing.
 - [x] Require strict MCP HTTP request-line spacing and header-name tokens.
+- [x] Reject MCP HTTP header value controls and all transfer-encoding headers.
 - [ ] Build production MCP gateway transport hardening.
