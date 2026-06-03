@@ -16185,10 +16185,10 @@ the same bearer token as MCP requests; `GET /healthz` remains open for minimal
 liveness checks.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
-SSE-shaped `GET` requests require `Accept: text/event-stream`, pass the same
-auth/origin/protocol/session-id checks, then fail closed with sanitized 501
-responses and a redacted unsupported-SSE counter until the gateway grows
-resumable SSE support.
+SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
+syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol checks,
+then fail closed with sanitized 501 responses and a redacted unsupported-SSE
+counter until the gateway grows resumable SSE support.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push` are the packaged path from local review evidence to a
@@ -17926,8 +17926,10 @@ can_deny = ["*"]
         assert!(package_readme.contains("All accepted HTTP requests"));
         assert!(package_readme.contains("unknown routes, CORS preflights"));
         assert!(package_readme.contains("Accept: text/event-stream"));
+        assert!(package_readme.contains("syntactically valid `Mcp-Session-Id`"));
         assert!(package_readme.contains("sanitized 501"));
-        assert!(package_readme.contains("unsupported-SSE counter"));
+        assert!(package_readme.contains("unsupported-SSE"));
+        assert!(package_readme.contains("counter until"));
         assert!(package_readme.contains("Malformed request lines or header lines"));
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));

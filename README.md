@@ -345,9 +345,10 @@ origins must be exact `scheme://authority` values or `null`, without paths,
 queries, fragments, wildcards, whitespace, invalid ports, or unbracketed IPv6;
 built-in
 localhost/loopback origins only match exact hosts with optional numeric ports.
-SSE-shaped `GET` requests require `Accept: text/event-stream`, then fail closed
-with sanitized 501 responses and a redacted counter until resumable SSE support
-lands. It also serves local `GET`/`HEAD` operational probes at `/healthz`,
+SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
+syntactically valid `Mcp-Session-Id`, then fail closed with sanitized 501
+responses and a redacted counter until resumable SSE support lands. It also
+serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
@@ -502,10 +503,11 @@ LAN/public exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,
 `AGENTK_MCP_HTTP_MAX_HEADER_BYTES` to bound request headers, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` to bound accepted connection reads and
-writes. SSE-shaped `GET` requests require `Accept: text/event-stream`, pass
-the same auth/origin/protocol/session-id checks, then fail closed with
-sanitized 501 responses and a redacted unsupported-SSE counter until resumable
-SSE support lands. All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP
+writes. SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
+syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
+checks, then fail closed with sanitized 501 responses and a redacted
+unsupported-SSE counter until resumable SSE support lands. All MCP HTTP `HEAD`
+responses omit bodies; `HEAD` on the MCP
 endpoint remains an unsupported method response with the normal `Allow` header.
 This is a bounded local adapter, not a hosted production
 HTTP/SSE control plane. Set comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS`

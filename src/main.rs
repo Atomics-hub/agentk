@@ -5189,9 +5189,13 @@ fn mcp_http_sse_response(
     if let Some(response) = mcp_http_protocol_version_error(request, None) {
         return Ok(response);
     }
-    if let Some(session_id) = request.header("mcp-session-id")
-        && let Some(response) = mcp_http_validate_session_id(session_id)
-    {
+    let Some(session_id) = request.header("mcp-session-id") else {
+        return Ok(dashboard_http_text(
+            "400 Bad Request",
+            "Mcp-Session-Id is required for SSE GET\n",
+        ));
+    };
+    if let Some(response) = mcp_http_validate_session_id(session_id) {
         return Ok(response);
     }
 
@@ -7076,6 +7080,24 @@ done
                 .contains("BAD_SESSION_SHOULD_NOT_REFLECT")
         );
 
+        let missing_session = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("Origin", "http://127.0.0.1:5173"),
+            ],
+            Vec::new(),
+        );
+        let missing_session_response =
+            mcp_http_response(&missing_session, &state).expect("missing session should fail");
+        assert_eq!(missing_session_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&missing_session_response.body)
+                .contains("Mcp-Session-Id is required")
+        );
+
         let unsupported_sse = dashboard_test_request_with_headers(
             "GET",
             "/mcp",
@@ -7083,6 +7105,7 @@ done
                 ("Accept", "text/event-stream"),
                 ("Authorization", "Bearer secret"),
                 ("Origin", "http://127.0.0.1:5173"),
+                ("Mcp-Session-Id", "0123456789abcdef0123456789abcdef"),
             ],
             Vec::new(),
         );
@@ -7110,8 +7133,8 @@ done
                 .is_empty()
         );
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.requests_total, 5);
-        assert_eq!(metrics.get_requests, 5);
+        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.get_requests, 6);
         assert_eq!(metrics.auth_rejections, 1);
         assert_eq!(metrics.sse_unsupported_requests, 1);
         assert_eq!(metrics.sessions_created, 0);
