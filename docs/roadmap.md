@@ -237,4 +237,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add env-configured MCP HTTP allowed browser origins.
 - [x] Add redacted MCP HTTP allowed-origin readiness metadata.
 - [x] Package a stable sidecar-check launcher for team bundle validation.
+- [x] Require explicit opt-in for non-loopback MCP HTTP binds.
 - [ ] Build production MCP gateway transport hardening.

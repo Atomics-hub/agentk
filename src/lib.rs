@@ -15551,10 +15551,13 @@ direct JSON responses, Origin validation, browser CORS preflight handling,
 and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
-browser adapters. Service supervisors can probe `GET /healthz` for liveness and
-`GET /readyz` for a redacted readiness summary that includes the supported MCP
-protocol version, active-session cap, idle timeout, request body cap, and
-configured allowed-origin count without raw origin values.
+browser adapters. Non-loopback HTTP binds fail closed unless
+`AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
+exposure an explicit operator choice. Service supervisors can probe
+`GET /healthz` for liveness and `GET /readyz` for a redacted readiness summary
+that includes the supported MCP protocol version, active-session cap, idle
+timeout, request body cap, and configured allowed-origin count without raw
+origin values.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 
@@ -15728,6 +15731,12 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+ALLOW_NON_LOCAL_BIND_FLAG=""
+case "${AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND:-}" in
+  1|true|TRUE|yes|YES)
+    ALLOW_NON_LOCAL_BIND_FLAG="--allow-non-local-bind"
+    ;;
+esac
 exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --host "${AGENTK_MCP_HTTP_HOST:-127.0.0.1}" \
   --port "${AGENTK_MCP_HTTP_PORT:-9798}" \
@@ -15735,7 +15744,8 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --max-body-bytes "${AGENTK_MCP_HTTP_MAX_BODY_BYTES:-65536}" \
   --max-active-sessions "${AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS:-32}" \
   --session-idle-timeout-ms "${AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS:-900000}" \
-  --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}"
+  --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}" \
+  ${ALLOW_NON_LOCAL_BIND_FLAG}
 "#
     .to_string()
 }
@@ -16969,6 +16979,8 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_BODY_BYTES"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
+        assert!(http_launcher.contains("--allow-non-local-bind"));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -16980,6 +16992,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("/readyz"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("configured allowed-origin count"));
+        assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
+        assert!(package_readme.contains("explicit operator choice"));
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));

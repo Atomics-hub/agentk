@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -426,6 +426,9 @@ enum Command {
         /// Env var containing comma-separated additional allowed Origin values.
         #[arg(long, default_value = MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV)]
         allow_origin_env: String,
+        /// Allow binding the HTTP gateway to a non-loopback host.
+        #[arg(long)]
+        allow_non_local_bind: bool,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -531,6 +534,9 @@ enum Command {
         /// Env var containing comma-separated additional allowed Origin values.
         #[arg(long, default_value = MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV)]
         allow_origin_env: String,
+        /// Allow binding the HTTP gateway to a non-loopback host.
+        #[arg(long)]
+        allow_non_local_bind: bool,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -829,6 +835,7 @@ fn run() -> Result<(), AgentKError> {
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
             command,
             args,
@@ -850,6 +857,7 @@ fn run() -> Result<(), AgentKError> {
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
             command,
             args,
@@ -881,6 +889,7 @@ fn run() -> Result<(), AgentKError> {
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
         } => sidecar_serve_http(
             root,
@@ -894,6 +903,7 @@ fn run() -> Result<(), AgentKError> {
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
         ),
         Command::SidecarPackage {
@@ -3263,6 +3273,7 @@ fn mcp_proxy_http(
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     allow_origin_env: String,
+    allow_non_local_bind: bool,
     auth_token_env: String,
     command: String,
     args: Vec<String>,
@@ -3302,6 +3313,7 @@ fn mcp_proxy_http(
         max_body_bytes,
         allow_origins,
         auth_token,
+        allow_non_local_bind,
         trace_out,
         session_report_out,
     })
@@ -3320,6 +3332,7 @@ struct McpHttpGatewayConfig {
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
+    allow_non_local_bind: bool,
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
 }
@@ -3370,6 +3383,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
             "MCP HTTP max-body-bytes must be positive".to_string(),
         ));
     }
+    validate_mcp_http_bind_host(&config.host, config.allow_non_local_bind)?;
     let bind = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind)?;
     let bind = listener.local_addr()?;
@@ -3415,6 +3429,27 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         config.max_requests,
         config.max_concurrent_requests,
     )
+}
+
+fn validate_mcp_http_bind_host(host: &str, allow_non_local_bind: bool) -> Result<(), AgentKError> {
+    if allow_non_local_bind || is_loopback_bind_host(host) {
+        return Ok(());
+    }
+    Err(AgentKError::InvalidMcpRequest(
+        "MCP HTTP host must be loopback unless --allow-non-local-bind is set".to_string(),
+    ))
+}
+
+fn is_loopback_bind_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 fn mcp_proxy_http_accept_loop(
@@ -4243,6 +4278,7 @@ fn sidecar_serve_http(
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     allow_origin_env: String,
+    allow_non_local_bind: bool,
     auth_token_env: String,
 ) -> Result<(), AgentKError> {
     if !is_safe_env_name(&auth_token_env) {
@@ -4268,6 +4304,7 @@ fn sidecar_serve_http(
         max_body_bytes,
         allow_origins,
         auth_token,
+        allow_non_local_bind,
         trace_out: Some(config.trace_out),
         session_report_out: Some(session_report_out),
     })
@@ -4815,6 +4852,7 @@ done
             "http://localhost:3000",
             "--allow-origin-env",
             "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
+            "--allow-non-local-bind",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
             "--command",
@@ -4841,6 +4879,7 @@ done
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
             args,
             trace_out,
@@ -4860,6 +4899,7 @@ done
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
+        assert!(allow_non_local_bind);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
         assert_eq!(args, vec!["-c".to_string(), "printf ok".to_string()]);
         assert_eq!(trace_out, Some(PathBuf::from(".agentk/runs/http.jsonl")));
@@ -5815,6 +5855,7 @@ done
             "http://localhost:3000",
             "--allow-origin-env",
             "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
+            "--allow-non-local-bind",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
         ])
@@ -5832,6 +5873,7 @@ done
             max_body_bytes,
             allow_origins,
             allow_origin_env,
+            allow_non_local_bind,
             auth_token_env,
         }) = cli.command
         else {
@@ -5848,7 +5890,21 @@ done
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
+        assert!(allow_non_local_bind);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
+    }
+
+    #[test]
+    fn mcp_http_bind_host_requires_loopback_unless_explicitly_allowed() {
+        validate_mcp_http_bind_host("localhost", false).expect("localhost should be local");
+        validate_mcp_http_bind_host("127.8.9.10", false).expect("127/8 should be local");
+        validate_mcp_http_bind_host("[::1]", false).expect("IPv6 loopback should be local");
+        let wildcard = validate_mcp_http_bind_host("0.0.0.0", false)
+            .expect_err("wildcard host should require explicit opt-in")
+            .to_string();
+        assert!(wildcard.contains("--allow-non-local-bind"));
+        validate_mcp_http_bind_host("0.0.0.0", true)
+            .expect("explicit opt-in should allow wildcard host");
     }
 
     #[test]
