@@ -216,9 +216,9 @@ The safest first productization slice is the local team sidecar path:
     allowed browser CORS preflights before bearer-token auth, supports an
     optional bearer token from environment, enforces HTTP protocol-version
     headers, supports env-configured additional browser origins, caps active
-    sessions, reaps idle sessions, bounds request bodies, applies accepted
-    connection read/write timeouts, reports local health/readiness for service
-    supervisors with redacted origin-count
+    sessions, reaps idle sessions, bounds request bodies and headers, applies
+    accepted connection read/write timeouts, reports local health/readiness for
+    service supervisors with redacted origin-count
     metadata, requires an explicit authenticated opt-in for non-loopback HTTP
     bind hosts, emits browser safety headers, and writes trace/session evidence.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
