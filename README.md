@@ -407,7 +407,12 @@ bundle after a copy, deploy, or image build.
 Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
 credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
 install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
-for audit review.
+for audit review. Set `AGENTK_TRACE` to that path when running
+`dist/agentk-sidecar/bin/agentk-dashboard`,
+`dist/agentk-sidecar/bin/agentk-dashboard-server`,
+`dist/agentk-sidecar/bin/agentk-store-export`, or
+`dist/agentk-sidecar/bin/agentk-store-sync` to review or store the packaged
+demo trace instead of the default team-sidecar trace.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
 bundle to validate policy, permissions, secret references, and client snippets
 without spawning downstream tools.
@@ -510,6 +515,8 @@ Packaged installs include the same workflow as stable launchers:
 dist/agentk-sidecar/bin/agentk-package-info
 dist/agentk-sidecar/bin/agentk-package-check
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
+AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
+  dist/agentk-sidecar/bin/agentk-dashboard --json
 dist/agentk-sidecar/bin/agentk-sidecar-check
 dist/agentk-sidecar/bin/agentk-store-export
 dist/agentk-sidecar/bin/agentk-store-check

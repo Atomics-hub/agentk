@@ -190,7 +190,10 @@ that manifest for support and deployment inventory checks.
 launcher modes, and embedded sidecar bundle after a copy, deploy, or image
 build. `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
-`<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review.
+`<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Set
+`AGENTK_TRACE` to that path when running the packaged dashboard or store
+launchers to review/sync/export the demo evidence instead of the default
+team-sidecar trace.
 Internal adapters can run `<package>/bin/agentk-sidecar-tcp`
 for a local bounded TCP JSONL gateway; Claude, Codex, and Cursor should keep
 using the stdio launcher unless their MCP client configuration supports that

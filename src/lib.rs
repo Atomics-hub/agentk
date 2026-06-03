@@ -16045,7 +16045,10 @@ filesystem workflow and writes
 `sidecar/.agentk/runs/safe-agent-demo.jsonl` by default. Set
 `AGENTK_SAFE_AGENT_DEMO_TRACE_OUT` to use a different trace path, then review
 the result with `agentk audit sidecar/.agentk/runs/safe-agent-demo.jsonl` or
-the packaged dashboard commands.
+the packaged dashboard commands. Set `AGENTK_TRACE` to that demo trace before
+running `bin/agentk-dashboard`, `bin/agentk-dashboard-server`,
+`bin/agentk-store-export`, or `bin/agentk-store-sync` to use the same packaged
+demo evidence end to end.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -16392,10 +16395,15 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-exec "$AGENTK_BIN" dashboard "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
-  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
-  --permissions "$ROOT/sidecar/team-permissions.toml" \
-  --out "$ROOT/sidecar/.agentk/dashboard.html"
+TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
+DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
+PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+DASHBOARD_OUT="${AGENTK_DASHBOARD_OUT:-$ROOT/sidecar/.agentk/dashboard.html}"
+exec "$AGENTK_BIN" dashboard "$TRACE" \
+  --decisions "$DECISIONS" \
+  --permissions "$PERMISSIONS" \
+  --out "$DASHBOARD_OUT" \
+  "$@"
 "#
     .to_string()
 }
@@ -16406,11 +16414,22 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
+DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
+PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+HOST="${AGENTK_DASHBOARD_HOST:-127.0.0.1}"
+PORT="${AGENTK_DASHBOARD_PORT:-8765}"
+ADMIN_TOKEN_ENV="${AGENTK_DASHBOARD_ADMIN_TOKEN_ENV:-AGENTK_DASHBOARD_ADMIN_TOKEN}"
 "$DIR/agentk-package-check" --json >/dev/null
-exec "$AGENTK_BIN" dashboard-serve "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
-  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
-  --permissions "$ROOT/sidecar/team-permissions.toml" \
-  --store-root "$ROOT/sidecar/.agentk/team-store"
+exec "$AGENTK_BIN" dashboard-serve "$TRACE" \
+  --decisions "$DECISIONS" \
+  --permissions "$PERMISSIONS" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --admin-token-env "$ADMIN_TOKEN_ENV" \
+  --store-root "$STORE_ROOT" \
+  "$@"
 "#
     .to_string()
 }
@@ -16421,10 +16440,14 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-exec "$AGENTK_BIN" store-export "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
-  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
-  --permissions "$ROOT/sidecar/team-permissions.toml" \
-  --out "$ROOT/sidecar/.agentk/store" \
+TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
+DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
+PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+exec "$AGENTK_BIN" store-export "$TRACE" \
+  --decisions "$DECISIONS" \
+  --permissions "$PERMISSIONS" \
+  --out "$STORE_EXPORT_ROOT" \
   "$@"
 "#
     .to_string()
@@ -16436,7 +16459,8 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-exec "$AGENTK_BIN" store-check --root "$ROOT/sidecar/.agentk/store" "$@"
+STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+exec "$AGENTK_BIN" store-check --root "$STORE_EXPORT_ROOT" "$@"
 "#
     .to_string()
 }
@@ -16447,10 +16471,14 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-exec "$AGENTK_BIN" store-sync "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
-  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
-  --permissions "$ROOT/sidecar/team-permissions.toml" \
-  --root "$ROOT/sidecar/.agentk/team-store" \
+TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
+DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
+PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+exec "$AGENTK_BIN" store-sync "$TRACE" \
+  --decisions "$DECISIONS" \
+  --permissions "$PERMISSIONS" \
+  --root "$STORE_ROOT" \
   "$@"
 "#
     .to_string()
@@ -16462,7 +16490,8 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-exec "$AGENTK_BIN" store-push --root "$ROOT/sidecar/.agentk/store" "$@"
+STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+exec "$AGENTK_BIN" store-push --root "$STORE_EXPORT_ROOT" "$@"
 "#
     .to_string()
 }
@@ -16645,6 +16674,9 @@ args:
 # Safe-agent demo:
 {}
 
+# Safe-agent demo dashboard:
+AGENTK_TRACE={} {} --json
+
 # Sidecar bundle check:
 {}
 
@@ -16663,6 +16695,10 @@ args:
         package_root.join("bin/agentk-sidecar").display(),
         package_root.join("bin/agentk-package-check").display(),
         package_root.join("bin/agentk-safe-agent-demo").display(),
+        package_root
+            .join("sidecar/.agentk/runs/safe-agent-demo.jsonl")
+            .display(),
+        package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-sidecar-check").display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-dashboard-server").display(),
@@ -17634,6 +17670,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
         assert!(package_readme.contains("sidecar/.agentk/runs/safe-agent-demo.jsonl"));
+        assert!(package_readme.contains("AGENTK_TRACE"));
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
@@ -17732,30 +17769,53 @@ can_deny = ["*"]
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
         assert!(dashboard.contains("AGENTK_BIN"));
+        assert!(dashboard.contains("AGENTK_TRACE"));
+        assert!(dashboard.contains("AGENTK_DECISIONS"));
+        assert!(dashboard.contains("AGENTK_PERMISSIONS"));
+        assert!(dashboard.contains("AGENTK_DASHBOARD_OUT"));
+        assert!(dashboard.contains("\"$@\""));
         let dashboard_server = fs::read_to_string(out.join("bin/agentk-dashboard-server"))
             .expect("dashboard server should read");
         assert!(dashboard_server.contains("dashboard-serve"));
         assert!(dashboard_server.contains("agentk-package-check"));
         assert!(dashboard_server.contains("AGENTK_BIN"));
+        assert!(dashboard_server.contains("AGENTK_TRACE"));
+        assert!(dashboard_server.contains("AGENTK_DECISIONS"));
+        assert!(dashboard_server.contains("AGENTK_PERMISSIONS"));
+        assert!(dashboard_server.contains("AGENTK_STORE_ROOT"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_HOST"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_PORT"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_ADMIN_TOKEN_ENV"));
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
+        assert!(dashboard_server.contains("\"$@\""));
         let store_export = fs::read_to_string(out.join("bin/agentk-store-export"))
             .expect("store export should read");
         assert!(store_export.contains("store-export"));
+        assert!(store_export.contains("AGENTK_TRACE"));
+        assert!(store_export.contains("AGENTK_DECISIONS"));
+        assert!(store_export.contains("AGENTK_PERMISSIONS"));
+        assert!(store_export.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_export.contains("team-permissions.toml"));
         assert!(store_export.contains("\"$@\""));
         let store_check = fs::read_to_string(out.join("bin/agentk-store-check"))
             .expect("store check should read");
         assert!(store_check.contains("store-check"));
+        assert!(store_check.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_check.contains("\"$@\""));
         let store_sync =
             fs::read_to_string(out.join("bin/agentk-store-sync")).expect("store sync should read");
         assert!(store_sync.contains("store-sync"));
+        assert!(store_sync.contains("AGENTK_TRACE"));
+        assert!(store_sync.contains("AGENTK_DECISIONS"));
+        assert!(store_sync.contains("AGENTK_PERMISSIONS"));
+        assert!(store_sync.contains("AGENTK_STORE_ROOT"));
         assert!(store_sync.contains("team-store"));
         assert!(store_sync.contains("\"$@\""));
         let store_push =
             fs::read_to_string(out.join("bin/agentk-store-push")).expect("store push should read");
         assert!(store_push.contains("store-push"));
+        assert!(store_push.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_push.contains("\"$@\""));
         let client = fs::read_to_string(out.join("clients/claude-desktop.mcp.json"))
             .expect("client should read");
@@ -17764,6 +17824,8 @@ can_deny = ["*"]
             .expect("command snippet should read");
         assert!(command.contains("agentk-package-check"));
         assert!(command.contains("agentk-safe-agent-demo"));
+        assert!(command.contains("AGENTK_TRACE"));
+        assert!(command.contains("safe-agent-demo.jsonl"));
         assert!(command.contains("agentk-sidecar-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));

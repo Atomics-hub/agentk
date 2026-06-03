@@ -205,6 +205,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add a CLI audit inbox for pending approvals and allowed side effects.
 - [x] Package a no-credential GitHub/Postgres/Slack/filesystem safe-agent demo.
 - [x] Add a package-local safe-agent demo launcher for team onboarding.
+- [x] Wire packaged demo traces into dashboard and store onboarding.
 - [x] Add config-driven sidecar launch for generated bundles.
 - [x] Add a local audit and approval review surface.
 - [x] Add local multi-user permissions for approval review.
