@@ -114,14 +114,16 @@ sessions onto the same subprocess mediation path. If clients send
 initialize and the negotiated protocol on follow-up POST/DELETE requests. The
 adapter also serves local `GET`/`HEAD` probes at `/healthz` and `/readyz`;
 `/readyz` returns endpoint, supported protocol-version, active-session,
-active-session cap, request-concurrency, request body cap, and auth-required
-metadata without raw MCP payloads. `--max-active-sessions` caps initialized MCP
-HTTP sessions and excess initialize requests return 429. `--max-body-bytes`
-bounds the POST body read before JSON parsing; oversized requests return 413.
-Use `sidecar-serve-http --root <bundle>` or the packaged
-`bin/agentk-sidecar-http` launcher for a reviewed sidecar bundle. This is still
-a local adapter: it does not provide a hosted production control plane, TLS
-termination, SSE streaming, or external identity integration.
+active-session cap, idle timeout, request-concurrency, request body cap, and
+auth-required metadata without raw MCP payloads. `--max-active-sessions` caps
+initialized MCP HTTP sessions and excess initialize requests return 429.
+`--session-idle-timeout-ms` reaps idle initialized sessions and releases their
+downstream process/capacity. `--max-body-bytes` bounds the POST body read before
+JSON parsing; oversized requests return 413. Use `sidecar-serve-http --root
+<bundle>` or the packaged `bin/agentk-sidecar-http` launcher for a reviewed
+sidecar bundle. This is still a local adapter: it does not provide a hosted
+production control plane, TLS termination, SSE streaming, or external identity
+integration.
 
 When the client closes stdin, AgentK closes the downstream server's stdin first
 and gives the child a short grace period to exit cleanly. If the child keeps
