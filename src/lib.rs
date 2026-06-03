@@ -50,7 +50,9 @@ const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
 ];
 const SIDECAR_PACKAGE_STORAGE_CONTRACTS: &[&str] = &["storage/postgres-schema.sql"];
 const SIDECAR_PACKAGE_DEPLOY_TEMPLATES: &[&str] = &[
+    "deploy/systemd/agentk-sidecar-http.service",
     "deploy/systemd/agentk-dashboard.service",
+    "deploy/launchd/com.agentk.sidecar-http.plist",
     "deploy/launchd/com.agentk.dashboard.plist",
     "deploy/docker/Dockerfile",
     "deploy/docker/compose.yml",
@@ -13980,8 +13982,18 @@ pub fn package_sidecar_bundle(
         )?,
         write_packaged_sidecar_file(
             out,
+            "deploy/systemd/agentk-sidecar-http.service",
+            &sidecar_systemd_http_service(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
             "deploy/systemd/agentk-dashboard.service",
             &sidecar_systemd_dashboard_service(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/launchd/com.agentk.sidecar-http.plist",
+            &sidecar_launchd_http_plist(out),
         )?,
         write_packaged_sidecar_file(
             out,
@@ -16022,7 +16034,7 @@ MCP clients stable launcher scripts in `bin/`.
 - `storage/postgres-schema.sql`: durable audit and approval store schema
   contract.
 - `deploy/`: systemd, launchd, and Docker Compose templates for running the
-  packaged dashboard and store workflow.
+  packaged MCP HTTP sidecar gateway, dashboard, and store workflow.
 
 ## Commands
 
@@ -16573,6 +16585,30 @@ exec "$AGENTK_BIN" store-push --root "$STORE_EXPORT_ROOT" "$@"
     .to_string()
 }
 
+fn sidecar_systemd_http_service(package_root: &Path) -> String {
+    format!(
+        r#"[Unit]
+Description=AgentK MCP HTTP sidecar gateway
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={}
+Environment=AGENTK_BIN=agentk
+# Set AGENTK_MCP_HTTP_TOKEN in an EnvironmentFile before exposing non-local binds.
+# EnvironmentFile=%h/.config/agentk/sidecar-http.env
+ExecStart={}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"#,
+        package_root.display(),
+        package_root.join("bin/agentk-sidecar-http").display()
+    )
+}
+
 fn sidecar_systemd_dashboard_service(package_root: &Path) -> String {
     format!(
         r#"[Unit]
@@ -16594,6 +16630,42 @@ WantedBy=default.target
 "#,
         package_root.display(),
         package_root.join("bin/agentk-dashboard-server").display()
+    )
+}
+
+fn sidecar_launchd_http_plist(package_root: &Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentk.sidecar-http</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{}</string>
+  <key>StandardErrorPath</key>
+  <string>{}</string>
+</dict>
+</plist>
+"#,
+        package_root.join("bin/agentk-sidecar-http").display(),
+        package_root.display(),
+        package_root
+            .join("sidecar/.agentk/sidecar-http.out.log")
+            .display(),
+        package_root
+            .join("sidecar/.agentk/sidecar-http.err.log")
+            .display()
     )
 }
 
@@ -16644,6 +16716,7 @@ COPY . /opt/agentk-sidecar
 ENV AGENTK_BIN=/usr/local/bin/agentk
 USER agentk
 EXPOSE 8765
+EXPOSE 9798
 CMD ["./bin/agentk-dashboard-server"]
 "#
     .to_string()
@@ -16651,13 +16724,30 @@ CMD ["./bin/agentk-dashboard-server"]
 
 fn sidecar_docker_compose() -> String {
     r#"services:
+  agentk-sidecar-http:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      AGENTK_BIN: /usr/local/bin/agentk
+      AGENTK_MCP_HTTP_HOST: 0.0.0.0
+      AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND: "1"
+      AGENTK_MCP_HTTP_TOKEN: ${AGENTK_MCP_HTTP_TOKEN:?Set AGENTK_MCP_HTTP_TOKEN before running Docker Compose}
+    ports:
+      - "127.0.0.1:9798:9798"
+    volumes:
+      - ../../sidecar/.agentk:/opt/agentk-sidecar/sidecar/.agentk
+    command: ["./bin/agentk-sidecar-http"]
+
   agentk-dashboard:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     environment:
       AGENTK_BIN: /usr/local/bin/agentk
-      AGENTK_DASHBOARD_ADMIN_TOKEN: ${AGENTK_DASHBOARD_ADMIN_TOKEN:-}
+      AGENTK_DASHBOARD_HOST: 0.0.0.0
+      AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND: "1"
+      AGENTK_DASHBOARD_ADMIN_TOKEN: ${AGENTK_DASHBOARD_ADMIN_TOKEN:?Set AGENTK_DASHBOARD_ADMIN_TOKEN before running Docker Compose}
       DATABASE_URL: ${DATABASE_URL:-}
     ports:
       - "127.0.0.1:8765:8765"
@@ -16689,19 +16779,27 @@ to validate the package manifest, launcher modes, deploy templates, storage
 schema, and embedded sidecar bundle. Service and container starts fail closed
 when policy, permissions, secret references, or client snippets stop validating.
 
+The sidecar HTTP service stays on `127.0.0.1:9798` by default. Set
+`AGENTK_MCP_HTTP_TOKEN` before enabling non-local binds, and keep TLS, external
+identity, and network policy in the deployment layer.
+
 ## systemd user service
 
 ```sh
 mkdir -p ~/.config/systemd/user
+cp deploy/systemd/agentk-sidecar-http.service ~/.config/systemd/user/
 cp deploy/systemd/agentk-dashboard.service ~/.config/systemd/user/
 systemctl --user daemon-reload
+systemctl --user enable --now agentk-sidecar-http.service
 systemctl --user enable --now agentk-dashboard.service
 ```
 
 ## launchd
 
 ```sh
+cp deploy/launchd/com.agentk.sidecar-http.plist ~/Library/LaunchAgents/
 cp deploy/launchd/com.agentk.dashboard.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.agentk.sidecar-http.plist
 launchctl load ~/Library/LaunchAgents/com.agentk.dashboard.plist
 ```
 
@@ -16709,6 +16807,10 @@ launchctl load ~/Library/LaunchAgents/com.agentk.dashboard.plist
 
 The Dockerfile expects an `agentk` binary at `/usr/local/bin/agentk` in the
 image. Add it during your own image build or bind-mount it for local testing.
+The Compose template publishes both services on host loopback, but the
+container processes bind to `0.0.0.0` so Docker can route published ports.
+Compose requires `AGENTK_MCP_HTTP_TOKEN` and `AGENTK_DASHBOARD_ADMIN_TOKEN`
+before starting.
 
 ```sh
 docker compose -f deploy/docker/compose.yml up --build
@@ -17687,7 +17789,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 23);
+        assert_eq!(report.files.len(), 25);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
@@ -17706,7 +17808,15 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-store-push").exists());
         assert!(out.join("clients/claude-desktop.mcp.json").exists());
         assert!(out.join("storage/postgres-schema.sql").exists());
+        assert!(
+            out.join("deploy/systemd/agentk-sidecar-http.service")
+                .exists()
+        );
         assert!(out.join("deploy/systemd/agentk-dashboard.service").exists());
+        assert!(
+            out.join("deploy/launchd/com.agentk.sidecar-http.plist")
+                .exists()
+        );
         assert!(
             out.join("deploy/launchd/com.agentk.dashboard.plist")
                 .exists()
@@ -17753,6 +17863,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("runs the package self-check before launch"));
         assert!(package_readme.contains("before binding"));
+        assert!(package_readme.contains("MCP HTTP sidecar gateway"));
         assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
         assert!(package_readme.contains("sidecar/.agentk/runs/safe-agent-demo.jsonl"));
         assert!(package_readme.contains("AGENTK_TRACE"));
@@ -17862,6 +17973,20 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["default_transports"][2]["default_url"],
             serde_json::json!("http://127.0.0.1:9798/mcp")
+        );
+        assert!(
+            package_manifest_json["deploy_templates"]
+                .as_array()
+                .expect("deploy templates should be an array")
+                .iter()
+                .any(|template| template == "deploy/systemd/agentk-sidecar-http.service")
+        );
+        assert!(
+            package_manifest_json["deploy_templates"]
+                .as_array()
+                .expect("deploy templates should be an array")
+                .iter()
+                .any(|template| template == "deploy/launchd/com.agentk.sidecar-http.plist")
         );
         assert!(
             package_manifest_json["launchers"]
@@ -17979,20 +18104,39 @@ can_deny = ["*"]
         assert!(command.contains("agentk-sidecar-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));
+        let sidecar_http_service =
+            fs::read_to_string(out.join("deploy/systemd/agentk-sidecar-http.service"))
+                .expect("sidecar HTTP service should read");
+        assert!(sidecar_http_service.contains("agentk-sidecar-http"));
+        assert!(sidecar_http_service.contains("AGENTK_MCP_HTTP_TOKEN"));
         let service = fs::read_to_string(out.join("deploy/systemd/agentk-dashboard.service"))
             .expect("service should read");
         assert!(service.contains("agentk-dashboard-server"));
+        let sidecar_http_plist =
+            fs::read_to_string(out.join("deploy/launchd/com.agentk.sidecar-http.plist"))
+                .expect("sidecar HTTP plist should read");
+        assert!(sidecar_http_plist.contains("com.agentk.sidecar-http"));
+        assert!(sidecar_http_plist.contains("agentk-sidecar-http"));
         let plist = fs::read_to_string(out.join("deploy/launchd/com.agentk.dashboard.plist"))
             .expect("plist should read");
         assert!(plist.contains("agentk-dashboard-server"));
         let compose =
             fs::read_to_string(out.join("deploy/docker/compose.yml")).expect("compose should read");
+        assert!(compose.contains("agentk-sidecar-http"));
+        assert!(compose.contains("AGENTK_MCP_HTTP_HOST: 0.0.0.0"));
+        assert!(compose.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
+        assert!(compose.contains("AGENTK_MCP_HTTP_TOKEN:?"));
+        assert!(compose.contains("127.0.0.1:9798:9798"));
         assert!(compose.contains("agentk-dashboard"));
+        assert!(compose.contains("AGENTK_DASHBOARD_HOST: 0.0.0.0"));
+        assert!(compose.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(compose.contains("127.0.0.1:8765:8765"));
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
         assert!(deploy_readme.contains("agentk-package-check --json"));
         assert!(deploy_readme.contains("sidecar gateway and dashboard launchers"));
+        assert!(deploy_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(deploy_readme.contains("Docker can route published ports"));
         assert!(!out.join("sidecar/.agentk").exists());
         let package_check_report =
             check_sidecar_package(&out).expect("package check should run on generated package");

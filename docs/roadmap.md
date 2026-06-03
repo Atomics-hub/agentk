@@ -217,6 +217,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add dashboard server UI for approvals and audit review.
 - [x] Add browser approve/deny controls to the served dashboard UI.
 - [x] Add deploy templates for packaged sidecar operation.
+- [x] Add MCP HTTP gateway service templates to packaged deployments.
 - [x] Preflight packaged dashboard service starts with the package validator.
 - [x] Add a versioned package manifest for installable sidecar inventory.
 - [x] Add package self-checks for copied/deployed sidecar artifacts.
