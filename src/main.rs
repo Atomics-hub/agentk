@@ -4002,6 +4002,9 @@ struct McpHttpGatewayMetrics {
     origin_rejections: usize,
     method_rejections: usize,
     sse_unsupported_requests: usize,
+    invalid_framing_responses: usize,
+    header_too_large_responses: usize,
+    body_too_large_responses: usize,
     sessions_created: usize,
     sessions_deleted: usize,
     sessions_expired: usize,
@@ -4289,6 +4292,10 @@ fn handle_mcp_http_stream(
         Err(AgentKError::InvalidMcpRequest(message))
             if message == "HTTP request headers are too large" =>
         {
+            mcp_http_update_metrics(state, |metrics| {
+                metrics.client_error_responses += 1;
+                metrics.header_too_large_responses += 1;
+            })?;
             let response = mcp_http_headers_too_large_response(state.max_header_bytes);
             write_dashboard_http_response(stream, &response)?;
             return Ok(());
@@ -4296,11 +4303,19 @@ fn handle_mcp_http_stream(
         Err(AgentKError::InvalidMcpRequest(message))
             if message == "HTTP request body is too large" =>
         {
+            mcp_http_update_metrics(state, |metrics| {
+                metrics.client_error_responses += 1;
+                metrics.body_too_large_responses += 1;
+            })?;
             let response = mcp_http_payload_too_large_response(state.max_body_bytes);
             write_dashboard_http_response(stream, &response)?;
             return Ok(());
         }
         Err(AgentKError::InvalidMcpRequest(_)) => {
+            mcp_http_update_metrics(state, |metrics| {
+                metrics.client_error_responses += 1;
+                metrics.invalid_framing_responses += 1;
+            })?;
             let response = mcp_http_bad_request_response();
             write_dashboard_http_response(stream, &response)?;
             return Ok(());
@@ -4703,6 +4718,9 @@ fn mcp_http_operational_response(
             "origin_rejections": metrics.origin_rejections,
             "method_rejections": metrics.method_rejections,
             "sse_unsupported_requests": metrics.sse_unsupported_requests,
+            "invalid_framing_responses": metrics.invalid_framing_responses,
+            "header_too_large_responses": metrics.header_too_large_responses,
+            "body_too_large_responses": metrics.body_too_large_responses,
             "sessions_created": metrics.sessions_created,
             "sessions_deleted": metrics.sessions_deleted,
             "sessions_expired": metrics.sessions_expired,
@@ -4787,6 +4805,15 @@ agentk_mcp_http_method_rejections_total {method_rejections}\n\
 # HELP agentk_mcp_http_sse_unsupported_requests_total GET requests shaped like MCP SSE streams while SSE is not implemented.\n\
 # TYPE agentk_mcp_http_sse_unsupported_requests_total counter\n\
 agentk_mcp_http_sse_unsupported_requests_total {sse_unsupported_requests}\n\
+# HELP agentk_mcp_http_invalid_framing_responses_total Requests rejected before parsing due to invalid HTTP framing.\n\
+# TYPE agentk_mcp_http_invalid_framing_responses_total counter\n\
+agentk_mcp_http_invalid_framing_responses_total {invalid_framing_responses}\n\
+# HELP agentk_mcp_http_header_too_large_responses_total Requests rejected before parsing because headers exceeded the configured cap.\n\
+# TYPE agentk_mcp_http_header_too_large_responses_total counter\n\
+agentk_mcp_http_header_too_large_responses_total {header_too_large_responses}\n\
+# HELP agentk_mcp_http_body_too_large_responses_total Requests rejected before parsing because the declared body exceeded the configured cap.\n\
+# TYPE agentk_mcp_http_body_too_large_responses_total counter\n\
+agentk_mcp_http_body_too_large_responses_total {body_too_large_responses}\n\
 # HELP agentk_mcp_http_sessions_created_total Initialized MCP HTTP sessions created by this gateway.\n\
 # TYPE agentk_mcp_http_sessions_created_total counter\n\
 agentk_mcp_http_sessions_created_total {sessions_created}\n\
@@ -4819,6 +4846,9 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         origin_rejections = metrics.origin_rejections,
         method_rejections = metrics.method_rejections,
         sse_unsupported_requests = metrics.sse_unsupported_requests,
+        invalid_framing_responses = metrics.invalid_framing_responses,
+        header_too_large_responses = metrics.header_too_large_responses,
+        body_too_large_responses = metrics.body_too_large_responses,
         sessions_created = metrics.sessions_created,
         sessions_deleted = metrics.sessions_deleted,
         sessions_expired = metrics.sessions_expired,
@@ -7970,6 +8000,15 @@ done
         assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
         assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
         assert_eq!(ready_json["sse_unsupported_requests"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["invalid_framing_responses"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            ready_json["header_too_large_responses"],
+            serde_json::json!(0)
+        );
+        assert_eq!(ready_json["body_too_large_responses"], serde_json::json!(0));
         assert_eq!(ready_json["sessions_created"], serde_json::json!(0));
         assert_eq!(ready_json["session_not_found"], serde_json::json!(0));
 
@@ -8006,6 +8045,9 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_unsupported_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_body_too_large_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sessions_created_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_session_not_found_total 0\n"));
         assert!(
@@ -8425,7 +8467,7 @@ done
 
     #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
-        fn response_for(raw_request: &[u8]) -> String {
+        fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
             let addr = listener
                 .local_addr()
@@ -8470,22 +8512,73 @@ done
                     .expect("session lock should not be poisoned")
                     .is_empty()
             );
-            response
+            let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+            (response, metrics)
         }
 
         for raw_request in [
             b"GET /mcp HTTP/1.1\r\nX-Long: 123456789012345678901234567890\r\n\r\n".as_slice(),
             b"GET /mcp?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_slice(),
         ] {
-            let response = response_for(raw_request);
+            let (response, metrics) = response_for(raw_request);
             assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
             assert!(response.contains("MCP HTTP request headers must be at most 32 bytes"));
+            assert_eq!(metrics.client_error_responses, 1);
+            assert_eq!(metrics.header_too_large_responses, 1);
+            assert_eq!(metrics.invalid_framing_responses, 0);
+            assert_eq!(metrics.body_too_large_responses, 0);
         }
     }
 
     #[test]
+    fn mcp_http_stream_returns_413_for_declared_oversized_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: 8,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let server_state = Arc::clone(&state);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            handle_mcp_http_stream(&mut stream, &server_state)
+                .expect("oversized body response should write");
+        });
+        let mut client = TcpStream::connect(addr).expect("test client should connect");
+        client
+            .write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\n")
+            .expect("test request should write");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("test response should read");
+        server.join().expect("server thread should finish");
+        assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+        assert!(response.contains("MCP HTTP request body must be at most 8 bytes"));
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.client_error_responses, 1);
+        assert_eq!(metrics.body_too_large_responses, 1);
+        assert_eq!(metrics.header_too_large_responses, 0);
+        assert_eq!(metrics.invalid_framing_responses, 0);
+    }
+
+    #[test]
     fn mcp_http_stream_returns_400_for_invalid_framing() {
-        fn response_for(raw_request: &[u8]) -> String {
+        fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
             let addr = listener
                 .local_addr()
@@ -8526,7 +8619,8 @@ done
                 .read_to_string(&mut response)
                 .expect("test response should read");
             server.join().expect("server thread should finish");
-            response
+            let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+            (response, metrics)
         }
 
         for raw_request in [
@@ -8588,7 +8682,7 @@ done
                 .as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
-            let response = response_for(raw_request);
+            let (response, metrics) = response_for(raw_request);
             assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
             assert!(response.contains("invalid MCP HTTP request"));
             assert!(!response.contains("FRAGMENT_SHOULD_NOT_REFLECT"));
@@ -8600,12 +8694,18 @@ done
                 .nth(1)
                 .expect("response should include body");
             assert_eq!(body, "invalid MCP HTTP request\n");
+            assert_eq!(metrics.client_error_responses, 1);
+            assert_eq!(metrics.invalid_framing_responses, 1);
+            assert_eq!(metrics.header_too_large_responses, 0);
+            assert_eq!(metrics.body_too_large_responses, 0);
         }
 
-        let close_response =
+        let (close_response, close_metrics) =
             response_for(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert!(close_response.starts_with("HTTP/1.1 200 OK"));
         assert!(close_response.ends_with("{\"ok\":true}"));
+        assert_eq!(close_metrics.client_error_responses, 0);
+        assert_eq!(close_metrics.invalid_framing_responses, 0);
     }
 
     #[test]

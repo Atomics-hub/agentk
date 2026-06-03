@@ -16147,7 +16147,8 @@ exposure an explicit operator choice, and those binds also require a non-empty
 request/session counters. The readiness summary includes the supported MCP
 protocol version, active-session cap, idle timeout, request body cap, request
 header cap, configured stream-timeout, parsed request totals, rejection totals,
-session lifecycle totals, and allowed-origin counts without raw origin values.
+stream-framing rejection totals, session lifecycle totals, and allowed-origin
+counts without raw origin values.
 Initialized HTTP sessions use per-session runtime locks, so one busy downstream
 session does not block unrelated sessions from initializing or progressing.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
@@ -17747,7 +17748,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("unsupported query parameters"));
         assert!(package_readme.contains("reviewer-scoped reads"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
-        assert!(package_readme.contains("allowed-origin counts"));
+        assert!(package_readme.contains("allowed-origin"));
+        assert!(package_readme.contains("counts without raw origin values"));
         assert!(package_readme.contains("exact `scheme://authority`"));
         assert!(package_readme.contains("invalid ports"));
         assert!(package_readme.contains("numeric ports"));
@@ -17758,6 +17760,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("unbounded buffering"));
         assert!(package_readme.contains("per-session runtime locks"));
+        assert!(package_readme.contains("stream-framing rejection totals"));
         assert!(package_readme.contains("still-active initialized"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
