@@ -3835,6 +3835,11 @@ fn mcp_http_response(
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
     let path = request.target.split('?').next().unwrap_or_default();
+    if (path == state.endpoint || matches!(path, "/readyz" | "/metrics"))
+        && let Some(response) = mcp_http_control_header_error(request)
+    {
+        return Ok(response);
+    }
     if path == "/healthz" || path == "/readyz" || path == "/metrics" {
         let mut response =
             if path != "/healthz" && !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
@@ -4049,6 +4054,41 @@ fn mcp_http_protocol_version_error(
     ))
 }
 
+fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
+    for name in [
+        "accept",
+        "authorization",
+        "content-type",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "origin",
+        "x-agentk-mcp-token",
+    ] {
+        if request
+            .headers
+            .iter()
+            .filter(|(candidate, _)| candidate == name)
+            .take(2)
+            .count()
+            > 1
+        {
+            return Some(dashboard_http_text(
+                "400 Bad Request",
+                "MCP HTTP control header must appear at most once\n",
+            ));
+        }
+    }
+
+    if request.header("authorization").is_some() && request.header("x-agentk-mcp-token").is_some() {
+        return Some(dashboard_http_text(
+            "400 Bad Request",
+            "MCP HTTP token must use one auth header\n",
+        ));
+    }
+
+    None
+}
+
 fn mcp_http_post_response(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
@@ -4061,10 +4101,14 @@ fn mcp_http_post_response(
             "MCP HTTP POST requires Accept: application/json, text/event-stream\n",
         ));
     }
-    if !request
-        .header("content-type")
-        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
-    {
+    if !request.header("content-type").is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("application/json")
+    }) {
         return Ok(dashboard_http_text(
             "415 Unsupported Media Type",
             "MCP HTTP POST requires application/json\n",
@@ -4344,6 +4388,9 @@ fn mcp_http_auth_allowed(request: &DashboardHttpRequest, auth_token: Option<&str
     let Some(auth_token) = auth_token else {
         return true;
     };
+    if request.header("authorization").is_some() && request.header("x-agentk-mcp-token").is_some() {
+        return false;
+    }
     mcp_http_token_from_request(request)
         .is_some_and(|value| constant_time_token_eq(value, auth_token))
 }
@@ -4359,9 +4406,14 @@ fn mcp_http_token_from_request(request: &DashboardHttpRequest) -> Option<&str> {
 
 fn mcp_http_accepts(request: &DashboardHttpRequest, expected: &str) -> bool {
     request.header("accept").is_some_and(|value| {
-        value
-            .split(',')
-            .any(|part| part.trim().split(';').next().unwrap_or_default() == expected)
+        value.split(',').any(|part| {
+            part.trim()
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case(expected)
+        })
     })
 }
 
@@ -5501,6 +5553,17 @@ done
         );
         assert!(mcp_http_auth_allowed(&explicit_header, Some("secret")));
 
+        let dual_carrier = dashboard_test_request_with_headers(
+            "GET",
+            "/readyz",
+            [
+                ("Authorization", "Bearer secret"),
+                ("X-AgentK-MCP-Token", "secret"),
+            ],
+            Vec::new(),
+        );
+        assert!(!mcp_http_auth_allowed(&dual_carrier, Some("secret")));
+
         let wrong = dashboard_test_request_with_headers(
             "GET",
             "/readyz",
@@ -5512,6 +5575,181 @@ done
         let missing = dashboard_test_request("GET", "/readyz", Vec::new());
         assert!(!mcp_http_auth_allowed(&missing, Some("secret")));
         assert!(mcp_http_auth_allowed(&missing, None));
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_ambiguous_control_headers() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#;
+        let cases = vec![
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json"),
+                    ("Accept", "text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Authorization", "Bearer secret"),
+                ],
+                body,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Content-Type", "text/plain"),
+                    ("Authorization", "Bearer secret"),
+                ],
+                body,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Mcp-Session-Id", "session-a"),
+                    ("Mcp-Session-Id", "SESSION_SHOULD_NOT_REFLECT"),
+                    ("Authorization", "Bearer secret"),
+                ],
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                    (
+                        "MCP-Protocol-Version",
+                        "UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT",
+                    ),
+                    ("Authorization", "Bearer secret"),
+                ],
+                body,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Origin", "http://localhost:5173"),
+                    ("Origin", "https://origin-should-not-reflect.example"),
+                    ("Authorization", "Bearer secret"),
+                ],
+                body,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Authorization", "Bearer secret"),
+                    ("Authorization", "Bearer TOKEN_SHOULD_NOT_REFLECT"),
+                ],
+                body,
+            ),
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Authorization", "Bearer secret"),
+                    ("X-AgentK-MCP-Token", "TOKEN_SHOULD_NOT_REFLECT"),
+                ],
+                body,
+            ),
+        ];
+
+        for request in cases {
+            let response =
+                mcp_http_response(&request, &state).expect("ambiguous control header should fail");
+            assert_eq!(response.status, "400 Bad Request");
+            let response_body = String::from_utf8_lossy(&response.body);
+            assert!(response_body.contains("MCP HTTP"));
+            assert!(!response_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
+            assert!(!response_body.contains("SESSION_SHOULD_NOT_REFLECT"));
+            assert!(!response_body.contains("UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT"));
+            assert!(!response_body.contains("origin-should-not-reflect"));
+        }
+
+        let ready = dashboard_test_request_with_headers(
+            "GET",
+            "/readyz",
+            [
+                ("Authorization", "Bearer secret"),
+                ("X-AgentK-MCP-Token", "secret"),
+            ],
+            Vec::new(),
+        );
+        let ready_response =
+            mcp_http_response(&ready, &state).expect("ambiguous readyz auth should fail");
+        assert_eq!(ready_response.status, "400 Bad Request");
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_invalid_json_media_type() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let request = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json-patch"),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+
+        let response = mcp_http_response(&request, &state).expect("invalid media type should fail");
+        assert_eq!(response.status, "415 Unsupported Media Type");
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
     }
 
     #[test]

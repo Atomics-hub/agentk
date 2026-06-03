@@ -131,7 +131,11 @@ request line plus headers before body reads; oversized headers return 431.
 Malformed request lines or header lines, duplicate `Content-Length` headers,
 and `Transfer-Encoding` requests are rejected with sanitized 400 responses
 because the adapter only accepts origin-form, fixed-length HTTP/1.x requests
-with token-shaped header names.
+with token-shaped header names. Duplicate MCP control headers used for
+auth/session/protocol/origin/media negotiation are rejected with sanitized 400
+responses, and clients must choose either `Authorization` or
+`X-AgentK-MCP-Token` per request. POSTs require an exact `application/json`
+media type; parameters such as `charset` are allowed.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root

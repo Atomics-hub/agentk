@@ -304,14 +304,16 @@ cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-c
 
 The HTTP gateway validates Origin headers, answers allowed browser CORS
 preflights without requiring auth, supports optional bearer auth via
-`AGENTK_MCP_HTTP_TOKEN`, returns `Mcp-Session-Id` on initialize, accepts
-subsequent POSTs with that session id, rejects unsupported
-`MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
-oversized request bodies with 413 and excess initialized sessions with 429.
+`AGENTK_MCP_HTTP_TOKEN` with one token header per request, returns
+`Mcp-Session-Id` on initialize, accepts subsequent POSTs with that session id,
+rejects unsupported `MCP-Protocol-Version` headers, returns direct JSON
+responses, and rejects oversized request bodies with 413 and excess initialized
+sessions with 429. POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, duplicate `Content-Length` headers,
-and `Transfer-Encoding` requests are rejected as invalid framing. Idle sessions
-are reaped after the configured timeout so abandoned clients do not hold
-downstream processes forever.
+ambiguous MCP control headers, and `Transfer-Encoding` requests are rejected as
+invalid framing or control ambiguity. Idle sessions are reaped after the
+configured timeout so abandoned clients do not hold downstream processes
+forever.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
@@ -411,8 +413,9 @@ HTTP binds fail closed unless `--allow-non-local-bind` is passed; the packaged
 launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
 those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
 lines or header lines, duplicate `Content-Length` headers, and
-`Transfer-Encoding` requests are rejected as invalid framing. LAN/public
-exposure is therefore an explicit authenticated operator choice. Set
+`Transfer-Encoding` requests are rejected as invalid framing; duplicate MCP
+control headers and dual token-carrier headers are rejected as ambiguous.
+LAN/public exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,
