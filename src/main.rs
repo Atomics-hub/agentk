@@ -3383,7 +3383,11 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
             "MCP HTTP max-body-bytes must be positive".to_string(),
         ));
     }
-    validate_mcp_http_bind_host(&config.host, config.allow_non_local_bind)?;
+    validate_mcp_http_bind_security(
+        &config.host,
+        config.allow_non_local_bind,
+        config.auth_token.is_some(),
+    )?;
     let bind = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&bind)?;
     let bind = listener.local_addr()?;
@@ -3431,13 +3435,25 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
     )
 }
 
-fn validate_mcp_http_bind_host(host: &str, allow_non_local_bind: bool) -> Result<(), AgentKError> {
-    if allow_non_local_bind || is_loopback_bind_host(host) {
+fn validate_mcp_http_bind_security(
+    host: &str,
+    allow_non_local_bind: bool,
+    auth_configured: bool,
+) -> Result<(), AgentKError> {
+    if is_loopback_bind_host(host) {
         return Ok(());
     }
-    Err(AgentKError::InvalidMcpRequest(
-        "MCP HTTP host must be loopback unless --allow-non-local-bind is set".to_string(),
-    ))
+    if !allow_non_local_bind {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP host must be loopback unless --allow-non-local-bind is set".to_string(),
+        ));
+    }
+    if !auth_configured {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP non-loopback binds require a non-empty auth token".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_loopback_bind_host(host: &str) -> bool {
@@ -5896,15 +5912,21 @@ done
 
     #[test]
     fn mcp_http_bind_host_requires_loopback_unless_explicitly_allowed() {
-        validate_mcp_http_bind_host("localhost", false).expect("localhost should be local");
-        validate_mcp_http_bind_host("127.8.9.10", false).expect("127/8 should be local");
-        validate_mcp_http_bind_host("[::1]", false).expect("IPv6 loopback should be local");
-        let wildcard = validate_mcp_http_bind_host("0.0.0.0", false)
+        validate_mcp_http_bind_security("localhost", false, false)
+            .expect("localhost should be local");
+        validate_mcp_http_bind_security("127.8.9.10", false, false).expect("127/8 should be local");
+        validate_mcp_http_bind_security("[::1]", false, false)
+            .expect("IPv6 loopback should be local");
+        let wildcard = validate_mcp_http_bind_security("0.0.0.0", false, false)
             .expect_err("wildcard host should require explicit opt-in")
             .to_string();
         assert!(wildcard.contains("--allow-non-local-bind"));
-        validate_mcp_http_bind_host("0.0.0.0", true)
-            .expect("explicit opt-in should allow wildcard host");
+        let missing_auth = validate_mcp_http_bind_security("0.0.0.0", true, false)
+            .expect_err("non-loopback opt-in should still require auth")
+            .to_string();
+        assert!(missing_auth.contains("auth token"));
+        validate_mcp_http_bind_security("0.0.0.0", true, true)
+            .expect("explicit opt-in plus auth should allow wildcard host");
     }
 
     #[test]
