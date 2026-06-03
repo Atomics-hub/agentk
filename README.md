@@ -403,10 +403,11 @@ initialized sessions, and reaps idle sessions. Set
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This
 is a bounded local adapter, not a hosted production HTTP/SSE control plane.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
-`/api/review` JSON endpoint on `127.0.0.1:8765`. Reviewers can record
-approve/deny decisions from the browser page, and the same permission-checked
-JSON decision API is available at `/api/approve` and `/api/deny`. Configure
-the dashboard admin-token environment variable documented in
+`/api/review` JSON endpoint on `127.0.0.1:8765` after running the packaged
+sidecar check. Reviewers can record approve/deny decisions from the browser
+page, and the same permission-checked JSON decision API is available at
+`/api/approve` and `/api/deny`. Configure the dashboard admin-token environment
+variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
 requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped
 `/api/review?reviewer=<id>` reads must include `X-AgentK-Reviewer-Token`, and
@@ -467,7 +468,8 @@ dist/agentk-sidecar/bin/agentk-store-push --dry-run
 ```
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
-templates for running the packaged dashboard and store workflow after review.
+templates for running the packaged dashboard and store workflow after review;
+the dashboard launcher preflights the packaged sidecar before serving.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.
