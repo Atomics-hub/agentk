@@ -15553,7 +15553,8 @@ and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
-exposure an explicit operator choice. Service supervisors can probe
+exposure an explicit operator choice, and those binds also require a non-empty
+`AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
 `GET /healthz` for liveness and `GET /readyz` for a redacted readiness summary
 that includes the supported MCP protocol version, active-session cap, idle
 timeout, request body cap, and configured allowed-origin count without raw
@@ -16994,6 +16995,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("configured allowed-origin count"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
+        assert!(package_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));

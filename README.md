@@ -402,8 +402,9 @@ unsupported `MCP-Protocol-Version` headers, oversized request bodies, or excess
 initialized sessions, and reaps idle sessions. `/readyz` reports the configured
 allowed-origin count without raw origin values. Non-loopback HTTP binds fail
 closed unless `--allow-non-local-bind` is passed; the packaged launcher only
-passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, so LAN/public
-exposure is an explicit operator choice. Set
+passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds
+also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. LAN/public exposure is
+therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This

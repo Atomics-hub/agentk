@@ -126,10 +126,11 @@ JSON parsing; oversized requests return 413. Use `sidecar-serve-http --root
 <bundle>` or the packaged `bin/agentk-sidecar-http` launcher for a reviewed
 sidecar bundle. HTTP bind hosts must be loopback unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes that flag
-when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, making LAN/public exposure an
-explicit operator choice. This is still a local adapter: it does not provide a
-hosted production control plane, TLS termination, SSE streaming, or external
-identity integration.
+when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`. Non-loopback binds also
+require a non-empty bearer token from `--auth-token-env`, so LAN/public exposure
+is an explicit authenticated operator choice. This is still a local adapter: it
+does not provide a hosted production control plane, TLS termination, SSE
+streaming, or external identity integration.
 
 When the client closes stdin, AgentK closes the downstream server's stdin first
 and gives the child a short grace period to exit cleanly. If the child keeps
