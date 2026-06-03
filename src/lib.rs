@@ -16066,7 +16066,8 @@ carrier, not both, and the chosen carrier may appear only once. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`, and reviewer-scoped reads must choose one
 reviewer token carrier instead of sending both header and query forms; the
-chosen reviewer read carrier may appear only once. Decisions are appended to
+chosen reviewer read carrier may appear only once. Scoped `reviewer` and
+`requester` query parameters may also appear only once. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
 dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
 and reviewer decisions maintain the live durable team store. Dashboard and MCP
@@ -17718,6 +17719,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("choose one admin token"));
         assert!(package_readme.contains("reviewer token carrier"));
         assert!(package_readme.contains("may appear only once"));
+        assert!(package_readme.contains("Scoped `reviewer` and"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));
