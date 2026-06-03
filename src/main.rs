@@ -3558,12 +3558,37 @@ fn mcp_proxy_http_accept_loop(
         active_requests -= 1;
     }
 
+    match mcp_http_drain_active_sessions(&state) {
+        Ok(drained_sessions) => {
+            if drained_sessions > 0 {
+                println!("drained    {drained_sessions} active HTTP sessions");
+            }
+        }
+        Err(error) => {
+            first_error.get_or_insert(error.to_string());
+        }
+    }
+
     if let Some(error) = first_error {
         return Err(AgentKError::InvalidMcpRequest(format!(
             "one or more MCP HTTP requests failed: {error}"
         )));
     }
     Ok(())
+}
+
+fn mcp_http_drain_active_sessions(state: &Arc<McpHttpGatewayState>) -> Result<usize, AgentKError> {
+    let sessions = {
+        let mut sessions = state.sessions.lock().map_err(|_| {
+            AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
+        })?;
+        std::mem::take(&mut *sessions)
+    };
+    let drained = sessions.len();
+    for (session_id, session) in sessions {
+        mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
+    }
+    Ok(drained)
 }
 
 fn configure_mcp_http_stream(
@@ -5674,6 +5699,96 @@ done
         let second_response =
             mcp_http_response(&initialize, &state).expect("new initialize should fit after prune");
         assert_eq!(second_response.status, "200 OK");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_drain_active_sessions_writes_session_outputs() {
+        let trace_path = mcp_proxy_trace_out_test_path("http-drain");
+        let session_report_path = mcp_session_report_path(&trace_path);
+        let _ = fs::remove_file(&trace_path);
+        let _ = fs::remove_file(&session_report_path);
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-drain-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: 1,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: Some(trace_path.clone()),
+            session_report_out: Some(session_report_path.clone()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.0"}}}"#,
+        );
+        let initialize_response =
+            mcp_http_response(&initialize, &state).expect("initialize should succeed");
+        assert_eq!(initialize_response.status, "200 OK");
+        let session_id = response_header(&initialize_response, "Mcp-Session-Id")
+            .expect("initialize should return session id")
+            .to_string();
+        let initialized = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        );
+        let initialized_response =
+            mcp_http_response(&initialized, &state).expect("initialized notification should run");
+        assert_eq!(initialized_response.status, "202 Accepted");
+        assert_eq!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .len(),
+            1
+        );
+
+        let drained = mcp_http_drain_active_sessions(&state).expect("drain should write outputs");
+        assert_eq!(drained, 1);
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+        let drained_trace_path = mcp_gateway_named_session_path(&trace_path, &session_id);
+        let drained_report_path = mcp_gateway_named_session_path(&session_report_path, &session_id);
+        assert!(drained_trace_path.exists());
+        assert!(drained_report_path.exists());
+        let session_report: agentk::McpSubprocessProxySessionReport = serde_json::from_str(
+            &fs::read_to_string(&drained_report_path).expect("drained report should read"),
+        )
+        .expect("drained report should be valid JSON");
+        assert_eq!(session_report.server_id, "http-drain-probe");
+        assert!(session_report.initialized);
+        assert!(session_report.ready);
+
+        let _ = fs::remove_file(drained_trace_path);
+        let _ = fs::remove_file(drained_report_path);
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(session_report_path);
     }
 
     #[test]

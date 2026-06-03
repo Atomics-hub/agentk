@@ -132,9 +132,11 @@ sidecar bundle. HTTP bind hosts must be loopback unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes that flag
 when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`. Non-loopback binds also
 require a non-empty bearer token from `--auth-token-env`, so LAN/public exposure
-is an explicit authenticated operator choice. This is still a local adapter: it
-does not provide a hosted production control plane, TLS termination, SSE
-streaming, or external identity integration.
+is an explicit authenticated operator choice. When a bounded HTTP gateway exits,
+it drains any still-active initialized sessions and writes their redacted
+trace/session reports using the same per-session file names as DELETE cleanup.
+This is still a local adapter: it does not provide a hosted production control
+plane, TLS termination, SSE streaming, or external identity integration.
 
 When the client closes stdin, AgentK closes the downstream server's stdin first
 and gives the child a short grace period to exit cleanly. If the child keeps
