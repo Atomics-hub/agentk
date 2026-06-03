@@ -16058,7 +16058,9 @@ demo evidence end to end.
 reject query strings. The dashboard server binds to `127.0.0.1` by default;
 non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
 admin token. Set `AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=1` for the packaged
-launcher to pass that opt-in. Dashboard request bodies are accepted only on approval
+launcher to pass that opt-in. In that mode, dashboard reads and `/readyz`
+require the same admin token; `/healthz` remains open for liveness probes.
+Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
 reads and probes cannot smuggle ignored payload bytes. Decision endpoint paths
 are matched exactly and reject query strings. Dashboard decision JSON object keys
@@ -17723,6 +17725,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
         assert!(package_readme.contains("reject query strings"));
         assert!(package_readme.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
+        assert!(package_readme.contains("dashboard reads and `/readyz`"));
+        assert!(package_readme.contains("`/healthz` remains open"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
         assert!(package_readme.contains("Decision endpoint paths"));
         assert!(package_readme.contains("decision JSON"));

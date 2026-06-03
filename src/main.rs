@@ -1418,6 +1418,7 @@ fn dashboard_serve(
         .ok()
         .filter(|value| !value.is_empty());
     validate_dashboard_bind_security(&host, allow_non_local_bind, admin_token.is_some())?;
+    let admin_read_required = !is_loopback_bind_host(&host);
     let bind = format!("{host}:{port}");
     let listener = TcpListener::bind(&bind)?;
     println!("AgentK dashboard server");
@@ -1448,6 +1449,7 @@ fn dashboard_serve(
                     &decisions,
                     permissions.as_ref(),
                     admin_token.as_deref(),
+                    admin_read_required,
                     store_root.as_ref(),
                 ) {
                     eprintln!("dashboard request failed: {error}");
@@ -1487,6 +1489,7 @@ fn handle_dashboard_http_stream(
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    admin_read_required: bool,
     store_root: Option<&PathBuf>,
 ) -> Result<(), AgentKError> {
     let request = match read_dashboard_http_request(stream) {
@@ -1500,12 +1503,13 @@ fn handle_dashboard_http_stream(
         }
         Err(error) => return Err(error),
     };
-    let response = dashboard_http_response(
+    let response = dashboard_http_response_with_read_auth(
         &request,
         trace_path,
         decisions_path,
         permissions_path,
         admin_token,
+        admin_read_required,
         store_root,
     );
     write_dashboard_http_response(stream, &response)?;
@@ -1891,12 +1895,33 @@ struct DashboardDecisionResponse<'a> {
     review: &'a ApprovalReviewReport,
 }
 
+#[cfg(test)]
 fn dashboard_http_response(
     request: &DashboardHttpRequest,
     trace_path: &PathBuf,
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    store_root: Option<&PathBuf>,
+) -> DashboardHttpResponse {
+    dashboard_http_response_with_read_auth(
+        request,
+        trace_path,
+        decisions_path,
+        permissions_path,
+        admin_token,
+        false,
+        store_root,
+    )
+}
+
+fn dashboard_http_response_with_read_auth(
+    request: &DashboardHttpRequest,
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    admin_read_required: bool,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     let (route, has_query) = match request.target.split_once('?') {
@@ -1913,64 +1938,111 @@ fn dashboard_http_response(
             "400 Bad Request",
             "dashboard decision endpoints must not include query strings\n",
         )
+    } else if admin_read_required && dashboard_http_requires_admin_read(route) {
+        match dashboard_verify_admin_token_for_request(
+            request,
+            admin_token,
+            "dashboard admin token is required for read requests",
+        ) {
+            Ok(()) => {
+                if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
+                    response
+                } else {
+                    dashboard_http_route_response(
+                        request,
+                        route,
+                        trace_path,
+                        decisions_path,
+                        permissions_path,
+                        admin_token,
+                        store_root,
+                    )
+                }
+            }
+            Err((status, error)) => dashboard_http_text(status, &format!("{error}\n")),
+        }
     } else if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
         response
     } else {
-        match (request.method.as_str(), route) {
-            ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
-                request,
-                trace_path,
-                decisions_path,
-                permissions_path,
-                store_root,
-            ),
-            ("GET" | "HEAD", "/api/review") => dashboard_http_json(
-                request,
-                trace_path,
-                decisions_path,
-                permissions_path,
-                store_root,
-            ),
-            ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
-                status: "200 OK",
-                content_type: "application/json",
-                headers: Vec::new(),
-                body: br#"{"ok":true}"#.to_vec(),
-            },
-            ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
-                trace_path,
-                decisions_path,
-                permissions_path,
-                admin_token,
-                store_root,
-            ),
-            ("POST", "/api/approve") => dashboard_http_decision(
-                request,
-                trace_path,
-                decisions_path,
-                permissions_path,
-                admin_token,
-                store_root,
-                ApprovalDecision::Approve,
-            ),
-            ("POST", "/api/deny") => dashboard_http_decision(
-                request,
-                trace_path,
-                decisions_path,
-                permissions_path,
-                admin_token,
-                store_root,
-                ApprovalDecision::Deny,
-            ),
-            ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
-            _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
-        }
+        dashboard_http_route_response(
+            request,
+            route,
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+        )
     };
 
     if request.method == "HEAD" {
         response.body.clear();
     }
     response
+}
+
+fn dashboard_http_route_response(
+    request: &DashboardHttpRequest,
+    route: &str,
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    store_root: Option<&PathBuf>,
+) -> DashboardHttpResponse {
+    match (request.method.as_str(), route) {
+        ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
+            request,
+            trace_path,
+            decisions_path,
+            permissions_path,
+            store_root,
+        ),
+        ("GET" | "HEAD", "/api/review") => dashboard_http_json(
+            request,
+            trace_path,
+            decisions_path,
+            permissions_path,
+            store_root,
+        ),
+        ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            headers: Vec::new(),
+            body: br#"{"ok":true}"#.to_vec(),
+        },
+        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+        ),
+        ("POST", "/api/approve") => dashboard_http_decision(
+            request,
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+            ApprovalDecision::Approve,
+        ),
+        ("POST", "/api/deny") => dashboard_http_decision(
+            request,
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+            ApprovalDecision::Deny,
+        ),
+        ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
+        _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
+    }
+}
+
+fn dashboard_http_requires_admin_read(path: &str) -> bool {
+    matches!(path, "/" | "/index.html" | "/api/review" | "/readyz")
 }
 
 fn dashboard_http_is_operational_path(path: &str) -> bool {
@@ -2734,14 +2806,35 @@ fn dashboard_verify_admin_token(
     request: &DashboardHttpRequest,
     admin_token: Option<&str>,
 ) -> Result<(), AgentKError> {
+    dashboard_verify_admin_token_with_message(
+        request,
+        admin_token,
+        "dashboard admin token is required for write requests",
+    )
+}
+
+fn dashboard_verify_admin_token_for_request(
+    request: &DashboardHttpRequest,
+    admin_token: Option<&str>,
+    missing_message: &'static str,
+) -> Result<(), (&'static str, AgentKError)> {
+    if let Err(error) = dashboard_admin_token_carrier_error(request) {
+        return Err(("400 Bad Request", error));
+    }
+    dashboard_verify_admin_token_with_message(request, admin_token, missing_message)
+        .map_err(|error| ("401 Unauthorized", error))
+}
+
+fn dashboard_verify_admin_token_with_message(
+    request: &DashboardHttpRequest,
+    admin_token: Option<&str>,
+    missing_message: &'static str,
+) -> Result<(), AgentKError> {
     let Some(expected) = admin_token else {
         return Ok(());
     };
-    let provided = dashboard_admin_token_from_request(request).ok_or_else(|| {
-        AgentKError::InvalidMcpRequest(
-            "dashboard admin token is required for write requests".to_string(),
-        )
-    })?;
+    let provided = dashboard_admin_token_from_request(request)
+        .ok_or_else(|| AgentKError::InvalidMcpRequest(missing_message.to_string()))?;
     if !constant_time_token_eq(expected, &provided) {
         return Err(AgentKError::InvalidMcpRequest(
             "dashboard admin token did not match".to_string(),
@@ -9585,6 +9678,149 @@ can_deny = []
         );
         assert_eq!(ready_head.status, "200 OK");
         assert!(ready_head.body.is_empty());
+
+        let nonlocal_read_missing_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request("GET", "/api/review", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_read_missing_admin.status, "401 Unauthorized");
+        let nonlocal_read_missing_admin_body = String::from_utf8(nonlocal_read_missing_admin.body)
+            .expect("nonlocal read auth body should be utf8");
+        assert!(nonlocal_read_missing_admin_body.contains("dashboard admin token is required"));
+        assert!(nonlocal_read_missing_admin_body.contains("read requests"));
+
+        let nonlocal_read_wrong_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/api/review",
+                [("Authorization", "Bearer wrong")],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_read_wrong_admin.status, "401 Unauthorized");
+        let nonlocal_read_wrong_admin_body = String::from_utf8(nonlocal_read_wrong_admin.body)
+            .expect("nonlocal wrong auth body should be utf8");
+        assert!(nonlocal_read_wrong_admin_body.contains("dashboard admin token did not match"));
+
+        let nonlocal_read_dual_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/api/review",
+                [
+                    ("Authorization", "Bearer TOKEN_SHOULD_NOT_REFLECT"),
+                    ("X-AgentK-Admin-Token", "TOKEN_SHOULD_NOT_REFLECT"),
+                ],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_read_dual_admin.status, "400 Bad Request");
+        let nonlocal_read_dual_admin_body = String::from_utf8(nonlocal_read_dual_admin.body)
+            .expect("nonlocal dual auth body should be utf8");
+        assert!(nonlocal_read_dual_admin_body.contains("dashboard admin token"));
+        assert!(!nonlocal_read_dual_admin_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
+
+        let nonlocal_read_ok = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/api/review",
+                [("X-AgentK-Admin-Token", "server-admin")],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_read_ok.status, "200 OK");
+
+        let nonlocal_ready_missing_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_ready_missing_admin.status, "401 Unauthorized");
+
+        let nonlocal_ready_ok = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/readyz",
+                [("X-AgentK-Admin-Token", "server-admin")],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_ready_ok.status, "200 OK");
+
+        let nonlocal_health_open = dashboard_http_response_with_read_auth(
+            &dashboard_test_request("GET", "/healthz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_health_open.status, "200 OK");
+
+        let nonlocal_ready_head_missing_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request("HEAD", "/readyz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_ready_head_missing_admin.status, "401 Unauthorized");
+        assert!(nonlocal_ready_head_missing_admin.body.is_empty());
+
+        let nonlocal_authed_read_body = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/api/review",
+                [("X-AgentK-Admin-Token", "server-admin")],
+                b"BODY_SHOULD_NOT_REFLECT".to_vec(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_authed_read_body.status, "400 Bad Request");
+        let nonlocal_authed_read_body_text = String::from_utf8(nonlocal_authed_read_body.body)
+            .expect("nonlocal read body rejection should be utf8");
+        assert!(nonlocal_authed_read_body_text.contains("dashboard HTTP request bodies"));
+        assert!(!nonlocal_authed_read_body_text.contains("BODY_SHOULD_NOT_REFLECT"));
 
         for (method, target) in [
             ("GET", "/"),
