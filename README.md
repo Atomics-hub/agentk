@@ -333,17 +333,17 @@ literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
-Missing preflight origins and unsupported preflight methods or headers return
-sanitized 400 responses, with CORS visibility only for allowed origins. Idle
-sessions are reaped after the configured timeout so abandoned clients do not
-hold downstream processes forever. Each initialized HTTP session has its own
-runtime lock, so one busy downstream session does not block unrelated HTTP
-sessions from initializing or progressing. The MCP endpoint and operational
-probe paths are matched exactly; query strings on those paths are rejected
-before auth, session, or probe handling. Configured endpoints must be clean
-origin-form paths beginning with `/`, without query strings, fragments,
-whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
-`/metrics`.
+Missing preflight origins, unsupported preflight methods or headers, and
+Private Network Access preflights return sanitized 400 responses, with CORS
+visibility only for allowed origins and no private-network grant. Idle sessions
+are reaped after the configured timeout so abandoned clients do not hold
+downstream processes forever. Each initialized HTTP session has its own runtime
+lock, so one busy downstream session does not block unrelated HTTP sessions
+from initializing or progressing. The MCP endpoint and operational probe paths
+are matched exactly; query strings on those paths are rejected before auth,
+session, or probe handling. Configured endpoints must be clean origin-form
+paths beginning with `/`, without query strings, fragments, whitespace, or
+control characters, and cannot reuse `/healthz`, `/readyz`, or `/metrics`.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults. Extra
 origins must be exact `scheme://authority` values or `null`, without paths,
@@ -509,8 +509,10 @@ byte cap is enforced while each request line and header line is read, so
 oversized unterminated lines fail closed before unbounded buffering. Request
 bodies are accepted only on MCP endpoint `POST`; unknown routes, CORS
 preflights, probes, and session-control requests reject bodies before route
-fallback or auth handling. CORS preflights must include an allowed `Origin` and
-are limited to `POST`, `DELETE`, and known MCP HTTP headers. MCP endpoint and
+fallback or auth handling. CORS preflights must include an allowed `Origin`, are
+limited to `POST`, `DELETE`, and known MCP HTTP headers, and reject Private
+Network Access requests until AgentK has an explicit private-network policy.
+MCP endpoint and
 operational probe paths
 are matched exactly; query strings on those paths are rejected before auth,
 session, or probe handling. The configured endpoint must be a clean origin-form

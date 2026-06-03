@@ -310,8 +310,10 @@ The safest first productization slice is the local team sidecar path:
     preflight/probe/session-control paths cannot smuggle ignored payload bytes.
     Browser CORS preflights must
     include an allowed `Origin`, treat sandboxed/file `Origin: null` as an
-    explicit opt-in rather than a built-in local origin, and are restricted to
-    `POST`/`DELETE` and the known MCP HTTP header set. Built-in
+    explicit opt-in rather than a built-in local origin, are restricted to
+    `POST`/`DELETE` and the known MCP HTTP header set, and reject Private
+    Network Access preflights until AgentK has an explicit private-network
+    policy. Built-in
     localhost/loopback origins require a localhost/loopback request `Host`, so
     non-local gateway names need explicit allowed-origin entries. The MCP
     endpoint and operational probe paths are matched exactly, and query strings

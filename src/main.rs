@@ -4863,6 +4863,16 @@ fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardH
         ));
     }
 
+    if request
+        .header("access-control-request-private-network")
+        .is_some()
+    {
+        return Some(dashboard_http_text(
+            "400 Bad Request",
+            "MCP HTTP CORS preflight private-network request is not supported\n",
+        ));
+    }
+
     if let Some(headers) = request.header("access-control-request-headers") {
         for header in headers.split(',') {
             let header = header.trim().to_ascii_lowercase();
@@ -7107,6 +7117,38 @@ done
             ),
             Some("http://localhost:5173")
         );
+        let private_network_preflight = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "POST"),
+                ("Access-Control-Request-Private-Network", "true"),
+            ],
+            Vec::new(),
+        );
+        let private_network_preflight_response =
+            mcp_http_response(&private_network_preflight, &state)
+                .expect("private-network preflight should be rejected");
+        assert_eq!(private_network_preflight_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&private_network_preflight_response.body)
+                .contains("private-network")
+        );
+        assert_eq!(
+            response_header(
+                &private_network_preflight_response,
+                "Access-Control-Allow-Origin"
+            ),
+            Some("http://localhost:5173")
+        );
+        assert_eq!(
+            response_header(
+                &private_network_preflight_response,
+                "Access-Control-Allow-Private-Network"
+            ),
+            None
+        );
         assert!(
             state
                 .sessions
@@ -7115,7 +7157,7 @@ done
                 .is_empty()
         );
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.preflight_rejections, 4);
+        assert_eq!(metrics.preflight_rejections, 5);
     }
 
     #[test]

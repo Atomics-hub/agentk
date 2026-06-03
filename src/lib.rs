@@ -16309,7 +16309,8 @@ token-carrier headers are rejected as ambiguous, and POSTs require an exact
 `POST`, so unknown routes, CORS preflights, probes, and session-control requests
 reject bodies before route fallback or auth handling.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or
-`DELETE`, and only known MCP HTTP headers.
+`DELETE`, and only known MCP HTTP headers. Private Network Access preflights are
+rejected until AgentK has an explicit private-network policy.
 The configured MCP endpoint and operational probe paths are matched exactly;
 query strings on those paths are rejected before auth, session, or probe
 handling. The configured endpoint must be a clean origin-form path beginning
@@ -18161,6 +18162,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("Request bodies are accepted only"));
         assert!(package_readme.contains("preflights must include an allowed `Origin`"));
         assert!(package_readme.contains("request `POST` or"));
+        assert!(package_readme.contains("Private Network Access preflights"));
+        assert!(package_readme.contains("explicit private-network policy"));
         assert!(package_readme.contains("endpoint and operational probe paths"));
         assert!(package_readme.contains("query strings on those paths"));
         assert!(package_readme.contains("origin-form path beginning"));
