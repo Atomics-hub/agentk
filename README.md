@@ -319,7 +319,8 @@ MCP `POST`; operational probes and other MCP methods reject bodies before auth
 or session handling. Unsupported preflight methods or headers return sanitized
 400 responses with CORS visibility for allowed origins. Idle sessions are reaped
 after the configured timeout so abandoned clients do not hold downstream
-processes forever.
+processes forever. The MCP endpoint path is matched exactly; query strings are
+rejected before auth or session handling.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves

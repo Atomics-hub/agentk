@@ -144,7 +144,9 @@ accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
 operational probes reject bodies before auth, session, or probe handling.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers; unsupported requested methods or headers return sanitized 400
-responses with CORS visibility for allowed origins.
+responses with CORS visibility for allowed origins. The configured MCP endpoint
+path is matched exactly; query strings on that endpoint return sanitized 400
+responses before auth, session, or CORS handling.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root
