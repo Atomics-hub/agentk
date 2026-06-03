@@ -1548,7 +1548,7 @@ fn read_dashboard_http_request_with_limits(
                 "HTTP request headers are too large".to_string(),
             ));
         }
-        if line == "\r\n" || line == "\n" {
+        if line == "\r\n" {
             break;
         }
         if line.starts_with(' ') || line.starts_with('\t') {
@@ -1561,13 +1561,13 @@ fn read_dashboard_http_request_with_limits(
                 "HTTP header line is invalid".to_string(),
             ));
         };
-        let name = name.trim().to_ascii_lowercase();
-        let value = value.trim().to_string();
-        if !is_valid_http_header_name(&name) {
+        if !is_valid_http_header_name(name) {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP header line is invalid".to_string(),
             ));
         }
+        let name = name.to_ascii_lowercase();
+        let value = value.trim().to_string();
         if name == "content-length" {
             if content_length_seen {
                 return Err(AgentKError::InvalidMcpRequest(
@@ -1645,27 +1645,27 @@ fn read_dashboard_http_line(
 }
 
 fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, String), AgentKError> {
-    let mut parts = line.split_whitespace();
-    let Some(method) = parts.next() else {
+    let Some(line) = line.strip_suffix("\r\n") else {
         return Err(AgentKError::InvalidMcpRequest(
             "HTTP request line is invalid".to_string(),
         ));
     };
-    let Some(target) = parts.next() else {
+    let parts = line.split(' ').collect::<Vec<_>>();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(AgentKError::InvalidMcpRequest(
             "HTTP request line is invalid".to_string(),
         ));
     };
-    let Some(version) = parts.next() else {
-        return Err(AgentKError::InvalidMcpRequest(
-            "HTTP request line is invalid".to_string(),
-        ));
+    let [method, target, version] = parts.as_slice() else {
+        unreachable!("request line part count was already validated");
     };
-    if parts.next().is_some()
-        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    if !matches!(*version, "HTTP/1.0" | "HTTP/1.1")
         || !target.starts_with('/')
         || method.is_empty()
         || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+        || target
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
     {
         return Err(AgentKError::InvalidMcpRequest(
             "HTTP request line is invalid".to_string(),
@@ -7579,6 +7579,11 @@ done
             b"GET /mcp HTTP/1.1\n\n".as_slice(),
             b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\xff\r\n\r\n".as_slice(),
+            b"GET\t/mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET  /mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp\tHTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1 \r\n\r\n".as_slice(),
+            b"GET /\tmcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
@@ -7592,6 +7597,8 @@ done
             b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost : localhost\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nContent-Length : 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: \xff\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),

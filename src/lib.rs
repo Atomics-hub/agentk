@@ -16089,11 +16089,12 @@ operations. Malformed request lines or header lines, including invalid UTF-8,
 duplicate `Content-Length` headers, LF-only line endings, and
 `Transfer-Encoding` requests are rejected as invalid framing because the
 adapter only accepts origin-form, CRLF-delimited, fixed-length HTTP/1.x
-requests. HTTP/1.1 requests must include exactly one nonblank `Host` header.
-Incomplete header blocks and short fixed-length bodies are rejected before
-handling. Duplicate MCP control headers and dual token-carrier headers are
-rejected as ambiguous, and POSTs require an exact `application/json` media
-type. Request bodies are accepted only on MCP `POST`.
+requests with exactly space-delimited request lines and token-shaped header
+names without whitespace before `:`. HTTP/1.1 requests must include exactly one
+nonblank `Host` header. Incomplete header blocks and short fixed-length bodies
+are rejected before handling. Duplicate MCP control headers and dual
+token-carrier headers are rejected as ambiguous, and POSTs require an exact
+`application/json` media type. Request bodies are accepted only on MCP `POST`.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers.
 The configured MCP endpoint path is matched exactly; query strings are rejected
@@ -17703,6 +17704,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));
         assert!(package_readme.contains("CRLF-delimited"));
+        assert!(package_readme.contains("space-delimited request lines"));
+        assert!(package_readme.contains("without whitespace before `:`"));
         assert!(package_readme.contains("nonblank `Host` header"));
         assert!(package_readme.contains("Incomplete header blocks"));
         assert!(package_readme.contains("Duplicate MCP control headers"));
