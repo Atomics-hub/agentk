@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 const MCP_HTTP_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Parser)]
@@ -422,6 +423,9 @@ enum Command {
         /// Additional allowed Origin value. Repeat for multiple browser origins.
         #[arg(long = "allow-origin")]
         allow_origins: Vec<String>,
+        /// Env var containing comma-separated additional allowed Origin values.
+        #[arg(long, default_value = MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV)]
+        allow_origin_env: String,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -524,6 +528,9 @@ enum Command {
         /// Additional allowed Origin value. Repeat for multiple browser origins.
         #[arg(long = "allow-origin")]
         allow_origins: Vec<String>,
+        /// Env var containing comma-separated additional allowed Origin values.
+        #[arg(long, default_value = MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV)]
+        allow_origin_env: String,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -821,6 +828,7 @@ fn run() -> Result<(), AgentKError> {
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
             command,
             args,
@@ -841,6 +849,7 @@ fn run() -> Result<(), AgentKError> {
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
             command,
             args,
@@ -871,6 +880,7 @@ fn run() -> Result<(), AgentKError> {
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
         } => sidecar_serve_http(
             root,
@@ -883,6 +893,7 @@ fn run() -> Result<(), AgentKError> {
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
         ),
         Command::SidecarPackage {
@@ -3207,6 +3218,7 @@ fn mcp_proxy_http(
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
+    allow_origin_env: String,
     auth_token_env: String,
     command: String,
     args: Vec<String>,
@@ -3221,6 +3233,7 @@ fn mcp_proxy_http(
             "auth-token-env must be a safe environment variable name".to_string(),
         ));
     }
+    let allow_origins = mcp_http_allowed_origins_from_env(allow_origins, &allow_origin_env)?;
     let config = mcp_proxy_config_from_cli(
         agent_id,
         server_id,
@@ -3904,6 +3917,46 @@ fn mcp_http_new_session_id() -> Result<String, AgentKError> {
     Ok(hex::encode(bytes))
 }
 
+fn mcp_http_allowed_origins_from_env(
+    mut allow_origins: Vec<String>,
+    allow_origin_env: &str,
+) -> Result<Vec<String>, AgentKError> {
+    if !is_safe_env_name(allow_origin_env) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "allow-origin-env must be a safe environment variable name".to_string(),
+        ));
+    }
+    for origin in &allow_origins {
+        mcp_http_validate_configured_origin(origin)?;
+    }
+    if let Ok(value) = env::var(allow_origin_env) {
+        allow_origins.extend(mcp_http_parse_allow_origin_env(&value)?);
+    }
+    Ok(allow_origins)
+}
+
+fn mcp_http_parse_allow_origin_env(value: &str) -> Result<Vec<String>, AgentKError> {
+    let mut origins = Vec::new();
+    for origin in value
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+    {
+        mcp_http_validate_configured_origin(origin)?;
+        origins.push(origin.to_string());
+    }
+    Ok(origins)
+}
+
+fn mcp_http_validate_configured_origin(origin: &str) -> Result<(), AgentKError> {
+    if origin.chars().any(char::is_control) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP allowed origins must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn mcp_http_cors_origin(origin: Option<&str>, allow_origins: &[String]) -> Option<String> {
     let origin = origin?.trim();
     if origin == "null"
@@ -4144,6 +4197,7 @@ fn sidecar_serve_http(
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
+    allow_origin_env: String,
     auth_token_env: String,
 ) -> Result<(), AgentKError> {
     if !is_safe_env_name(&auth_token_env) {
@@ -4151,6 +4205,7 @@ fn sidecar_serve_http(
             "auth-token-env must be a safe environment variable name".to_string(),
         ));
     }
+    let allow_origins = mcp_http_allowed_origins_from_env(allow_origins, &allow_origin_env)?;
     let config = sidecar_run_config(&root, |name| env::var(name).ok())?;
     let session_report_out = mcp_session_report_path(&config.trace_out);
     let auth_token = env::var(&auth_token_env)
@@ -4713,6 +4768,8 @@ done
             "32768",
             "--allow-origin",
             "http://localhost:3000",
+            "--allow-origin-env",
+            "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
             "--command",
@@ -4738,6 +4795,7 @@ done
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
             args,
             trace_out,
@@ -4756,6 +4814,7 @@ done
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
+        assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
         assert_eq!(args, vec!["-c".to_string(), "printf ok".to_string()]);
         assert_eq!(trace_out, Some(PathBuf::from(".agentk/runs/http.jsonl")));
@@ -5009,6 +5068,24 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mcp_http_allow_origin_env_parses_comma_separated_origins() {
+        let origins = mcp_http_parse_allow_origin_env(
+            " https://console.example, http://localhost:5173 , null, vscode-webview://agentk ",
+        )
+        .expect("allow-origin env should parse");
+        assert_eq!(
+            origins,
+            vec![
+                "https://console.example".to_string(),
+                "http://localhost:5173".to_string(),
+                "null".to_string(),
+                "vscode-webview://agentk".to_string(),
+            ]
+        );
+        assert!(mcp_http_parse_allow_origin_env("https://bad.exa\nmple").is_err());
     }
 
     #[test]
@@ -5680,6 +5757,8 @@ done
             "32768",
             "--allow-origin",
             "http://localhost:3000",
+            "--allow-origin-env",
+            "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
         ])
@@ -5696,6 +5775,7 @@ done
             session_idle_timeout_ms,
             max_body_bytes,
             allow_origins,
+            allow_origin_env,
             auth_token_env,
         }) = cli.command
         else {
@@ -5711,6 +5791,7 @@ done
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
+        assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
     }
 

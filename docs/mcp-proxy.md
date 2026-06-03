@@ -109,7 +109,9 @@ cargo run -- mcp-proxy-http \
 The HTTP adapter accepts local POST requests at the configured endpoint, rejects
 unsafe origins unless they are explicitly allowed, answers allowed browser CORS
 preflights before bearer-token auth, and maps initialized MCP sessions onto the
-same subprocess mediation path. If clients send `MCP-Protocol-Version`, AgentK
+same subprocess mediation path. Use repeated `--allow-origin` values or
+comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values to permit approved
+non-local browser adapters. If clients send `MCP-Protocol-Version`, AgentK
 requires it to match the supported protocol on initialize and the negotiated
 protocol on follow-up POST/DELETE requests. The adapter also serves local
 `GET`/`HEAD` probes at `/healthz` and `/readyz`;

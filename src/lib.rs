@@ -15548,10 +15548,11 @@ direct JSON responses, Origin validation, browser CORS preflight handling,
 `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`,
 `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
-`AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup. Service
-supervisors can probe `GET /healthz` for liveness and `GET /readyz` for a
-redacted readiness summary that includes the supported MCP protocol version,
-active-session cap, idle timeout, and request body cap.
+`AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
+comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
+browser adapters. Service supervisors can probe `GET /healthz` for liveness and
+`GET /readyz` for a redacted readiness summary that includes the supported MCP
+protocol version, active-session cap, idle timeout, and request body cap.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 
@@ -16973,6 +16974,7 @@ can_deny = ["*"]
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
+        assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));
