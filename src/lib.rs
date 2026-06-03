@@ -16089,8 +16089,9 @@ operations. Malformed request lines or header lines, including invalid UTF-8,
 duplicate `Content-Length` headers, LF-only line endings, control characters in
 header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are
 rejected as invalid framing because the adapter only accepts origin-form,
-CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
-request lines and token-shaped header names without whitespace before `:`.
+fragment-free, CRLF-delimited, fixed-length HTTP/1.x requests with exactly
+space-delimited request lines and token-shaped header names without whitespace
+before `:`.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation.
@@ -17726,10 +17727,12 @@ can_deny = ["*"]
         assert!(package_readme.contains("`Expect`, or `Upgrade` header"));
         assert!(package_readme.contains("Only `Connection: close` is accepted"));
         assert!(package_readme.contains("unsupported hop-by-hop negotiation"));
+        assert!(package_readme.contains("fragment-free"));
         assert!(package_readme.contains("CRLF-delimited"));
         assert!(package_readme.contains("space-delimited"));
         assert!(package_readme.contains("request lines"));
-        assert!(package_readme.contains("without whitespace before `:`"));
+        assert!(package_readme.contains("without whitespace"));
+        assert!(package_readme.contains("before `:`"));
         assert!(package_readme.contains("syntactically valid `Host` authority"));
         assert!(package_readme.contains("unbracketed IPv6"));
         assert!(package_readme.contains("Incomplete header blocks"));
