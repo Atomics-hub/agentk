@@ -3665,6 +3665,7 @@ fn mcp_http_operational_response(
             "expired_sessions_reaped": expired_sessions,
             "max_concurrent_requests": state.max_concurrent_requests,
             "max_body_bytes": state.max_body_bytes,
+            "configured_allowed_origins": state.allow_origins.len(),
             "auth_required": state.auth_token.is_some()
         }))?,
     })
@@ -5454,7 +5455,10 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
-            allow_origins: Vec::new(),
+            allow_origins: vec![
+                "https://console.example".to_string(),
+                "vscode-webview://agentk".to_string(),
+            ],
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
@@ -5498,6 +5502,14 @@ done
         assert_eq!(
             ready_json["max_body_bytes"],
             serde_json::json!(MCP_HTTP_DEFAULT_MAX_BODY_BYTES)
+        );
+        assert_eq!(
+            ready_json["configured_allowed_origins"],
+            serde_json::json!(2)
+        );
+        assert!(
+            !String::from_utf8_lossy(&ready.body).contains("https://console.example"),
+            "readyz should report allowed-origin counts without raw origin values"
         );
         assert_eq!(ready_json["auth_required"], serde_json::json!(true));
 
