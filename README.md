@@ -504,8 +504,9 @@ supervisors; dashboard probe paths are matched exactly and reject query strings.
 Reviewers can record approve/deny decisions from the browser page, and the same
 permission-checked JSON decision API is available at
 `/api/approve` and `/api/deny`. Dashboard request bodies are accepted only on
-those decision endpoints, so review reads and probes cannot smuggle ignored
-payload bytes. Configure the dashboard admin-token environment
+those decision endpoints and must declare `Content-Type: application/json`, so
+review reads and probes cannot smuggle ignored payload bytes. Configure the
+dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
 requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped
@@ -519,6 +520,7 @@ curl -sS -H "X-AgentK-Reviewer-Token: <reviewer-secret>" \
   "http://127.0.0.1:8765/api/review?reviewer=tom"
 
 curl -sS -H "X-AgentK-Admin-Token: <admin-secret>" \
+  -H "Content-Type: application/json" \
   http://127.0.0.1:8765/api/approve \
   -d '{"id":"appr_123456789abc","reviewer":"tom","reason":"one-shot approval","reviewer_token":"<reviewer-secret>"}'
 ```

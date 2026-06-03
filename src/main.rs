@@ -2581,6 +2581,9 @@ fn dashboard_http_decision(
     if let Err(error) = dashboard_verify_admin_token(request, admin_token) {
         return dashboard_http_text("401 Unauthorized", &format!("{error}\n"));
     }
+    if let Some(response) = dashboard_http_json_content_type_error(request) {
+        return response;
+    }
     match dashboard_record_decision(
         trace_path,
         decisions_path,
@@ -2597,6 +2600,22 @@ fn dashboard_http_decision(
         },
         Err(error) => dashboard_http_text("400 Bad Request", &format!("{error}\n")),
     }
+}
+
+fn dashboard_http_json_content_type_error(
+    request: &DashboardHttpRequest,
+) -> Option<DashboardHttpResponse> {
+    if request
+        .header("content-type")
+        .is_some_and(|value| http_media_type_matches(value, "application/json"))
+    {
+        return None;
+    }
+
+    Some(dashboard_http_text(
+        "415 Unsupported Media Type",
+        "dashboard decision API requires application/json\n",
+    ))
 }
 
 fn dashboard_verify_admin_token(
@@ -4556,14 +4575,10 @@ fn mcp_http_post_response(
             "MCP HTTP POST requires Accept: application/json, text/event-stream\n",
         ));
     }
-    if !request.header("content-type").is_some_and(|value| {
-        value
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .eq_ignore_ascii_case("application/json")
-    }) {
+    if !request
+        .header("content-type")
+        .is_some_and(|value| http_media_type_matches(value, "application/json"))
+    {
         return Ok(dashboard_http_text(
             "415 Unsupported Media Type",
             "MCP HTTP POST requires application/json\n",
@@ -4955,15 +4970,20 @@ fn mcp_http_token_from_request(request: &DashboardHttpRequest) -> Option<&str> {
 
 fn mcp_http_accepts(request: &DashboardHttpRequest, expected: &str) -> bool {
     request.header("accept").is_some_and(|value| {
-        value.split(',').any(|part| {
-            part.trim()
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .eq_ignore_ascii_case(expected)
-        })
+        value
+            .split(',')
+            .any(|part| http_media_type_matches(part, expected))
     })
+}
+
+fn http_media_type_matches(value: &str, expected: &str) -> bool {
+    value
+        .trim()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case(expected)
 }
 
 fn mcp_gateway_session_path(path: &std::path::Path, max_sessions: usize, index: usize) -> PathBuf {
@@ -8716,9 +8736,10 @@ can_deny = []
         }));
 
         let missing_token = dashboard_http_response(
-            &dashboard_test_request(
+            &dashboard_test_request_with_headers(
                 "POST",
                 "/api/approve",
+                [("Content-Type", "application/json")],
                 serde_json::json!({
                     "id": approval_id,
                     "reviewer": "tom",
@@ -8738,10 +8759,36 @@ can_deny = []
             String::from_utf8(missing_token.body).expect("error body should be utf8");
         assert!(missing_token_body.contains("requires reviewer_token"));
 
-        let missing_admin = dashboard_http_response(
-            &dashboard_test_request(
+        let invalid_media_type = dashboard_http_response(
+            &dashboard_test_request_with_headers(
                 "POST",
                 "/api/approve",
+                [("Content-Type", "text/plain")],
+                serde_json::json!({
+                    "id": approval_id,
+                    "reviewer": "tom",
+                    "reason": "wrong dashboard media type",
+                    "reviewer_token": "dashboard-token"
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(invalid_media_type.status, "415 Unsupported Media Type");
+        let invalid_media_type_body =
+            String::from_utf8(invalid_media_type.body).expect("media type body should be utf8");
+        assert!(invalid_media_type_body.contains("dashboard decision API"));
+
+        let missing_admin = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [("Content-Type", "application/json")],
                 serde_json::json!({
                     "id": approval_id,
                     "reviewer": "tom",
@@ -8766,7 +8813,10 @@ can_deny = []
             &dashboard_test_request_with_headers(
                 "POST",
                 "/api/approve",
-                [("Authorization", "Bearer wrong")],
+                [
+                    ("Authorization", "Bearer wrong"),
+                    ("Content-Type", "application/json"),
+                ],
                 serde_json::json!({
                     "id": approval_id,
                     "reviewer": "tom",
@@ -8791,7 +8841,10 @@ can_deny = []
             &dashboard_test_request_with_headers(
                 "POST",
                 "/api/approve",
-                [("Authorization", "Bearer server-admin")],
+                [
+                    ("Authorization", "Bearer server-admin"),
+                    ("Content-Type", "application/json"),
+                ],
                 serde_json::json!({
                     "id": approval_id,
                     "reviewer": "tom",
@@ -8828,7 +8881,10 @@ can_deny = []
             &dashboard_test_request_with_headers(
                 "POST",
                 "/api/deny",
-                [("X-AgentK-Admin-Token", "server-admin")],
+                [
+                    ("X-AgentK-Admin-Token", "server-admin"),
+                    ("Content-Type", "application/json"),
+                ],
                 serde_json::json!({
                     "id": value["review"]["open_approvals"][1]["id"],
                     "reviewer": "viewer",

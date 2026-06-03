@@ -185,7 +185,8 @@ The safest first productization slice is the local team sidecar path:
     `/healthz` and redacted `/readyz` probes for service supervisors, and those
     probe paths are matched exactly with query strings rejected. Dashboard
     request bodies are accepted only on approval decision endpoints, so review
-    reads and probes cannot carry ignored payload bytes.
+    reads and probes cannot carry ignored payload bytes, and those write
+    endpoints require `Content-Type: application/json`.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
     decisions, notification outbox rows, and reviewers. It remains
