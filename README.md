@@ -326,7 +326,9 @@ other `Connection` values and hop-by-hop negotiation headers such as
 as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
 explicit trusted-proxy mode, and ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
-tokens instead. Request lines must be exactly space-delimited, request targets
+tokens instead. Method override headers such as `X-HTTP-Method-Override` and
+`X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
+intermediaries. Request lines must be exactly space-delimited, request targets
 must begin with exactly one `/` and must not contain fragments, and header names
 must be token-shaped without whitespace before `:`. All HTTP gateway requests
 must include exactly one syntactically
@@ -506,6 +508,9 @@ Forwarded proxy metadata such as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
 is rejected until AgentK has an explicit trusted-proxy mode.
 Ambient cookie headers such as `Cookie` and `Set-Cookie` are rejected because
 the gateway uses explicit bearer/reviewer tokens instead.
+Method override headers such as `X-HTTP-Method-Override` and
+`X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
+intermediaries.
 Request lines must be exactly space-delimited, header names must be
 token-shaped without whitespace before `:`, request targets must begin with
 exactly one `/` and must not contain fragments, and duplicate MCP control
