@@ -157,7 +157,11 @@ The safest first productization slice is the local team sidecar path:
    `approve`/`deny --permissions ...` enforce reviewer authority before appending
    a decision.
 8. `dashboard` writes a static local HTML approval dashboard from the signed
-   trace, append-only decisions, and optional permissions manifest.
+   trace, append-only decisions, and optional permissions manifest. The static
+   and served dashboards surface the redacted inspect evidence summary directly:
+   final hash, signature status, allow/block counts, blocked policy rules,
+   syscall rollups, and evidence-ref counts such as `args_sha256`,
+   `descriptor_sha256`, and `response_sha256`.
 9. `sidecar-package` validates a sidecar bundle and writes a local deployable
    package with launcher scripts, a package-local `agentk-sidecar-check`
    validator, a package-local safe-agent demo launcher, Claude/Codex/Cursor
