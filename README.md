@@ -449,7 +449,8 @@ AgentK executable path when `agentk` is not on the service account's `PATH`.
 Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
 credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
 install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
-for audit review. Set `AGENTK_TRACE` to that path when running
+for audit review and includes a redacted `trace-inspect` summary in the JSON
+report. Set `AGENTK_TRACE` to that path when running
 `dist/agentk-sidecar/bin/agentk-dashboard`,
 `dist/agentk-sidecar/bin/agentk-dashboard-server`,
 `dist/agentk-sidecar/bin/agentk-store-export`, or
@@ -653,6 +654,9 @@ or updating store artifacts. `agentk-package-check` also verifies
 baseline deploy-template hardening markers, including no-new-privileges systemd
 services, a non-root package Dockerfile, and loopback-published,
 capability-dropped, read-only Compose services.
+The packaged safe-agent demo JSON includes the same redacted inspect counts,
+syscall summary, evidence-ref summary, and blocked policy rules that
+`trace-inspect` would show separately.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.
