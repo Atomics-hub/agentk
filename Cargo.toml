@@ -2,7 +2,7 @@
 name = "agentk"
 version = "0.1.0"
 edition = "2024"
-description = "A tiny agent security kernel prototype: Context MMU, capability receipts, and forensic replay logs."
+description = "Agent security kernel and installable MCP sidecar with policy, approvals, and forensic replay logs."
 license = "MIT"
 
 [dependencies]

@@ -4792,6 +4792,10 @@ fn sidecar_package(
             .display()
     );
     println!(
+        "manifest  {}",
+        report.package.join("manifest.json").display()
+    );
+    println!(
         "launch    {}",
         report.package.join("bin/agentk-sidecar").display()
     );

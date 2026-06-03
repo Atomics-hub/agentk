@@ -27,6 +27,7 @@ const MCP_STDIN_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MCP_SUBPROCESS_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
+const SIDECAR_PACKAGE_SCHEMA_VERSION: u32 = 1;
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -13885,6 +13886,12 @@ pub fn package_sidecar_bundle(
     copy_sidecar_dir(root, &sidecar_out)?;
     let files = vec![
         write_packaged_sidecar_file(out, "README.md", &sidecar_package_readme())?,
+        write_packaged_sidecar_file(out, "manifest.json", &sidecar_package_manifest()?)?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-package-info",
+            &sidecar_package_info_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar", &sidecar_launcher_script())?,
         write_packaged_sidecar_file(
             out,
@@ -13946,6 +13953,7 @@ pub fn package_sidecar_bundle(
         use std::os::unix::fs::PermissionsExt;
         for relative in [
             "bin/agentk-sidecar",
+            "bin/agentk-package-info",
             "bin/agentk-sidecar-tcp",
             "bin/agentk-sidecar-http",
             "bin/agentk-sidecar-check",
@@ -15480,6 +15488,10 @@ MCP clients stable launcher scripts in `bin/`.
 ## Contents
 
 - `sidecar/`: generated AgentK sidecar bundle.
+- `manifest.json`: machine-readable package schema, AgentK version, relative
+  launcher paths, default local transports, and deploy/store artifacts.
+- `bin/agentk-package-info`: prints `manifest.json` for support, deployment,
+  and inventory checks.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
   command/args MCP client.
 - `bin/agentk-sidecar-tcp`: bounded TCP JSON-RPC gateway launcher for internal
@@ -15507,6 +15519,7 @@ MCP clients stable launcher scripts in `bin/`.
 ## Commands
 
 ```sh
+./bin/agentk-package-info
 ./bin/agentk-sidecar
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
@@ -15601,6 +15614,70 @@ Edit `sidecar/agentk-sidecar.toml` to replace the starter downstream MCP server
 with your GitHub, Postgres, Slack, filesystem, or internal MCP server.
 "#
     .to_string()
+}
+
+fn sidecar_package_manifest() -> Result<String, AgentKError> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": SIDECAR_PACKAGE_SCHEMA_VERSION,
+        "package": "agentk-team-sidecar",
+        "agentk_version": env!("CARGO_PKG_VERSION"),
+        "sidecar_bundle": "sidecar",
+        "safe_agent_demo": "sidecar/demos/safe-agent-demo.md",
+        "launchers": [
+            "bin/agentk-package-info",
+            "bin/agentk-sidecar",
+            "bin/agentk-sidecar-tcp",
+            "bin/agentk-sidecar-http",
+            "bin/agentk-sidecar-check",
+            "bin/agentk-dashboard",
+            "bin/agentk-dashboard-server",
+            "bin/agentk-store-export",
+            "bin/agentk-store-check",
+            "bin/agentk-store-sync",
+            "bin/agentk-store-push"
+        ],
+        "client_snippets": [
+            "clients/claude-desktop.mcp.json",
+            "clients/codex-cursor-command.txt"
+        ],
+        "storage_contracts": [
+            "storage/postgres-schema.sql"
+        ],
+        "deploy_templates": [
+            "deploy/systemd/agentk-dashboard.service",
+            "deploy/launchd/com.agentk.dashboard.plist",
+            "deploy/docker/Dockerfile",
+            "deploy/docker/compose.yml",
+            "deploy/README.md"
+        ],
+        "default_transports": [
+            {
+                "name": "stdio",
+                "launcher": "bin/agentk-sidecar"
+            },
+            {
+                "name": "tcp-jsonl",
+                "launcher": "bin/agentk-sidecar-tcp",
+                "default_bind": "127.0.0.1:9797"
+            },
+            {
+                "name": "streamable-http",
+                "launcher": "bin/agentk-sidecar-http",
+                "default_url": "http://127.0.0.1:9798/mcp"
+            }
+        ],
+        "dashboard": {
+            "launcher": "bin/agentk-dashboard-server",
+            "default_url": "http://127.0.0.1:8765"
+        },
+        "store_workflow": {
+            "sync": "bin/agentk-store-sync",
+            "export": "bin/agentk-store-export",
+            "check": "bin/agentk-store-check",
+            "push": "bin/agentk-store-push"
+        },
+        "evidence_contract": "redacted hash/evidence-first audit data; no raw tool payloads or secret values"
+    }))?)
 }
 
 fn audit_store_readme() -> String {
@@ -15728,6 +15805,16 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 exec "$AGENTK_BIN" sidecar-run --root "$ROOT/sidecar"
+"#
+    .to_string()
+}
+
+fn sidecar_package_info_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+cat "$ROOT/manifest.json"
 "#
     .to_string()
 }
@@ -16960,9 +17047,11 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 19);
+        assert_eq!(report.files.len(), 21);
+        assert!(out.join("manifest.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
+        assert!(out.join("bin/agentk-package-info").exists());
         assert!(out.join("bin/agentk-sidecar").exists());
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
@@ -17013,6 +17102,8 @@ can_deny = ["*"]
         assert!(check_launcher.contains("\"$@\""));
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
+        assert!(package_readme.contains("manifest.json"));
+        assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
@@ -17043,6 +17134,45 @@ can_deny = ["*"]
         assert!(package_readme.contains("preflights must request `POST` or `DELETE`"));
         assert!(package_readme.contains("endpoint path is matched exactly"));
         assert!(package_readme.contains("fixed-length"));
+        let package_manifest =
+            fs::read_to_string(out.join("manifest.json")).expect("manifest should read");
+        let package_manifest_json: serde_json::Value =
+            serde_json::from_str(&package_manifest).expect("manifest should parse");
+        assert_eq!(
+            package_manifest_json["schema_version"],
+            serde_json::json!(SIDECAR_PACKAGE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            package_manifest_json["agentk_version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            package_manifest_json["sidecar_bundle"],
+            serde_json::json!("sidecar")
+        );
+        assert_eq!(
+            package_manifest_json["default_transports"][2]["default_url"],
+            serde_json::json!("http://127.0.0.1:9798/mcp")
+        );
+        assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-package-info")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["push"],
+            serde_json::json!("bin/agentk-store-push")
+        );
+        assert!(
+            !package_manifest.contains(&out.display().to_string()),
+            "package manifest should use relative paths"
+        );
+        let package_info = fs::read_to_string(out.join("bin/agentk-package-info"))
+            .expect("package info should read");
+        assert!(package_info.contains("manifest.json"));
+        assert!(package_info.contains("cat"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
