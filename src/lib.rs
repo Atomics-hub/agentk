@@ -15926,6 +15926,7 @@ and gives the team a policy file they can review before agents touch real tools.
 
    The local dashboard server exposes `/api/review` and permission-checked
    `/api/approve` and `/api/deny` JSON endpoints for appending decisions.
+   Dashboard write requests require `Content-Type: application/json`.
    Add `token_env = "AGENTK_REVIEWER_NAME_TOKEN"` to a user to require
    `reviewer_token` in dashboard write requests.
 
@@ -16055,8 +16056,9 @@ demo evidence end to end.
 `bin/agentk-package-check --json`. It also serves `/healthz` and a redacted
 `/readyz` for service supervisors. Dashboard probe paths are matched exactly and
 reject query strings. Dashboard request bodies are accepted only on approval
-decision endpoints, so review reads and probes cannot smuggle ignored payload
-bytes. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
+decision endpoints and must declare `Content-Type: application/json`, so review
+reads and probes cannot smuggle ignored payload bytes. Set
+`AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, on write requests. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`. Decisions are appended to
@@ -16626,7 +16628,8 @@ installing them.
 Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, for `/api/approve` and `/api/deny` writes. Reviewer
 `token_env` entries in `sidecar/team-permissions.toml` are still enforced after
-the dashboard admin token passes.
+the dashboard admin token passes. Dashboard write requests require
+`Content-Type: application/json`.
 
 The packaged dashboard launcher runs `bin/agentk-package-check --json` before
 serving. Run `bin/agentk-package-check --json` after copying the package or
@@ -17701,6 +17704,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("/readyz"));
         assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
         assert!(package_readme.contains("reject query strings"));
+        assert!(package_readme.contains("must declare `Content-Type: application/json`"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));
