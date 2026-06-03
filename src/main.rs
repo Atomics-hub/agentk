@@ -4001,6 +4001,7 @@ struct McpHttpGatewayMetrics {
     auth_rejections: usize,
     origin_rejections: usize,
     method_rejections: usize,
+    preflight_rejections: usize,
     sse_unsupported_requests: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
@@ -4569,7 +4570,21 @@ fn mcp_http_record_response_metrics(
             }
             _ => {}
         }
+        if mcp_http_is_preflight_rejection(request, response, state) {
+            metrics.preflight_rejections += 1;
+        }
     })
+}
+
+fn mcp_http_is_preflight_rejection(
+    request: &DashboardHttpRequest,
+    response: &DashboardHttpResponse,
+    state: &Arc<McpHttpGatewayState>,
+) -> bool {
+    request.method == "OPTIONS"
+        && request.target.split('?').next() == Some(state.endpoint.as_str())
+        && response.status == "400 Bad Request"
+        && response.body.starts_with(b"MCP HTTP CORS preflight ")
 }
 
 fn mcp_http_update_metrics(
@@ -4706,6 +4721,7 @@ fn mcp_http_operational_response(
             "auth_rejections": metrics.auth_rejections,
             "origin_rejections": metrics.origin_rejections,
             "method_rejections": metrics.method_rejections,
+            "preflight_rejections": metrics.preflight_rejections,
             "sse_unsupported_requests": metrics.sse_unsupported_requests,
             "invalid_framing_responses": metrics.invalid_framing_responses,
             "header_too_large_responses": metrics.header_too_large_responses,
@@ -4791,6 +4807,9 @@ agentk_mcp_http_origin_rejections_total {origin_rejections}\n\
 # HELP agentk_mcp_http_method_rejections_total Requests rejected because the HTTP method is not allowed.\n\
 # TYPE agentk_mcp_http_method_rejections_total counter\n\
 agentk_mcp_http_method_rejections_total {method_rejections}\n\
+# HELP agentk_mcp_http_preflight_rejections_total CORS preflight requests rejected by MCP HTTP validation.\n\
+# TYPE agentk_mcp_http_preflight_rejections_total counter\n\
+agentk_mcp_http_preflight_rejections_total {preflight_rejections}\n\
 # HELP agentk_mcp_http_sse_unsupported_requests_total GET requests shaped like MCP SSE streams while SSE is not implemented.\n\
 # TYPE agentk_mcp_http_sse_unsupported_requests_total counter\n\
 agentk_mcp_http_sse_unsupported_requests_total {sse_unsupported_requests}\n\
@@ -4834,6 +4853,7 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         auth_rejections = metrics.auth_rejections,
         origin_rejections = metrics.origin_rejections,
         method_rejections = metrics.method_rejections,
+        preflight_rejections = metrics.preflight_rejections,
         sse_unsupported_requests = metrics.sse_unsupported_requests,
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
@@ -6738,6 +6758,8 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.preflight_rejections, 4);
     }
 
     #[test]
@@ -8010,6 +8032,7 @@ done
         assert_eq!(ready_json["get_requests"], serde_json::json!(2));
         assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
         assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
+        assert_eq!(ready_json["preflight_rejections"], serde_json::json!(0));
         assert_eq!(ready_json["sse_unsupported_requests"], serde_json::json!(0));
         assert_eq!(
             ready_json["invalid_framing_responses"],
@@ -8022,6 +8045,18 @@ done
         assert_eq!(ready_json["body_too_large_responses"], serde_json::json!(0));
         assert_eq!(ready_json["sessions_created"], serde_json::json!(0));
         assert_eq!(ready_json["session_not_found"], serde_json::json!(0));
+
+        let rejected_preflight = mcp_http_response(
+            &dashboard_test_request_with_headers(
+                "OPTIONS",
+                "/mcp",
+                [("Origin", "https://console.example")],
+                Vec::new(),
+            ),
+            &state,
+        )
+        .expect("preflight validation failure should respond");
+        assert_eq!(rejected_preflight.status, "400 Bad Request");
 
         let unauthorized_metrics = mcp_http_response(
             &dashboard_test_request("GET", "/metrics", Vec::new()),
@@ -8051,10 +8086,12 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_max_concurrent_requests 8\n"));
         assert!(metrics_body.contains("agentk_mcp_http_configured_allowed_origins 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_required 1\n"));
-        assert!(metrics_body.contains("agentk_mcp_http_requests_total 4\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_requests_total 5\n"));
         assert!(metrics_body.contains("agentk_mcp_http_get_requests_total 4\n"));
-        assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_options_requests_total 1\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 3\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_preflight_rejections_total 1\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_unsupported_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));

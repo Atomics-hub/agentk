@@ -257,9 +257,9 @@ The safest first productization slice is the local team sidecar path:
     bind hosts, emits browser safety headers, drains active sessions on bounded
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics
     for supervisors, tracks redacted cumulative request/rejection/session
-    lifecycle counters plus stream-framing rejection counters, uses
-    constant-time bearer-token checks, and writes trace/session evidence. The
-    HTTP parser rejects malformed or non-UTF-8
+    lifecycle counters plus CORS preflight and stream-framing rejection
+    counters, uses constant-time bearer-token checks, and writes trace/session
+    evidence. The HTTP parser rejects malformed or non-UTF-8
     request/header lines, LF-only line endings, duplicate or non-decimal
     `Content-Length` headers, control characters in header values, and any
     transfer-encoding header, expectation header, or upgrade header with

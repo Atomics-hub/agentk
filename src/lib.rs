@@ -16147,8 +16147,8 @@ exposure an explicit operator choice, and those binds also require a non-empty
 request/session counters. The readiness summary includes the supported MCP
 protocol version, active-session cap, idle timeout, request body cap, request
 header cap, configured stream-timeout, parsed request totals, rejection totals,
-stream-framing rejection totals, session lifecycle totals, and allowed-origin
-counts without raw origin values.
+CORS preflight validation rejection totals, stream-framing rejection totals,
+session lifecycle totals, and allowed-origin counts without raw origin values.
 Initialized HTTP sessions use per-session runtime locks, so one busy downstream
 session does not block unrelated sessions from initializing or progressing.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
@@ -17760,6 +17760,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("unbounded buffering"));
         assert!(package_readme.contains("per-session runtime locks"));
+        assert!(package_readme.contains("CORS preflight validation rejection totals"));
         assert!(package_readme.contains("stream-framing rejection totals"));
         assert!(package_readme.contains("still-active initialized"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));

@@ -352,8 +352,8 @@ lands. It also serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
-gateway gauges plus cumulative request/session and framing-rejection counters
-for service supervisors.
+gateway gauges plus cumulative request, preflight-rejection, session, and
+framing-rejection counters for service supervisors.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
 an unsupported method response with the normal `Allow` header.
 When `AGENTK_MCP_HTTP_TOKEN` is set, `/readyz` and `/metrics` require the same
