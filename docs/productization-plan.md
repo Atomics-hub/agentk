@@ -237,9 +237,10 @@ The safest first productization slice is the local team sidecar path:
     for supervisors, tracks redacted cumulative request/rejection/session
     lifecycle counters, uses constant-time bearer-token checks, and writes
     trace/session evidence. The HTTP parser rejects malformed or non-UTF-8
-    request/header lines, LF-only line endings, duplicate `Content-Length`
-    headers, control characters in header values, and any transfer-encoding
-    header, expectation header, or upgrade header with sanitized 400 responses.
+    request/header lines, LF-only line endings, duplicate or non-decimal
+    `Content-Length` headers, control characters in header values, and any
+    transfer-encoding header, expectation header, or upgrade header with
+    sanitized 400 responses.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected. Request lines must be exactly
     space-delimited, request targets cannot contain fragments, and header names

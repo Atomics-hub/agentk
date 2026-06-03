@@ -135,9 +135,10 @@ SSE-shaped `GET` requests to the MCP endpoint require `Accept:
 text/event-stream`, pass the same auth/origin/protocol/session-id checks, and
 then fail closed with sanitized 501 responses plus a redacted
 unsupported-SSE counter until resumable SSE support lands.
-Malformed request lines or header lines, including invalid UTF-8, duplicate
-`Content-Length` headers, LF-only line endings, control characters in header
-values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected
+Malformed request lines or header lines, including invalid UTF-8, duplicate or
+non-decimal `Content-Length` headers, LF-only line endings, control characters
+in header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header
+are rejected
 with sanitized 400 responses because the adapter only accepts origin-form,
 fragment-free, CRLF-delimited, fixed-length HTTP/1.x requests with exactly
 space-delimited request lines and token-shaped header names without whitespace

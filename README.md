@@ -311,9 +311,9 @@ rejects malformed session ids before lookup, rejects unsupported
 `MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
 oversized request bodies with 413 and excess initialized sessions with 429.
 POSTs require an exact `application/json` media type.
-Malformed request lines or header lines, including invalid UTF-8, duplicate
-`Content-Length` headers, LF-only line endings, control characters in header
-values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
+Malformed request lines or header lines, including invalid UTF-8, duplicate or
+non-decimal `Content-Length` headers, LF-only line endings, control characters
+in header values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
 `Expect`/`Upgrade` headers are rejected as invalid framing or control
 ambiguity. `Connection: close` is accepted, while other `Connection` values and
 hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
@@ -459,7 +459,7 @@ HTTP binds fail closed unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes it when
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds also require a
 non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
-including invalid UTF-8, duplicate `Content-Length`
+including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid
 framing. Only `Connection: close` is accepted; other `Connection` values plus

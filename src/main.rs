@@ -1580,11 +1580,7 @@ fn read_dashboard_http_request_with_limits(
                 ));
             }
             content_length_seen = true;
-            content_length = value.parse::<usize>().map_err(|_| {
-                AgentKError::InvalidMcpRequest(
-                    "dashboard HTTP content-length is invalid".to_string(),
-                )
-            })?;
+            content_length = parse_http_content_length(&value)?;
             if content_length > max_body_bytes {
                 return Err(AgentKError::InvalidMcpRequest(
                     "HTTP request body is too large".to_string(),
@@ -1727,6 +1723,17 @@ fn is_valid_http_header_value(value: &str) -> bool {
         .unwrap_or(value)
         .bytes()
         .all(|byte| byte == b'\t' || !byte.is_ascii_control())
+}
+
+fn parse_http_content_length(value: &str) -> Result<usize, AgentKError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard HTTP content-length is invalid".to_string(),
+        ));
+    }
+    value.parse::<usize>().map_err(|_| {
+        AgentKError::InvalidMcpRequest("dashboard HTTP content-length is invalid".to_string())
+    })
 }
 
 fn is_valid_http_host_header(value: &str) -> bool {
@@ -7977,6 +7984,8 @@ done
             b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost : localhost\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length : 0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: +0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: LENGTH_SHOULD_NOT_REFLECT\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: \xff\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: value\0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: value\rbad\r\n\r\n".as_slice(),
@@ -8000,6 +8009,7 @@ done
             assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
             assert!(response.contains("invalid MCP HTTP request"));
             assert!(!response.contains("FRAGMENT_SHOULD_NOT_REFLECT"));
+            assert!(!response.contains("LENGTH_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)
