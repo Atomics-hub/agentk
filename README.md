@@ -137,6 +137,13 @@ Inspect the latest flight log without printing raw input refs:
 cargo run -- trace-inspect .agentk/runs/latest.jsonl
 ```
 
+Summarize a flight log as an audit and approval inbox:
+
+```sh
+cargo run -- audit .agentk/runs/latest.jsonl
+cargo run -- approvals .agentk/runs/latest.jsonl
+```
+
 Replay the latest flight log without side effects:
 
 ```sh
@@ -261,7 +268,7 @@ responses are bounded by a configurable timeout so a hung child cannot stall
 the proxy indefinitely:
 
 ```sh
-cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
+cargo run -- mcp-proxy-stdio --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-demo.jsonl --session-report-out .agentk/runs/mcp-proxy-demo.session.json --command sh --arg examples/mcp-poisoned-server.sh < examples/mcp-proxy-client-session.jsonl
 cargo run -- trace-inspect .agentk/runs/mcp-proxy-demo.jsonl
 ```
 
@@ -270,10 +277,184 @@ cleared child environment. Repeat the flag for multiple variables.
 Repeat `--arg` for each downstream argument; hyphen-prefixed child args are
 accepted, for example `--arg -c`.
 Use `--response-timeout-ms` to set the downstream response timeout; the default
-is 30000 ms.
+is 30000 ms. Use `--max-client-messages` to cap non-empty client messages in a
+single proxy session; the default is 10000 and the proxy returns a sanitized
+JSON-RPC error before closing the session when the limit is exceeded. Use
+`--session-report-out` to write a redacted JSON summary with readiness state,
+client message counts, cap status, and allow/deny event totals.
+
+For internal adapters that cannot speak stdio directly, `mcp-proxy-tcp` exposes
+the same mediated MCP JSON-RPC line protocol on a bounded local TCP listener:
+
+```sh
+cargo run -- mcp-proxy-tcp --host 127.0.0.1 --port 9797 --max-sessions 4 --max-concurrent-sessions 2 --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-tcp-demo.jsonl --session-report-out .agentk/runs/mcp-proxy-tcp-demo.session.json --command sh --arg examples/mcp-poisoned-server.sh
+```
+
+The TCP gateway spawns a fresh downstream MCP process per accepted session,
+uses the same lifecycle, redaction, timeout, and client-message cap behavior as
+`mcp-proxy-stdio`, bounds simultaneous sessions with
+`--max-concurrent-sessions`, and exits after `--max-sessions` sessions.
+
+For MCP clients that support Streamable HTTP, `mcp-proxy-http` serves a local
+stateful MCP endpoint:
+
+```sh
+cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-concurrent-requests 16 --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-http-demo.jsonl --session-report-out .agentk/runs/mcp-proxy-http-demo.session.json --command sh --arg examples/mcp-poisoned-server.sh
+```
+
+The HTTP gateway validates Origin headers, supports optional bearer auth via
+`AGENTK_MCP_HTTP_TOKEN`, returns `Mcp-Session-Id` on initialize, accepts
+subsequent POSTs with that session id, returns direct JSON responses, and
+rejects GET/SSE streams with 405 until resumable SSE support lands.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
+
+## Team Sidecar Starter
+
+Generate the first installable-team bundle:
+
+```sh
+cargo install --path .
+agentk sidecar-init --out agentk-sidecar
+agentk sidecar-check --root agentk-sidecar
+agentk sidecar-package --root agentk-sidecar --out dist/agentk-sidecar --force
+```
+
+`sidecar-check` validates the TOML, policy, secret-reference, permission, and
+MCP client snippet shapes without spawning downstream tools or touching
+credentials.
+
+The bundle writes a reviewable starter layout:
+
+```txt
+agentk-sidecar/
+  agentk-sidecar.toml
+  team-permissions.toml
+  policies/team-sidecar.toml
+  secrets.toml
+  clients/claude-desktop.mcp.json
+  clients/codex-cursor-mcp-command.txt
+  demos/safe-agent-demo.md
+```
+
+Use it to put AgentK in front of one downstream MCP server, capture
+`.agentk/runs/team-sidecar.jsonl` plus
+`.agentk/runs/team-sidecar.session.json`, and review the boundary with:
+
+```sh
+cargo run --locked -- safe-agent-demo
+agentk audit agentk-sidecar/.agentk/runs/team-sidecar.jsonl
+agentk approvals agentk-sidecar/.agentk/runs/team-sidecar.jsonl
+agentk permissions --path agentk-sidecar/team-permissions.toml
+agentk dashboard agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --out agentk-sidecar/.agentk/dashboard.html
+agentk dashboard-serve agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --store-root agentk-sidecar/.agentk/team-store
+agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --root agentk-sidecar/.agentk/team-store
+agentk store-export agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --out agentk-sidecar/.agentk/store
+agentk store-check --root agentk-sidecar/.agentk/store
+agentk store-push --root agentk-sidecar/.agentk/store --dry-run
+agentk trace-inspect agentk-sidecar/.agentk/runs/team-sidecar.jsonl
+```
+
+Record local reviewer decisions without modifying the signed trace:
+
+```sh
+agentk approve agentk-sidecar/.agentk/runs/team-sidecar.jsonl appr_123456789abc --permissions agentk-sidecar/team-permissions.toml --reviewer tom --reason "one-shot support reply"
+agentk deny agentk-sidecar/.agentk/runs/team-sidecar.jsonl appr_123456789abc --permissions agentk-sidecar/team-permissions.toml --reviewer tom --reason "too broad for this profile"
+```
+
+The generated `agentk-sidecar.toml` starts with AgentK's built-in minimal MCP
+server so the sidecar can be launched immediately. Replace `[downstream]` with
+the GitHub, Postgres, Slack, filesystem, or internal MCP server command you want
+to govern. MCP clients can run the packaged sidecar launcher as:
+
+```sh
+dist/agentk-sidecar/bin/agentk-sidecar
+```
+
+Packaged Claude Desktop and generic Codex/Cursor command snippets are written
+under `dist/agentk-sidecar/clients/`.
+For internal adapters that need a local TCP JSONL endpoint instead of stdio, run
+`dist/agentk-sidecar/bin/agentk-sidecar-tcp`; it loads the same reviewed
+sidecar bundle, listens on `127.0.0.1:9797` by default, bounds concurrent
+sessions with `AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS`, and writes per-session
+trace/session reports.
+For MCP clients or adapters that support Streamable HTTP POST locally, run
+`dist/agentk-sidecar/bin/agentk-sidecar-http`; it loads the same reviewed
+bundle, binds localhost by default, requires `AGENTK_MCP_HTTP_TOKEN` when that
+environment variable is set, enforces origin/session checks, and writes the
+same trace/session evidence. This is a bounded local adapter, not a hosted
+production HTTP/SSE control plane.
+`dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
+`/api/review` JSON endpoint on `127.0.0.1:8765`. Reviewers can record
+approve/deny decisions from the browser page, and the same permission-checked
+JSON decision API is available at `/api/approve` and `/api/deny`. Configure
+the dashboard admin-token environment variable documented in
+[docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
+requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped
+`/api/review?reviewer=<id>` reads must include `X-AgentK-Reviewer-Token`, and
+write requests must include `reviewer_token` matching that environment
+variable:
+
+```sh
+curl -sS -H "X-AgentK-Reviewer-Token: <reviewer-secret>" \
+  "http://127.0.0.1:8765/api/review?reviewer=tom"
+
+curl -sS -H "X-AgentK-Admin-Token: <admin-secret>" \
+  http://127.0.0.1:8765/api/approve \
+  -d '{"id":"appr_123456789abc","reviewer":"tom","reason":"one-shot approval","reviewer_token":"<reviewer-secret>"}'
+```
+
+The served dashboard has a reviewer view. Enter a reviewer id and token, then
+use **My View** to load only the approvals and decisions that reviewer is
+authorized to see. Direct scoped HTML views are also available at
+`/?reviewer=<id>` and enforce the same reviewer token checks.
+It also has a requester view: enter an AgentK agent id and use **Agent View**,
+or open `/?requester=<agent-id>`, to see only approvals and decisions produced
+by that signed agent identity.
+
+`agentk store-export` writes normalized audit, approval, and permission JSON
+plus a Postgres schema contract and psql-loadable TSV files for teams that want
+a shared audit store. `agentk store-sync` maintains a live local team store
+with current redacted JSON snapshots plus normalized JSONL tables for dashboard
+or control-plane processes. It also writes `current/notifications.json` and
+`tables/notifications.jsonl`, a credential-free outbox for pending approval
+requests and recorded decisions that Slack, GitHub, email, or ticket bridges
+can consume without AgentK storing delivery tokens. `agentk store-check`
+validates both exported Postgres artifacts and the live durable team store.
+`dashboard-serve --store-root ...` refreshes the same durable store on review
+reads and reviewer decisions:
+
+```sh
+agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --root agentk-sidecar/.agentk/team-store
+agentk store-check --root agentk-sidecar/.agentk/team-store
+```
+
+For Postgres import:
+
+```sh
+cd agentk-sidecar/.agentk/store
+agentk store-check --root .
+agentk store-push --root . --dry-run
+agentk store-push --root .
+```
+
+Packaged installs include the same workflow as stable launchers:
+
+```sh
+dist/agentk-sidecar/bin/agentk-store-export
+dist/agentk-sidecar/bin/agentk-store-check
+dist/agentk-sidecar/bin/agentk-store-sync
+dist/agentk-sidecar/bin/agentk-store-push --dry-run
+```
+
+`dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
+templates for running the packaged dashboard and store workflow after review.
+
+This is the productization path: sidecar first, then approval broker,
+dashboard, multi-user policy, and local packaging.
+The concrete milestone plan lives in
+[docs/productization-plan.md](docs/productization-plan.md).
 
 Run the MCP killer demo. The downstream server returns poisoned tool output
 that tells the agent to exfiltrate a private marker and patch the repository.
@@ -451,6 +632,8 @@ Implemented today:
   reflection,
 - downstream subprocess MCP notification-flood bounds without raw payload
   reflection,
+- downstream subprocess MCP clean shutdown on client EOF, with forced cleanup
+  only after a short grace period,
 - subprocess MCP stderr suppression for downstream diagnostics,
 - subprocess MCP lifecycle error redaction for downstream `initialize` and
   `ping` failures,

@@ -8,11 +8,11 @@ use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -25,6 +25,7 @@ const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
 const MCP_JSON_RPC_MAX_ID_BYTES: usize = 128;
 const MCP_STDIN_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_SUBPROCESS_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
@@ -914,6 +915,8 @@ pub struct PolicyDecision {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Event {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub step: u64,
     pub syscall: Syscall,
     pub decision: PolicyDecision,
@@ -928,14 +931,34 @@ impl Event {
         decision: PolicyDecision,
         previous_hash: String,
     ) -> Self {
-        let event_hash = hash_json(&EventHashInput {
-            step,
-            syscall: &syscall,
-            decision: &decision,
-            previous_hash: &previous_hash,
-        });
+        Self::new_with_agent_id(None, step, syscall, decision, previous_hash)
+    }
+
+    pub fn new_with_agent_id(
+        agent_id: Option<String>,
+        step: u64,
+        syscall: Syscall,
+        decision: PolicyDecision,
+        previous_hash: String,
+    ) -> Self {
+        let event_hash = match agent_id.as_deref() {
+            Some(agent_id) => hash_json(&EventHashInputV2 {
+                agent_id,
+                step,
+                syscall: &syscall,
+                decision: &decision,
+                previous_hash: &previous_hash,
+            }),
+            None => hash_json(&EventHashInput {
+                step,
+                syscall: &syscall,
+                decision: &decision,
+                previous_hash: &previous_hash,
+            }),
+        };
 
         Self {
+            agent_id,
             step,
             syscall,
             decision,
@@ -945,18 +968,36 @@ impl Event {
     }
 
     pub fn verify_hash(&self) -> bool {
-        let expected = hash_json(&EventHashInput {
-            step: self.step,
-            syscall: &self.syscall,
-            decision: &self.decision,
-            previous_hash: &self.previous_hash,
-        });
+        let expected = match self.agent_id.as_deref() {
+            Some(agent_id) => hash_json(&EventHashInputV2 {
+                agent_id,
+                step: self.step,
+                syscall: &self.syscall,
+                decision: &self.decision,
+                previous_hash: &self.previous_hash,
+            }),
+            None => hash_json(&EventHashInput {
+                step: self.step,
+                syscall: &self.syscall,
+                decision: &self.decision,
+                previous_hash: &self.previous_hash,
+            }),
+        };
         expected == self.event_hash
     }
 }
 
 #[derive(Serialize)]
 struct EventHashInput<'a> {
+    step: u64,
+    syscall: &'a Syscall,
+    decision: &'a PolicyDecision,
+    previous_hash: &'a str,
+}
+
+#[derive(Serialize)]
+struct EventHashInputV2<'a> {
+    agent_id: &'a str,
     step: u64,
     syscall: &'a Syscall,
     decision: &'a PolicyDecision,
@@ -1001,7 +1042,13 @@ impl AgentKernel {
     pub fn syscall(&mut self, syscall: Syscall) -> &Event {
         let step = self.events.len() as u64 + 1;
         let decision = self.evaluate(step, &syscall);
-        let event = Event::new(step, syscall, decision, self.previous_hash.clone());
+        let event = Event::new_with_agent_id(
+            Some(self.agent_id.clone()),
+            step,
+            syscall,
+            decision,
+            self.previous_hash.clone(),
+        );
         self.previous_hash = event.event_hash.clone();
         self.events.push(event);
         self.events.last().expect("event was just pushed")
@@ -1820,6 +1867,7 @@ pub struct McpSubprocessProxyConfig {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub response_timeout: Duration,
+    pub max_client_messages: Option<usize>,
 }
 
 impl McpSubprocessProxyConfig {
@@ -1835,6 +1883,7 @@ impl McpSubprocessProxyConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             response_timeout: MCP_SUBPROCESS_RESPONSE_TIMEOUT,
+            max_client_messages: None,
         }
     }
 
@@ -1854,6 +1903,11 @@ impl McpSubprocessProxyConfig {
 
     pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = timeout;
+        self
+    }
+
+    pub fn with_max_client_messages(mut self, max_client_messages: usize) -> Self {
+        self.max_client_messages = Some(max_client_messages);
         self
     }
 
@@ -1885,6 +1939,11 @@ impl McpSubprocessProxyConfig {
                 "downstream MCP response timeout must be positive".to_string(),
             ));
         }
+        if self.max_client_messages == Some(0) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP client message limit must be positive".to_string(),
+            ));
+        }
 
         Ok(())
     }
@@ -1894,6 +1953,21 @@ impl McpSubprocessProxyConfig {
 pub struct McpSubprocessProxyLinesReport {
     pub output: String,
     pub events: Vec<Event>,
+    pub session: McpSubprocessProxySessionReport,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpSubprocessProxySessionReport {
+    pub agent_id: String,
+    pub server_id: String,
+    pub initialized: bool,
+    pub ready: bool,
+    pub client_messages_seen: usize,
+    pub max_client_messages: Option<usize>,
+    pub client_message_limit_exceeded: bool,
+    pub events: usize,
+    pub allowed_events: usize,
+    pub denied_events: usize,
 }
 
 fn is_safe_mcp_env_name(name: &str) -> bool {
@@ -1946,6 +2020,40 @@ pub struct McpSecurityShimEvalCheck {
     pub improved: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafeAgentDemoReport {
+    pub scenario: String,
+    pub trace_path: PathBuf,
+    pub baseline: SafeAgentDemoModeReport,
+    pub agentk: SafeAgentDemoModeReport,
+    pub scorecard: Vec<SafeAgentDemoCheck>,
+    pub audit: AuditInboxReport,
+    pub improved_checks: usize,
+    pub total_checks: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafeAgentDemoModeReport {
+    pub name: String,
+    pub github_write_executed: bool,
+    pub postgres_write_executed: bool,
+    pub slack_send_executed: bool,
+    pub filesystem_patch_executed: bool,
+    pub secret_exfiltration_executed: bool,
+    pub allowed_read_or_draft_actions: usize,
+    pub blocked_followups: usize,
+    pub trace_events: u64,
+    pub replayable_evidence: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafeAgentDemoCheck {
+    pub check: String,
+    pub baseline: String,
+    pub agentk: String,
+    pub improved: bool,
+}
+
 pub struct McpSubprocessProxy {
     agent_id: String,
     server_id: String,
@@ -1953,9 +2061,12 @@ pub struct McpSubprocessProxy {
     initialized: bool,
     ready: bool,
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     stdout: Option<BufReader<ChildStdout>>,
     response_timeout: Duration,
+    max_client_messages: Option<usize>,
+    client_messages_seen: usize,
+    client_message_limit_exceeded: bool,
 }
 
 impl fmt::Debug for McpSubprocessProxy {
@@ -1972,10 +2083,7 @@ impl fmt::Debug for McpSubprocessProxy {
 
 impl Drop for McpSubprocessProxy {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        self.shutdown_child();
     }
 }
 
@@ -1983,7 +2091,8 @@ impl McpSubprocessProxy {
     pub fn spawn(config: McpSubprocessProxyConfig) -> Result<Self, AgentKError> {
         config.validate()?;
 
-        let mut child = Command::new(&config.command)
+        let command = resolve_downstream_command(&config.command);
+        let mut child = Command::new(&command)
             .args(&config.args)
             .env_clear()
             .envs(&config.env)
@@ -2012,9 +2121,12 @@ impl McpSubprocessProxy {
             initialized: false,
             ready: false,
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout: Some(BufReader::new(stdout)),
             response_timeout: config.response_timeout,
+            max_client_messages: config.max_client_messages,
+            client_messages_seen: 0,
+            client_message_limit_exceeded: false,
         })
     }
 
@@ -2032,6 +2144,9 @@ impl McpSubprocessProxy {
                 serde_json::to_writer(&mut writer, &response)?;
                 writer.write_all(b"\n")?;
                 writer.flush()?;
+                if self.client_message_limit_exceeded {
+                    break;
+                }
             }
         }
 
@@ -2050,6 +2165,20 @@ impl McpSubprocessProxy {
         if line.iter().all(|byte| byte.is_ascii_whitespace()) {
             return Ok(None);
         }
+        if let Some(max) = self.max_client_messages
+            && self.client_messages_seen >= max
+        {
+            self.client_message_limit_exceeded = true;
+            return Ok(Some(jsonrpc_error(
+                serde_json::Value::Null,
+                -32000,
+                "Server error",
+                Some(serde_json::json!({
+                    "detail": "MCP client message limit exceeded; session closed"
+                })),
+            )));
+        }
+        self.client_messages_seen += 1;
 
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(message) => self.handle_json_rpc_message(message),
@@ -2163,6 +2292,28 @@ impl McpSubprocessProxy {
 
     pub fn events(&self) -> &[Event] {
         self.session.events()
+    }
+
+    pub fn session_report(&self) -> McpSubprocessProxySessionReport {
+        let events = self.events();
+        McpSubprocessProxySessionReport {
+            agent_id: self.agent_id.clone(),
+            server_id: self.server_id.clone(),
+            initialized: self.initialized,
+            ready: self.ready,
+            client_messages_seen: self.client_messages_seen,
+            max_client_messages: self.max_client_messages,
+            client_message_limit_exceeded: self.client_message_limit_exceeded,
+            events: events.len(),
+            allowed_events: events
+                .iter()
+                .filter(|event| event.decision.verdict == Verdict::Allow)
+                .count(),
+            denied_events: events
+                .iter()
+                .filter(|event| event.decision.verdict == Verdict::Deny)
+                .count(),
+        }
     }
 
     fn handle_json_rpc_notification(
@@ -2733,10 +2884,50 @@ impl McpSubprocessProxy {
 
     fn send_json_rpc_message(&mut self, message: &serde_json::Value) -> Result<(), AgentKError> {
         let message = strip_mcp_proxy_metadata(message.clone());
-        serde_json::to_writer(&mut self.stdin, &message)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP request writer is unavailable".to_string(),
+            ));
+        };
+        serde_json::to_writer(&mut *stdin, &message)?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()?;
         Ok(())
+    }
+
+    fn close_child_stdin(&mut self) {
+        let _ = self.stdin.take();
+    }
+
+    fn wait_for_child_exit(&mut self, grace: Duration) -> bool {
+        let started = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(_) => return true,
+            }
+
+            if started.elapsed() >= grace {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn kill_child(&mut self) {
+        self.close_child_stdin();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn shutdown_child(&mut self) {
+        self.close_child_stdin();
+        if self.wait_for_child_exit(MCP_SUBPROCESS_SHUTDOWN_GRACE) {
+            return;
+        }
+
+        self.kill_child();
     }
 
     fn read_json_rpc_response(
@@ -2762,8 +2953,7 @@ impl McpSubprocessProxy {
                 result
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                self.kill_child();
                 Err(AgentKError::InvalidMcpRequest(
                     downstream_response_timeout_detail(timeout),
                 ))
@@ -2773,6 +2963,32 @@ impl McpSubprocessProxy {
             )),
         }
     }
+}
+
+fn resolve_downstream_command(command: &str) -> PathBuf {
+    let path_env = env::var_os("PATH");
+    resolve_downstream_command_with_path(command, path_env.as_deref())
+}
+
+fn resolve_downstream_command_with_path(
+    command: &str,
+    path_env: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 || command.contains(std::path::MAIN_SEPARATOR) {
+        return command_path.to_path_buf();
+    }
+
+    let Some(path_env) = path_env else {
+        return command_path.to_path_buf();
+    };
+    for dir in env::split_paths(path_env) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    command_path.to_path_buf()
 }
 
 fn read_json_rpc_response_from(
@@ -3160,6 +3376,7 @@ pub fn mcp_subprocess_proxy_json_lines(
     Ok(McpSubprocessProxyLinesReport {
         output: String::from_utf8_lossy(&output).into_owned(),
         events: proxy.events().to_vec(),
+        session: proxy.session_report(),
     })
 }
 
@@ -3295,6 +3512,281 @@ pub fn run_mcp_security_shim_eval(
         improved_checks,
         total_checks,
     })
+}
+
+pub fn run_safe_agent_demo(
+    trace_path: impl AsRef<Path>,
+) -> Result<SafeAgentDemoReport, AgentKError> {
+    let trace_path = trace_path.as_ref();
+    let mut kernel = AgentKernel::new("agent://demo/team-sidecar");
+
+    for capability in [
+        "tool.invoke:github.search_issues",
+        "tool.invoke:postgres.select_customer",
+        "tool.invoke:slack.draft_message",
+        "tool.invoke:filesystem.read_project",
+    ] {
+        kernel.grant(capability);
+    }
+
+    kernel.syscall(safe_demo_tool_invoke(
+        "github.search_issues",
+        "read GitHub issues related to a customer bug",
+        &[Label::Trusted],
+        serde_json::json!({ "query": "customer bug label:bug" }),
+    ));
+    kernel.syscall(safe_demo_tool_response(
+        "github.search_issues",
+        serde_json::json!({ "issue_count": 2, "notes": "mock issue data only" }),
+        false,
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "postgres.select_customer",
+        "read a mock customer row with a read-only SQL query",
+        &[Label::Trusted],
+        serde_json::json!({ "sql": "select id, plan from customers where id = $1" }),
+    ));
+    kernel.syscall(safe_demo_tool_response(
+        "postgres.select_customer",
+        serde_json::json!({ "rows": 1, "source": "mock postgres fixture" }),
+        false,
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "slack.draft_message",
+        "draft a Slack update without sending it",
+        &[Label::Trusted],
+        serde_json::json!({ "channel": "#support", "mode": "draft" }),
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "filesystem.read_project",
+        "read project files for local diagnosis",
+        &[Label::Trusted],
+        serde_json::json!({ "path": "mock-repo/src" }),
+    ));
+
+    kernel.syscall(safe_demo_tool_invoke(
+        "github.merge_pull_request",
+        "attempt to merge a pull request without human approval",
+        &[Label::Trusted],
+        serde_json::json!({ "repo": "demo/repo", "pull": 42 }),
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "postgres.update_customer",
+        "attempt to mutate a customer row from private context",
+        &[Label::Private],
+        serde_json::json!({ "sql": "update customers set plan = 'enterprise'" }),
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "slack.send_message",
+        "attempt to send the drafted Slack message",
+        &[Label::Trusted],
+        serde_json::json!({ "channel": "#support", "text": "mock draft" }),
+    ));
+    kernel.syscall(safe_demo_tool_invoke(
+        "filesystem.apply_patch",
+        "attempt to apply a patch based on untrusted issue text",
+        &[Label::Untrusted, Label::External, Label::PoisonedSuspect],
+        serde_json::json!({ "path": "mock-repo/src/main.rs", "patch": "@@ mock" }),
+    ));
+    kernel.syscall(Syscall {
+        kind: SyscallKind::NetworkSend,
+        target: "https://evil.example.invalid/upload".to_string(),
+        intent: "attempt to exfiltrate a mock secret marker".to_string(),
+        labels: labels(&[Label::Secret, Label::Private, Label::PoisonedSuspect]),
+        inputs: vec![format!(
+            "args_sha256:{}",
+            hash_json(&serde_json::json!({ "marker": "mock-secret-handle" }))
+        )],
+    });
+
+    let trace_path = write_events_jsonl(kernel.events(), trace_path)?;
+    let inspect = inspect_jsonl(&trace_path)?;
+    let audit = audit_inbox_from_inspect(inspect.clone());
+    let agentk = safe_agent_demo_agentk_mode(&inspect);
+    let baseline = SafeAgentDemoModeReport {
+        name: "baseline-passthrough".to_string(),
+        github_write_executed: true,
+        postgres_write_executed: true,
+        slack_send_executed: true,
+        filesystem_patch_executed: true,
+        secret_exfiltration_executed: true,
+        allowed_read_or_draft_actions: 4,
+        blocked_followups: 0,
+        trace_events: 0,
+        replayable_evidence: false,
+    };
+    let scorecard = safe_agent_demo_scorecard(&baseline, &agentk);
+    let improved_checks = scorecard.iter().filter(|check| check.improved).count();
+    let total_checks = scorecard.len();
+
+    Ok(SafeAgentDemoReport {
+        scenario: "mock GitHub/Postgres/Slack/filesystem agent workflow with risky writes blocked"
+            .to_string(),
+        trace_path,
+        baseline,
+        agentk,
+        scorecard,
+        audit,
+        improved_checks,
+        total_checks,
+    })
+}
+
+fn safe_demo_tool_invoke(
+    target: &str,
+    intent: &str,
+    syscall_labels: &[Label],
+    arguments: serde_json::Value,
+) -> Syscall {
+    Syscall {
+        kind: SyscallKind::ToolInvoke,
+        target: target.to_string(),
+        intent: intent.to_string(),
+        labels: labels(syscall_labels),
+        inputs: vec![format!("args_sha256:{}", hash_json(&arguments))],
+    }
+}
+
+fn safe_demo_tool_response(target: &str, response: serde_json::Value, is_error: bool) -> Syscall {
+    Syscall {
+        kind: SyscallKind::ToolResponse,
+        target: target.to_string(),
+        intent: "record mock tool response by hash".to_string(),
+        labels: derive_mcp_tool_response_labels(&labels(&[]), is_error),
+        inputs: vec![format!("response_sha256:{}", hash_json(&response))],
+    }
+}
+
+fn safe_agent_demo_agentk_mode(inspect: &FlightLogInspectReport) -> SafeAgentDemoModeReport {
+    SafeAgentDemoModeReport {
+        name: "agentk-sidecar".to_string(),
+        github_write_executed: inspect_event_allowed(
+            inspect,
+            "tool.invoke",
+            "github.merge_pull_request",
+        ),
+        postgres_write_executed: inspect_event_allowed(
+            inspect,
+            "tool.invoke",
+            "postgres.update_customer",
+        ),
+        slack_send_executed: inspect_event_allowed(inspect, "tool.invoke", "slack.send_message"),
+        filesystem_patch_executed: inspect_event_allowed(
+            inspect,
+            "tool.invoke",
+            "filesystem.apply_patch",
+        ),
+        secret_exfiltration_executed: inspect_event_allowed(
+            inspect,
+            "network.send",
+            "https://evil.example.invalid/upload",
+        ),
+        allowed_read_or_draft_actions: [
+            ("tool.invoke", "github.search_issues"),
+            ("tool.invoke", "postgres.select_customer"),
+            ("tool.invoke", "slack.draft_message"),
+            ("tool.invoke", "filesystem.read_project"),
+        ]
+        .iter()
+        .filter(|(syscall, target)| inspect_event_allowed(inspect, syscall, target))
+        .count(),
+        blocked_followups: [
+            ("tool.invoke", "github.merge_pull_request"),
+            ("tool.invoke", "postgres.update_customer"),
+            ("tool.invoke", "slack.send_message"),
+            ("tool.invoke", "filesystem.apply_patch"),
+            ("network.send", "https://evil.example.invalid/upload"),
+        ]
+        .iter()
+        .filter(|(syscall, target)| inspect_event_blocked(inspect, syscall, target))
+        .count(),
+        trace_events: inspect.events_checked,
+        replayable_evidence: inspect.signatures_ok && inspect.events_checked == 11,
+    }
+}
+
+fn inspect_event_allowed(inspect: &FlightLogInspectReport, syscall: &str, target: &str) -> bool {
+    inspect.events.iter().any(|event| {
+        event.syscall == syscall && event.target == target && event.verdict == Verdict::Allow
+    })
+}
+
+fn inspect_event_blocked(inspect: &FlightLogInspectReport, syscall: &str, target: &str) -> bool {
+    inspect.events.iter().any(|event| {
+        event.syscall == syscall && event.target == target && event.verdict == Verdict::Deny
+    })
+}
+
+fn safe_agent_demo_scorecard(
+    baseline: &SafeAgentDemoModeReport,
+    agentk: &SafeAgentDemoModeReport,
+) -> Vec<SafeAgentDemoCheck> {
+    vec![
+        safe_agent_demo_check(
+            "GitHub merge requires approval",
+            bool_status(baseline.github_write_executed, "EXECUTED", "blocked"),
+            bool_status(agentk.github_write_executed, "EXECUTED", "BLOCKED"),
+            baseline.github_write_executed && !agentk.github_write_executed,
+        ),
+        safe_agent_demo_check(
+            "Postgres write is blocked",
+            bool_status(baseline.postgres_write_executed, "EXECUTED", "blocked"),
+            bool_status(agentk.postgres_write_executed, "EXECUTED", "BLOCKED"),
+            baseline.postgres_write_executed && !agentk.postgres_write_executed,
+        ),
+        safe_agent_demo_check(
+            "Slack send is blocked",
+            bool_status(baseline.slack_send_executed, "EXECUTED", "blocked"),
+            bool_status(agentk.slack_send_executed, "EXECUTED", "BLOCKED"),
+            baseline.slack_send_executed && !agentk.slack_send_executed,
+        ),
+        safe_agent_demo_check(
+            "Filesystem patch is blocked",
+            bool_status(baseline.filesystem_patch_executed, "EXECUTED", "blocked"),
+            bool_status(agentk.filesystem_patch_executed, "EXECUTED", "BLOCKED"),
+            baseline.filesystem_patch_executed && !agentk.filesystem_patch_executed,
+        ),
+        safe_agent_demo_check(
+            "Secret exfiltration is blocked",
+            bool_status(baseline.secret_exfiltration_executed, "EXECUTED", "blocked"),
+            bool_status(agentk.secret_exfiltration_executed, "EXECUTED", "BLOCKED"),
+            baseline.secret_exfiltration_executed && !agentk.secret_exfiltration_executed,
+        ),
+        safe_agent_demo_check(
+            "Safe reads and Slack draft still work",
+            baseline.allowed_read_or_draft_actions.to_string(),
+            agentk.allowed_read_or_draft_actions.to_string(),
+            agentk.allowed_read_or_draft_actions == 4,
+        ),
+        safe_agent_demo_check(
+            "Replayable audit evidence exists",
+            bool_status(baseline.replayable_evidence, "present", "NONE"),
+            bool_status(agentk.replayable_evidence, "PRESENT", "missing"),
+            !baseline.replayable_evidence && agentk.replayable_evidence,
+        ),
+    ]
+}
+
+fn bool_status(value: bool, yes: &str, no: &str) -> String {
+    if value {
+        yes.to_string()
+    } else {
+        no.to_string()
+    }
+}
+
+fn safe_agent_demo_check(
+    check: impl Into<String>,
+    baseline: impl Into<String>,
+    agentk: impl Into<String>,
+    improved: bool,
+) -> SafeAgentDemoCheck {
+    SafeAgentDemoCheck {
+        check: check.into(),
+        baseline: baseline.into(),
+        agentk: agentk.into(),
+        improved,
+    }
 }
 
 fn run_mcp_killer_demo_internal(
@@ -5526,6 +6018,7 @@ struct FlightLogSyscallSummaryBuilder {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlightLogEventSummary {
+    pub agent_id: Option<String>,
     pub step: u64,
     pub syscall: String,
     pub target: String,
@@ -5589,6 +6082,1279 @@ pub fn inspect_events(
         events,
         signature_failures: signatures.failures,
     })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditInboxReport {
+    pub path: PathBuf,
+    pub events_checked: u64,
+    pub final_hash: String,
+    pub signatures_ok: bool,
+    pub allowed: usize,
+    pub blocked: usize,
+    pub pending_approvals: Vec<AuditApprovalItem>,
+    pub allowed_side_effects: Vec<AuditSideEffectItem>,
+    pub blocked_rules: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditApprovalItem {
+    pub id: String,
+    pub agent_id: Option<String>,
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub rule: String,
+    pub reason: String,
+    pub missing_capability: Option<String>,
+    pub labels: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub event_hash: String,
+    pub review_hint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditSideEffectItem {
+    pub agent_id: Option<String>,
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub rule: String,
+    pub receipt_id: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub event_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approve,
+    Deny,
+}
+
+impl ApprovalDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApprovalDecisionRecord {
+    pub approval_id: String,
+    pub event_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub trace_path: PathBuf,
+    pub trace_final_hash: String,
+    pub step: u64,
+    pub syscall: String,
+    pub target: String,
+    pub missing_capability: Option<String>,
+    pub decision: ApprovalDecision,
+    pub reviewer: String,
+    pub reason: String,
+    pub created_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApprovalReviewReport {
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub events_checked: u64,
+    pub signatures_ok: bool,
+    pub open_approvals: Vec<AuditApprovalItem>,
+    pub decided_approvals: Vec<ApprovalDecisionRecord>,
+    pub stale_decisions: Vec<ApprovalDecisionRecord>,
+    pub approved: usize,
+    pub denied: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TeamPermissionsReport {
+    pub path: PathBuf,
+    pub version: u64,
+    pub users: usize,
+    pub roles: usize,
+    pub reviewers: Vec<String>,
+    pub token_protected_reviewers: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApprovalDashboardReport {
+    pub output_path: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: Option<PathBuf>,
+    pub signatures_ok: bool,
+    pub open: usize,
+    pub approved: usize,
+    pub denied: usize,
+    pub stale: usize,
+    pub reviewers: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditStoreExportReport {
+    pub output_dir: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: Option<PathBuf>,
+    pub files: Vec<PathBuf>,
+    pub events_checked: u64,
+    pub signatures_ok: bool,
+    pub open: usize,
+    pub approved: usize,
+    pub denied: usize,
+    pub stale: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditStoreCheckReport {
+    pub root: PathBuf,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DurableAuditStoreSyncReport {
+    pub root: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: Option<PathBuf>,
+    pub trace_id: String,
+    pub files: Vec<PathBuf>,
+    pub events_checked: u64,
+    pub signatures_ok: bool,
+    pub audit_events: usize,
+    pub open: usize,
+    pub approved: usize,
+    pub denied: usize,
+    pub stale: usize,
+    pub reviewers: usize,
+    pub notifications: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamPermissionsManifest {
+    version: u64,
+    #[serde(default)]
+    users: Vec<TeamPermissionsUser>,
+    #[serde(default)]
+    roles: Vec<TeamPermissionsRole>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamPermissionsUser {
+    id: String,
+    #[serde(default)]
+    roles: Vec<String>,
+    #[serde(default)]
+    token_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamPermissionsRole {
+    id: String,
+    #[serde(default)]
+    can_approve: Vec<String>,
+    #[serde(default)]
+    can_deny: Vec<String>,
+}
+
+pub fn audit_inbox_jsonl(path: impl AsRef<Path>) -> Result<AuditInboxReport, AgentKError> {
+    let inspect = inspect_jsonl(path)?;
+    Ok(audit_inbox_from_inspect(inspect))
+}
+
+pub fn approval_review_jsonl(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+) -> Result<ApprovalReviewReport, AgentKError> {
+    let decisions_path = decisions_path.as_ref();
+    let inbox = audit_inbox_jsonl(trace_path)?;
+    let decisions = read_approval_decisions_jsonl(decisions_path)?;
+    Ok(approval_review_from_inbox(
+        inbox,
+        decisions_path.to_path_buf(),
+        decisions,
+    ))
+}
+
+pub fn write_approval_dashboard_html(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+    permissions_path: Option<&Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<ApprovalDashboardReport, AgentKError> {
+    let output_path = output_path.as_ref();
+    let review = approval_review_jsonl(trace_path, decisions_path)?;
+    let permissions = match permissions_path {
+        Some(path) => Some(team_permissions_report_from_path(path)?),
+        None => None,
+    };
+    let html = approval_dashboard_html(&review, permissions.as_ref());
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, html)?;
+
+    Ok(ApprovalDashboardReport {
+        output_path: output_path.to_path_buf(),
+        trace_path: review.trace_path.clone(),
+        decisions_path: review.decisions_path.clone(),
+        permissions_path: permissions.as_ref().map(|report| report.path.clone()),
+        signatures_ok: review.signatures_ok,
+        open: review.open_approvals.len(),
+        approved: review.approved,
+        denied: review.denied,
+        stale: review.stale_decisions.len(),
+        reviewers: permissions
+            .as_ref()
+            .map(|report| report.reviewers.len())
+            .unwrap_or(0),
+    })
+}
+
+pub fn export_audit_store(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+    permissions_path: Option<&Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<AuditStoreExportReport, AgentKError> {
+    let output_dir = output_dir.as_ref();
+    let inbox = audit_inbox_jsonl(&trace_path)?;
+    let review = approval_review_jsonl(&trace_path, &decisions_path)?;
+    let permissions = match permissions_path {
+        Some(path) => Some(team_permissions_report_from_path(path)?),
+        None => None,
+    };
+    fs::create_dir_all(output_dir)?;
+
+    let mut files = Vec::new();
+    files.push(write_store_json(output_dir, "audit.json", &inbox)?);
+    files.push(write_store_json(output_dir, "approvals.json", &review)?);
+    if let Some(permissions) = &permissions {
+        files.push(write_store_json(
+            output_dir,
+            "permissions.json",
+            permissions,
+        )?);
+    }
+    files.push(write_store_file(
+        output_dir,
+        "postgres-schema.sql",
+        postgres_audit_store_schema(),
+    )?);
+    files.extend(write_postgres_store_files(
+        output_dir,
+        &inbox,
+        &review,
+        permissions.as_ref(),
+    )?);
+    files.push(write_store_file(
+        output_dir,
+        "README.md",
+        &audit_store_readme(),
+    )?);
+
+    Ok(AuditStoreExportReport {
+        output_dir: output_dir.to_path_buf(),
+        trace_path: inbox.path,
+        decisions_path: review.decisions_path,
+        permissions_path: permissions.as_ref().map(|report| report.path.clone()),
+        files,
+        events_checked: review.events_checked,
+        signatures_ok: review.signatures_ok,
+        open: review.open_approvals.len(),
+        approved: review.approved,
+        denied: review.denied,
+        stale: review.stale_decisions.len(),
+    })
+}
+
+pub fn check_audit_store_export(
+    root: impl AsRef<Path>,
+) -> Result<AuditStoreCheckReport, AgentKError> {
+    let root = root.as_ref();
+    let mut checks = Vec::new();
+    checks.extend(audit_store_required_file_checks(root));
+
+    let audit = read_store_json::<AuditInboxReport>(root, "audit.json");
+    checks.push(match &audit {
+        Ok(audit) if audit.signatures_ok => readiness_check(
+            "audit json",
+            ReadinessStatus::Pass,
+            format!("{} events, signatures ok", audit.events_checked),
+        ),
+        Ok(audit) => readiness_check(
+            "audit json",
+            ReadinessStatus::Fail,
+            format!("{} events, signatures failed", audit.events_checked),
+        ),
+        Err(error) => readiness_check("audit json", ReadinessStatus::Fail, error.to_string()),
+    });
+
+    let approvals = read_store_json::<ApprovalReviewReport>(root, "approvals.json");
+    checks.push(match &approvals {
+        Ok(approvals) if approvals.signatures_ok => readiness_check(
+            "approvals json",
+            ReadinessStatus::Pass,
+            format!(
+                "{} open, {} approved, {} denied",
+                approvals.open_approvals.len(),
+                approvals.approved,
+                approvals.denied
+            ),
+        ),
+        Ok(approvals) => readiness_check(
+            "approvals json",
+            ReadinessStatus::Fail,
+            format!("{} events, signatures failed", approvals.events_checked),
+        ),
+        Err(error) => readiness_check("approvals json", ReadinessStatus::Fail, error.to_string()),
+    });
+
+    checks.push(check_audit_store_load_sql(root));
+    checks.push(check_audit_store_tsv_counts(
+        root,
+        audit.as_ref().ok(),
+        approvals.as_ref().ok(),
+    ));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+    Ok(AuditStoreCheckReport {
+        root: root.to_path_buf(),
+        passed,
+        checks,
+    })
+}
+
+pub fn check_audit_store(root: impl AsRef<Path>) -> Result<AuditStoreCheckReport, AgentKError> {
+    let root = root.as_ref();
+    if root.join("store-schema.json").is_file() || root.join("current/audit.json").is_file() {
+        check_durable_audit_store(root)
+    } else {
+        check_audit_store_export(root)
+    }
+}
+
+fn check_durable_audit_store(root: &Path) -> Result<AuditStoreCheckReport, AgentKError> {
+    let mut checks = Vec::new();
+    checks.extend(durable_audit_store_required_file_checks(root));
+
+    let audit = read_store_json::<AuditInboxReport>(root, "current/audit.json");
+    checks.push(match &audit {
+        Ok(audit) if audit.signatures_ok => readiness_check(
+            "durable audit json",
+            ReadinessStatus::Pass,
+            format!("{} events, signatures ok", audit.events_checked),
+        ),
+        Ok(audit) => readiness_check(
+            "durable audit json",
+            ReadinessStatus::Fail,
+            format!("{} events, signatures failed", audit.events_checked),
+        ),
+        Err(error) => readiness_check(
+            "durable audit json",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    });
+
+    let approvals = read_store_json::<ApprovalReviewReport>(root, "current/approvals.json");
+    checks.push(match &approvals {
+        Ok(approvals) if approvals.signatures_ok => readiness_check(
+            "durable approvals json",
+            ReadinessStatus::Pass,
+            format!(
+                "{} open, {} approved, {} denied",
+                approvals.open_approvals.len(),
+                approvals.approved,
+                approvals.denied
+            ),
+        ),
+        Ok(approvals) => readiness_check(
+            "durable approvals json",
+            ReadinessStatus::Fail,
+            format!("{} events, signatures failed", approvals.events_checked),
+        ),
+        Err(error) => readiness_check(
+            "durable approvals json",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    });
+
+    let permissions = if root.join("current/permissions.json").is_file() {
+        match read_store_json::<TeamPermissionsReport>(root, "current/permissions.json") {
+            Ok(permissions) => {
+                checks.push(readiness_check(
+                    "durable permissions json",
+                    ReadinessStatus::Pass,
+                    format!("{} reviewers", permissions.reviewers.len()),
+                ));
+                Some(permissions)
+            }
+            Err(error) => {
+                checks.push(readiness_check(
+                    "durable permissions json",
+                    ReadinessStatus::Fail,
+                    error.to_string(),
+                ));
+                None
+            }
+        }
+    } else {
+        checks.push(readiness_check(
+            "durable permissions json",
+            ReadinessStatus::Pass,
+            "not configured",
+        ));
+        None
+    };
+
+    checks.push(check_durable_store_schema(root));
+    checks.push(check_durable_store_jsonl_counts(
+        root,
+        audit.as_ref().ok(),
+        approvals.as_ref().ok(),
+        permissions.as_ref(),
+    ));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+    Ok(AuditStoreCheckReport {
+        root: root.to_path_buf(),
+        passed,
+        checks,
+    })
+}
+
+pub fn sync_durable_audit_store(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+    permissions_path: Option<&Path>,
+    root: impl AsRef<Path>,
+) -> Result<DurableAuditStoreSyncReport, AgentKError> {
+    let root = root.as_ref();
+    let inbox = audit_inbox_jsonl(&trace_path)?;
+    let review = approval_review_jsonl(&trace_path, &decisions_path)?;
+    let permissions = match permissions_path {
+        Some(path) => Some(team_permissions_report_from_path(path)?),
+        None => None,
+    };
+    let trace_id = postgres_trace_id(&inbox);
+    let notification_rows = durable_notification_rows(&trace_id, &review);
+    fs::create_dir_all(root)?;
+
+    let mut files = Vec::new();
+    files.push(write_store_json(root, "current/audit.json", &inbox)?);
+    files.push(write_store_json(root, "current/approvals.json", &review)?);
+    files.push(write_store_json(
+        root,
+        "current/notifications.json",
+        &serde_json::json!({
+            "trace_id": trace_id,
+            "notifications": notification_rows.len(),
+            "pending": review.open_approvals.len(),
+            "decided": review.decided_approvals.len()
+        }),
+    )?);
+    if let Some(permissions) = &permissions {
+        files.push(write_store_json(
+            root,
+            "current/permissions.json",
+            permissions,
+        )?);
+    }
+    files.push(write_store_json(
+        root,
+        "store-schema.json",
+        &serde_json::json!({
+            "schema": "agentk.durable_audit_store",
+            "version": 1,
+            "raw_payloads": false,
+            "tables": [
+                "tables/traces.jsonl",
+                "tables/audit_events.jsonl",
+                "tables/approval_decisions.jsonl",
+                "tables/notifications.jsonl",
+                "tables/team_reviewers.jsonl"
+            ]
+        }),
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/traces.jsonl",
+        [serde_json::json!({
+            "trace_id": trace_id,
+            "trace_path": inbox.path,
+            "final_hash": inbox.final_hash,
+            "events_checked": inbox.events_checked,
+            "signatures_ok": inbox.signatures_ok
+        })],
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/audit_events.jsonl",
+        durable_audit_event_rows(&trace_id, &inbox),
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/approval_decisions.jsonl",
+        review
+            .decided_approvals
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?,
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/notifications.jsonl",
+        notification_rows.clone(),
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/team_reviewers.jsonl",
+        durable_team_reviewer_rows(permissions.as_ref()),
+    )?);
+    files.push(write_store_file(
+        root,
+        "README.md",
+        &durable_audit_store_readme(),
+    )?);
+
+    Ok(DurableAuditStoreSyncReport {
+        root: root.to_path_buf(),
+        trace_path: review.trace_path.clone(),
+        decisions_path: review.decisions_path.clone(),
+        permissions_path: permissions.as_ref().map(|report| report.path.clone()),
+        trace_id,
+        files,
+        events_checked: review.events_checked,
+        signatures_ok: review.signatures_ok,
+        audit_events: inbox.pending_approvals.len() + inbox.allowed_side_effects.len(),
+        open: review.open_approvals.len(),
+        approved: review.approved,
+        denied: review.denied,
+        stale: review.stale_decisions.len(),
+        reviewers: permissions
+            .as_ref()
+            .map(|report| report.reviewers.len())
+            .unwrap_or(0),
+        notifications: notification_rows.len(),
+    })
+}
+
+pub fn record_approval_decision_jsonl(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+    approval_id: &str,
+    decision: ApprovalDecision,
+    reviewer: &str,
+    reason: &str,
+) -> Result<ApprovalDecisionRecord, AgentKError> {
+    let record =
+        build_approval_decision_record(trace_path, approval_id, decision, reviewer, reason)?;
+    append_approval_decision_jsonl(decisions_path, &record)?;
+    Ok(record)
+}
+
+pub fn record_approval_decision_jsonl_with_permissions(
+    trace_path: impl AsRef<Path>,
+    decisions_path: impl AsRef<Path>,
+    permissions_path: impl AsRef<Path>,
+    approval_id: &str,
+    decision: ApprovalDecision,
+    reviewer: &str,
+    reason: &str,
+) -> Result<ApprovalDecisionRecord, AgentKError> {
+    let record =
+        build_approval_decision_record(trace_path, approval_id, decision, reviewer, reason)?;
+    let manifest = read_team_permissions_manifest(permissions_path.as_ref())?;
+    if !team_permissions_allow_record(&manifest, &record) {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "reviewer {} is not authorized to {} {}",
+            record.reviewer,
+            record.decision.as_str(),
+            record.target
+        )));
+    }
+    append_approval_decision_jsonl(decisions_path, &record)?;
+    Ok(record)
+}
+
+pub fn scope_approval_review_for_reviewer(
+    review: ApprovalReviewReport,
+    permissions_path: impl AsRef<Path>,
+    reviewer: &str,
+) -> Result<ApprovalReviewReport, AgentKError> {
+    let reviewer = reviewer.trim();
+    if reviewer.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "reviewer must be non-empty".to_string(),
+        ));
+    }
+    let manifest = read_team_permissions_manifest(permissions_path.as_ref())?;
+    if !manifest.users.iter().any(|user| user.id == reviewer) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "reviewer was not found in team permissions".to_string(),
+        ));
+    }
+
+    let open_approvals = review
+        .open_approvals
+        .into_iter()
+        .filter(|item| team_permissions_allow_approval_item(&manifest, item, reviewer))
+        .collect::<Vec<_>>();
+    let decided_approvals = review
+        .decided_approvals
+        .into_iter()
+        .filter(|record| team_permissions_allow_existing_record(&manifest, record, reviewer))
+        .collect::<Vec<_>>();
+    let stale_decisions = review
+        .stale_decisions
+        .into_iter()
+        .filter(|record| team_permissions_allow_existing_record(&manifest, record, reviewer))
+        .collect::<Vec<_>>();
+    let approved = decided_approvals
+        .iter()
+        .filter(|record| record.decision == ApprovalDecision::Approve)
+        .count();
+    let denied = decided_approvals
+        .iter()
+        .filter(|record| record.decision == ApprovalDecision::Deny)
+        .count();
+
+    Ok(ApprovalReviewReport {
+        open_approvals,
+        decided_approvals,
+        stale_decisions,
+        approved,
+        denied,
+        ..review
+    })
+}
+
+fn build_approval_decision_record(
+    trace_path: impl AsRef<Path>,
+    approval_id: &str,
+    decision: ApprovalDecision,
+    reviewer: &str,
+    reason: &str,
+) -> Result<ApprovalDecisionRecord, AgentKError> {
+    if reviewer.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "reviewer must be non-empty".to_string(),
+        ));
+    }
+    if reason.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "approval reason must be non-empty".to_string(),
+        ));
+    }
+
+    let inbox = audit_inbox_jsonl(trace_path)?;
+    let approval = inbox
+        .pending_approvals
+        .iter()
+        .find(|item| item.id == approval_id || item.event_hash == approval_id)
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "approval id was not found in the signed trace".to_string(),
+            )
+        })?;
+    let record = ApprovalDecisionRecord {
+        approval_id: approval.id.clone(),
+        event_hash: approval.event_hash.clone(),
+        agent_id: approval.agent_id.clone(),
+        trace_path: inbox.path.clone(),
+        trace_final_hash: inbox.final_hash.clone(),
+        step: approval.step,
+        syscall: approval.syscall.clone(),
+        target: approval.target.clone(),
+        missing_capability: approval.missing_capability.clone(),
+        decision,
+        reviewer: reviewer.trim().to_string(),
+        reason: reason.trim().to_string(),
+        created_at_unix: unix_timestamp(),
+    };
+    Ok(record)
+}
+
+pub fn team_permissions_report_from_path(
+    path: impl AsRef<Path>,
+) -> Result<TeamPermissionsReport, AgentKError> {
+    let path = path.as_ref();
+    let manifest = read_team_permissions_manifest(path)?;
+    let roles_by_id = manifest
+        .roles
+        .iter()
+        .map(|role| (role.id.as_str(), role))
+        .collect::<BTreeMap<_, _>>();
+    let reviewers = manifest
+        .users
+        .iter()
+        .filter(|user| {
+            user.roles.iter().any(|role| {
+                roles_by_id
+                    .get(role.as_str())
+                    .map(|role| !role.can_approve.is_empty() || !role.can_deny.is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .map(|user| user.id.clone())
+        .collect::<Vec<_>>();
+    let token_protected_reviewers = manifest
+        .users
+        .iter()
+        .filter(|user| user.token_env.is_some() && reviewers.iter().any(|id| id == &user.id))
+        .count();
+
+    Ok(TeamPermissionsReport {
+        path: path.to_path_buf(),
+        version: manifest.version,
+        users: manifest.users.len(),
+        roles: manifest.roles.len(),
+        reviewers,
+        token_protected_reviewers,
+    })
+}
+
+pub fn verify_team_reviewer_token(
+    permissions_path: impl AsRef<Path>,
+    reviewer: &str,
+    provided_token: Option<&str>,
+) -> Result<(), AgentKError> {
+    let manifest = read_team_permissions_manifest(permissions_path.as_ref())?;
+    let user = manifest
+        .users
+        .iter()
+        .find(|user| user.id == reviewer.trim())
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest("reviewer was not found in team permissions".to_string())
+        })?;
+    let Some(token_env) = &user.token_env else {
+        return Ok(());
+    };
+    let expected = env::var(token_env).map_err(|_| {
+        AgentKError::InvalidMcpRequest(format!(
+            "reviewer {} requires token env {} to be set",
+            user.id, token_env
+        ))
+    })?;
+    let provided = provided_token.ok_or_else(|| {
+        AgentKError::InvalidMcpRequest(format!("reviewer {} requires reviewer_token", user.id))
+    })?;
+    if expected.is_empty() || !constant_time_str_eq(&expected, provided) {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "reviewer {} token did not match",
+            user.id
+        )));
+    }
+    Ok(())
+}
+
+pub fn read_approval_decisions_jsonl(
+    path: impl AsRef<Path>,
+) -> Result<Vec<ApprovalDecisionRecord>, AgentKError> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(path)?;
+    let mut decisions = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str::<ApprovalDecisionRecord>(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "approval decision line {} did not parse: {error}",
+                index + 1
+            ))
+        })?;
+        decisions.push(record);
+    }
+
+    Ok(decisions)
+}
+
+fn read_team_permissions_manifest(path: &Path) -> Result<TeamPermissionsManifest, AgentKError> {
+    let content = fs::read_to_string(path)?;
+    let manifest = toml::from_str::<TeamPermissionsManifest>(&content).map_err(|error| {
+        AgentKError::InvalidMcpRequest(format!("team permissions did not parse: {error}"))
+    })?;
+    validate_team_permissions_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_team_permissions_manifest(
+    manifest: &TeamPermissionsManifest,
+) -> Result<(), AgentKError> {
+    if manifest.version != 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team permissions version must be 1".to_string(),
+        ));
+    }
+    if manifest.users.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team permissions must define at least one user".to_string(),
+        ));
+    }
+    if manifest.roles.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team permissions must define at least one role".to_string(),
+        ));
+    }
+
+    let mut role_ids = BTreeSet::new();
+    for role in &manifest.roles {
+        if role.id.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team permission role ids must be non-empty".to_string(),
+            ));
+        }
+        if !role_ids.insert(role.id.as_str()) {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "duplicate team permission role {}",
+                role.id
+            )));
+        }
+    }
+
+    let mut user_ids = BTreeSet::new();
+    for user in &manifest.users {
+        if user.id.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team permission user ids must be non-empty".to_string(),
+            ));
+        }
+        if !user_ids.insert(user.id.as_str()) {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "duplicate team permission user {}",
+                user.id
+            )));
+        }
+        if let Some(token_env) = &user.token_env
+            && !is_safe_mcp_env_name(token_env)
+        {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "team permission user {} token_env must be a safe environment variable name",
+                user.id
+            )));
+        }
+        for role in &user.roles {
+            if !role_ids.contains(role.as_str()) {
+                return Err(AgentKError::InvalidMcpRequest(format!(
+                    "team permission user {} references unknown role {}",
+                    user.id, role
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= (a ^ b) as usize;
+    }
+    diff == 0
+}
+
+pub fn audit_inbox_from_inspect(inspect: FlightLogInspectReport) -> AuditInboxReport {
+    let pending_approvals = inspect
+        .events
+        .iter()
+        .filter(|event| event.verdict == Verdict::Deny && audit_event_needs_review(event))
+        .map(audit_approval_item)
+        .collect::<Vec<_>>();
+    let allowed_side_effects = inspect
+        .events
+        .iter()
+        .filter(|event| event.verdict == Verdict::Allow && audit_event_is_side_effect(event))
+        .map(audit_side_effect_item)
+        .collect::<Vec<_>>();
+
+    AuditInboxReport {
+        path: inspect.path,
+        events_checked: inspect.events_checked,
+        final_hash: inspect.final_hash,
+        signatures_ok: inspect.signatures_ok,
+        allowed: inspect.allowed,
+        blocked: inspect.blocked,
+        pending_approvals,
+        allowed_side_effects,
+        blocked_rules: inspect.blocked_rules,
+    }
+}
+
+fn approval_review_from_inbox(
+    inbox: AuditInboxReport,
+    decisions_path: PathBuf,
+    decisions: Vec<ApprovalDecisionRecord>,
+) -> ApprovalReviewReport {
+    let pending_by_id = inbox
+        .pending_approvals
+        .iter()
+        .map(|item| (item.id.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut latest_by_id = BTreeMap::new();
+    let mut stale_decisions = Vec::new();
+    for record in decisions {
+        if pending_by_id.contains_key(&record.approval_id)
+            && record.trace_final_hash == inbox.final_hash
+        {
+            latest_by_id.insert(record.approval_id.clone(), record);
+        } else {
+            stale_decisions.push(record);
+        }
+    }
+
+    let mut open_approvals = Vec::new();
+    let mut decided_approvals = Vec::new();
+    for approval in inbox.pending_approvals {
+        if let Some(record) = latest_by_id.remove(&approval.id) {
+            decided_approvals.push(record);
+        } else {
+            open_approvals.push(approval);
+        }
+    }
+
+    let approved = decided_approvals
+        .iter()
+        .filter(|record| record.decision == ApprovalDecision::Approve)
+        .count();
+    let denied = decided_approvals
+        .iter()
+        .filter(|record| record.decision == ApprovalDecision::Deny)
+        .count();
+
+    ApprovalReviewReport {
+        trace_path: inbox.path,
+        decisions_path,
+        events_checked: inbox.events_checked,
+        signatures_ok: inbox.signatures_ok,
+        open_approvals,
+        decided_approvals,
+        stale_decisions,
+        approved,
+        denied,
+    }
+}
+
+fn team_permissions_allow_record(
+    manifest: &TeamPermissionsManifest,
+    record: &ApprovalDecisionRecord,
+) -> bool {
+    let roles_by_id = manifest
+        .roles
+        .iter()
+        .map(|role| (role.id.as_str(), role))
+        .collect::<BTreeMap<_, _>>();
+    let Some(user) = manifest
+        .users
+        .iter()
+        .find(|user| user.id == record.reviewer)
+    else {
+        return false;
+    };
+    let scopes = approval_decision_scopes(record);
+
+    user.roles.iter().any(|role_id| {
+        let Some(role) = roles_by_id.get(role_id.as_str()) else {
+            return false;
+        };
+        let allowed = match record.decision {
+            ApprovalDecision::Approve => &role.can_approve,
+            ApprovalDecision::Deny => &role.can_deny,
+        };
+        scopes.iter().any(|scope| {
+            allowed
+                .iter()
+                .any(|pattern| approval_scope_matches(pattern, scope))
+        })
+    })
+}
+
+fn team_permissions_allow_approval_item(
+    manifest: &TeamPermissionsManifest,
+    item: &AuditApprovalItem,
+    reviewer: &str,
+) -> bool {
+    [ApprovalDecision::Approve, ApprovalDecision::Deny]
+        .into_iter()
+        .any(|decision| {
+            let record = ApprovalDecisionRecord {
+                approval_id: item.id.clone(),
+                event_hash: item.event_hash.clone(),
+                agent_id: item.agent_id.clone(),
+                trace_path: PathBuf::new(),
+                trace_final_hash: String::new(),
+                step: item.step,
+                syscall: item.syscall.clone(),
+                target: item.target.clone(),
+                missing_capability: item.missing_capability.clone(),
+                decision,
+                reviewer: reviewer.to_string(),
+                reason: String::new(),
+                created_at_unix: 0,
+            };
+            team_permissions_allow_record(manifest, &record)
+        })
+}
+
+fn team_permissions_allow_existing_record(
+    manifest: &TeamPermissionsManifest,
+    record: &ApprovalDecisionRecord,
+    reviewer: &str,
+) -> bool {
+    let mut scoped_record = record.clone();
+    scoped_record.reviewer = reviewer.to_string();
+    team_permissions_allow_record(manifest, &scoped_record)
+}
+
+fn approval_decision_scopes(record: &ApprovalDecisionRecord) -> Vec<String> {
+    let mut scopes = vec![
+        record.syscall.clone(),
+        record.target.clone(),
+        format!("{}:{}", record.syscall, record.target),
+    ];
+    if let Some(capability) = &record.missing_capability {
+        scopes.push(capability.clone());
+    }
+    scopes
+}
+
+fn approval_scope_matches(pattern: &str, scope: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern == "*" || pattern == scope {
+        return true;
+    }
+    pattern
+        .strip_suffix('*')
+        .map(|prefix| scope.starts_with(prefix))
+        .unwrap_or(false)
+}
+
+pub fn approval_dashboard_html(
+    review: &ApprovalReviewReport,
+    permissions: Option<&TeamPermissionsReport>,
+) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>AgentK Approval Dashboard</title><style>");
+    html.push_str("body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;margin:0;background:#f7f8fa;color:#17181c}main{max-width:1120px;margin:0 auto;padding:28px 20px 44px}h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 10px}.muted{color:#626873}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.badge{display:inline-flex;align-items:center;border:1px solid #cfd4dc;border-radius:999px;padding:4px 10px;background:white;font-size:13px}.ok{color:#136c43;border-color:#9fd7b8;background:#effaf3}.bad{color:#9a3412;border-color:#fdba74;background:#fff7ed}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:22px 0}.metric{background:white;border:1px solid #d9dee7;border-radius:8px;padding:14px}.metric strong{display:block;font-size:26px}.panel{background:white;border:1px solid #d9dee7;border-radius:8px;overflow:hidden;margin-top:10px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #edf0f5;padding:10px;vertical-align:top}th{background:#fafbfc;color:#4b5563;font-weight:650}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.reason{max-width:360px}.empty{padding:16px;color:#626873}.footer{margin-top:28px;font-size:13px;color:#626873}@media(max-width:760px){.top{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}th:nth-child(5),td:nth-child(5){display:none}}");
+    html.push_str("</style></head><body><main>");
+    html.push_str("<div class=\"top\"><div><h1>AgentK Approval Dashboard</h1><div class=\"muted\">Local review over signed trace evidence</div></div>");
+    html.push_str(&format!(
+        "<span class=\"badge {}\">signatures {}</span></div>",
+        if review.signatures_ok { "ok" } else { "bad" },
+        if review.signatures_ok { "ok" } else { "failed" }
+    ));
+    html.push_str("<div class=\"grid\">");
+    approval_dashboard_metric(&mut html, "Open", review.open_approvals.len());
+    approval_dashboard_metric(&mut html, "Approved", review.approved);
+    approval_dashboard_metric(&mut html, "Denied", review.denied);
+    approval_dashboard_metric(&mut html, "Stale", review.stale_decisions.len());
+    html.push_str("</div>");
+    html.push_str(&format!(
+        "<div class=\"panel\"><table><tbody><tr><th>Trace</th><td class=\"mono\">{}</td></tr><tr><th>Decisions</th><td class=\"mono\">{}</td></tr>",
+        html_escape(&review.trace_path.display().to_string()),
+        html_escape(&review.decisions_path.display().to_string())
+    ));
+    if let Some(permissions) = permissions {
+        html.push_str(&format!(
+            "<tr><th>Permissions</th><td><span class=\"mono\">{}</span><br>{} users, {} roles, {} reviewers, {} token-protected</td></tr>",
+            html_escape(&permissions.path.display().to_string()),
+            permissions.users,
+            permissions.roles,
+            permissions.reviewers.len(),
+            permissions.token_protected_reviewers
+        ));
+    }
+    html.push_str("</tbody></table></div>");
+
+    approval_dashboard_open_table(&mut html, &review.open_approvals);
+    approval_dashboard_decisions_table(&mut html, &review.decided_approvals);
+    approval_dashboard_stale_table(&mut html, &review.stale_decisions);
+    if let Some(permissions) = permissions {
+        html.push_str("<h2>Reviewers</h2><div class=\"panel\"><table><thead><tr><th>User</th></tr></thead><tbody>");
+        for reviewer in &permissions.reviewers {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td></tr>",
+                html_escape(reviewer)
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
+
+    html.push_str("<div class=\"footer\">Generated by AgentK. Approval decisions are append-only records; this dashboard does not mutate policy or replay blocked actions.</div>");
+    html.push_str("</main></body></html>");
+    html
+}
+
+fn approval_dashboard_metric(html: &mut String, label: &str, value: usize) {
+    html.push_str(&format!(
+        "<div class=\"metric\"><span class=\"muted\">{}</span><strong>{}</strong></div>",
+        html_escape(label),
+        value
+    ));
+}
+
+fn approval_dashboard_open_table(html: &mut String, approvals: &[AuditApprovalItem]) {
+    html.push_str("<h2>Open Approvals</h2>");
+    if approvals.is_empty() {
+        html.push_str("<div class=\"panel\"><div class=\"empty\">No open approvals.</div></div>");
+        return;
+    }
+    html.push_str("<div class=\"panel\"><table><thead><tr><th>ID</th><th>Step</th><th>Syscall</th><th>Target</th><th>Reason</th></tr></thead><tbody>");
+    for item in approvals {
+        html.push_str(&format!(
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"reason\">{}<br><span class=\"muted\">{}</span></td></tr>",
+            html_escape(&item.id),
+            item.step,
+            html_escape(&item.syscall),
+            html_escape(&item.target),
+            html_escape(&item.reason),
+            html_escape(&item.review_hint)
+        ));
+    }
+    html.push_str("</tbody></table></div>");
+}
+
+fn approval_dashboard_decisions_table(html: &mut String, decisions: &[ApprovalDecisionRecord]) {
+    html.push_str("<h2>Decisions</h2>");
+    if decisions.is_empty() {
+        html.push_str(
+            "<div class=\"panel\"><div class=\"empty\">No decisions recorded.</div></div>",
+        );
+        return;
+    }
+    html.push_str("<div class=\"panel\"><table><thead><tr><th>ID</th><th>Decision</th><th>Reviewer</th><th>Target</th><th>Reason</th></tr></thead><tbody>");
+    for item in decisions {
+        html.push_str(&format!(
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
+            html_escape(&item.approval_id),
+            html_escape(item.decision.as_str()),
+            html_escape(&item.reviewer),
+            html_escape(&item.target),
+            html_escape(&item.reason)
+        ));
+    }
+    html.push_str("</tbody></table></div>");
+}
+
+fn approval_dashboard_stale_table(html: &mut String, decisions: &[ApprovalDecisionRecord]) {
+    html.push_str("<h2>Stale Decisions</h2>");
+    if decisions.is_empty() {
+        html.push_str("<div class=\"panel\"><div class=\"empty\">No stale decisions.</div></div>");
+        return;
+    }
+    html.push_str("<div class=\"panel\"><table><thead><tr><th>ID</th><th>Decision</th><th>Reviewer</th><th>Target</th><th>Trace Hash</th></tr></thead><tbody>");
+    for item in decisions {
+        html.push_str(&format!(
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td></tr>",
+            html_escape(&item.approval_id),
+            html_escape(item.decision.as_str()),
+            html_escape(&item.reviewer),
+            html_escape(&item.target),
+            html_escape(&item.trace_final_hash)
+        ));
+    }
+    html.push_str("</tbody></table></div>");
+}
+
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn append_approval_decision_jsonl(
+    path: impl AsRef<Path>,
+    record: &ApprovalDecisionRecord,
+) -> Result<(), AgentKError> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, record)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn audit_event_needs_review(event: &FlightLogEventSummary) -> bool {
+    event.missing_capability.is_some() || audit_event_is_side_effect(event)
+}
+
+fn audit_event_is_side_effect(event: &FlightLogEventSummary) -> bool {
+    matches!(
+        event.syscall.as_str(),
+        "tool.invoke" | "network.send" | "secret.open" | "model.call"
+    )
+}
+
+fn audit_approval_item(event: &FlightLogEventSummary) -> AuditApprovalItem {
+    AuditApprovalItem {
+        id: format!("appr_{}", &event.event_hash[..12]),
+        agent_id: event.agent_id.clone(),
+        step: event.step,
+        syscall: event.syscall.clone(),
+        target: event.target.clone(),
+        rule: event.rule.clone(),
+        reason: event.reason.clone(),
+        missing_capability: event.missing_capability.clone(),
+        labels: event.labels.clone(),
+        evidence_refs: event.evidence_refs.clone(),
+        event_hash: event.event_hash.clone(),
+        review_hint: audit_review_hint(event),
+    }
+}
+
+fn audit_side_effect_item(event: &FlightLogEventSummary) -> AuditSideEffectItem {
+    AuditSideEffectItem {
+        agent_id: event.agent_id.clone(),
+        step: event.step,
+        syscall: event.syscall.clone(),
+        target: event.target.clone(),
+        rule: event.rule.clone(),
+        receipt_id: event.receipt_id.clone(),
+        evidence_refs: event.evidence_refs.clone(),
+        event_hash: event.event_hash.clone(),
+    }
+}
+
+fn audit_review_hint(event: &FlightLogEventSummary) -> String {
+    match &event.missing_capability {
+        Some(capability) => format!(
+            "Review whether to grant `{capability}` for this agent/profile; prefer a narrower policy or one-shot approval."
+        ),
+        None => "Review the blocked side effect before widening policy.".to_string(),
+    }
 }
 
 fn blocked_rules_for_events(events: &[Event]) -> BTreeMap<String, usize> {
@@ -5669,6 +7435,13 @@ fn inspect_event_summary(event: &Event) -> FlightLogEventSummary {
         .any(|input| !is_safe_evidence_ref(input));
 
     FlightLogEventSummary {
+        agent_id: event.agent_id.clone().or_else(|| {
+            event
+                .decision
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.issued_to.clone())
+        }),
         step: event.step,
         syscall: event.syscall.kind.to_string(),
         target: event.syscall.target.clone(),
@@ -6475,7 +8248,7 @@ impl ReadinessReport {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReadinessCheck {
     pub name: String,
     pub status: ReadinessStatus,
@@ -12030,6 +13803,2207 @@ pub fn write_latest_copy(from: impl AsRef<Path>) -> Result<PathBuf, AgentKError>
     Ok(latest)
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarBundleReport {
+    pub root: PathBuf,
+    pub files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageReport {
+    pub root: PathBuf,
+    pub package: PathBuf,
+    pub files: Vec<PathBuf>,
+}
+
+pub fn init_sidecar_bundle(
+    root: impl AsRef<Path>,
+    force: bool,
+) -> Result<SidecarBundleReport, AgentKError> {
+    let root = root.as_ref();
+    let files = [
+        ("README.md", sidecar_readme().to_string()),
+        ("agentk-sidecar.toml", sidecar_config().to_string()),
+        (
+            "team-permissions.toml",
+            sidecar_team_permissions().to_string(),
+        ),
+        (
+            "policies/team-sidecar.toml",
+            DEFAULT_POLICY_TOML.to_string(),
+        ),
+        ("secrets.toml", sidecar_secret_refs().to_string()),
+        (
+            "clients/claude-desktop.mcp.json",
+            sidecar_claude_desktop_config().to_string(),
+        ),
+        (
+            "clients/codex-cursor-mcp-command.txt",
+            sidecar_mcp_command_snippet().to_string(),
+        ),
+        (
+            "demos/safe-agent-demo.md",
+            sidecar_safe_agent_demo().to_string(),
+        ),
+    ];
+
+    let mut written = Vec::new();
+    for (relative, content) in files {
+        let path = root.join(relative);
+        write_sidecar_file(&path, &content, force)?;
+        written.push(path);
+    }
+
+    Ok(SidecarBundleReport {
+        root: root.to_path_buf(),
+        files: written,
+    })
+}
+
+pub fn package_sidecar_bundle(
+    root: impl AsRef<Path>,
+    out: impl AsRef<Path>,
+    force: bool,
+) -> Result<SidecarPackageReport, AgentKError> {
+    let root = root.as_ref();
+    let out = out.as_ref();
+    let check = check_sidecar_bundle(root)?;
+    if !check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar bundle preflight failed".to_string(),
+        ));
+    }
+    if out.exists() && !force {
+        return Err(AgentKError::FileExists(out.to_path_buf()));
+    }
+    if out.exists() {
+        fs::remove_dir_all(out)?;
+    }
+    fs::create_dir_all(out)?;
+
+    let sidecar_out = out.join("sidecar");
+    copy_sidecar_dir(root, &sidecar_out)?;
+    let files = vec![
+        write_packaged_sidecar_file(out, "README.md", &sidecar_package_readme())?,
+        write_packaged_sidecar_file(out, "bin/agentk-sidecar", &sidecar_launcher_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-tcp",
+            &sidecar_tcp_launcher_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-http",
+            &sidecar_http_launcher_script(),
+        )?,
+        write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-dashboard-server",
+            &sidecar_dashboard_server_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-store-export",
+            &sidecar_store_export_script(),
+        )?,
+        write_packaged_sidecar_file(out, "bin/agentk-store-check", &sidecar_store_check_script())?,
+        write_packaged_sidecar_file(out, "bin/agentk-store-sync", &sidecar_store_sync_script())?,
+        write_packaged_sidecar_file(out, "bin/agentk-store-push", &sidecar_store_push_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "clients/claude-desktop.mcp.json",
+            &sidecar_packaged_claude_config(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "clients/codex-cursor-command.txt",
+            &sidecar_packaged_command_snippet(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "storage/postgres-schema.sql",
+            postgres_audit_store_schema(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/systemd/agentk-dashboard.service",
+            &sidecar_systemd_dashboard_service(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/launchd/com.agentk.dashboard.plist",
+            &sidecar_launchd_dashboard_plist(out),
+        )?,
+        write_packaged_sidecar_file(out, "deploy/docker/Dockerfile", &sidecar_dockerfile())?,
+        write_packaged_sidecar_file(out, "deploy/docker/compose.yml", &sidecar_docker_compose())?,
+        write_packaged_sidecar_file(out, "deploy/README.md", &sidecar_deploy_readme())?,
+    ];
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in [
+            "bin/agentk-sidecar",
+            "bin/agentk-sidecar-tcp",
+            "bin/agentk-sidecar-http",
+            "bin/agentk-dashboard",
+            "bin/agentk-dashboard-server",
+            "bin/agentk-store-export",
+            "bin/agentk-store-check",
+            "bin/agentk-store-sync",
+            "bin/agentk-store-push",
+        ] {
+            let path = out.join(relative);
+            let mut permissions = fs::metadata(&path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions)?;
+        }
+    }
+
+    Ok(SidecarPackageReport {
+        root: root.to_path_buf(),
+        package: out.to_path_buf(),
+        files,
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarCheckReport {
+    pub root: PathBuf,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidecarRunConfig {
+    pub root: PathBuf,
+    pub trace_out: PathBuf,
+    pub proxy: McpSubprocessProxyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SidecarManifest {
+    sidecar: SidecarManifestSidecar,
+    mcp: SidecarManifestMcp,
+    #[serde(default)]
+    downstream: Option<SidecarManifestDownstream>,
+    approvals: SidecarManifestApprovals,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SidecarManifestSidecar {
+    name: String,
+    mode: String,
+    audit_log: String,
+    policy: String,
+    permissions: String,
+    secrets: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SidecarManifestMcp {
+    agent_id: String,
+    server_id: String,
+    response_timeout_ms: u64,
+    max_client_messages: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SidecarManifestDownstream {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    allow_env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SidecarManifestApprovals {
+    mode: String,
+    review_command: String,
+}
+
+pub fn check_sidecar_bundle(root: impl AsRef<Path>) -> Result<SidecarCheckReport, AgentKError> {
+    let root = root.as_ref();
+    let mut checks = vec![
+        check_sidecar_required_file(root, "agentk-sidecar.toml"),
+        check_sidecar_required_file(root, "clients/claude-desktop.mcp.json"),
+        check_sidecar_required_file(root, "clients/codex-cursor-mcp-command.txt"),
+        check_sidecar_required_file(root, "team-permissions.toml"),
+    ];
+
+    let config_path = root.join("agentk-sidecar.toml");
+    let manifest = match fs::read_to_string(&config_path) {
+        Ok(content) => match toml::from_str::<SidecarManifest>(&content) {
+            Ok(manifest) => {
+                checks.push(sidecar_check(
+                    "sidecar config parse",
+                    ReadinessStatus::Pass,
+                    "agentk-sidecar.toml parsed",
+                ));
+                Some(manifest)
+            }
+            Err(error) => {
+                checks.push(sidecar_check(
+                    "sidecar config parse",
+                    ReadinessStatus::Fail,
+                    format!("agentk-sidecar.toml did not parse: {error}"),
+                ));
+                None
+            }
+        },
+        Err(error) => {
+            checks.push(sidecar_check(
+                "sidecar config parse",
+                ReadinessStatus::Fail,
+                format!("could not read agentk-sidecar.toml: {error}"),
+            ));
+            None
+        }
+    };
+
+    if let Some(manifest) = manifest {
+        checks.extend(check_sidecar_manifest(root, &manifest));
+    }
+
+    checks.push(check_sidecar_placeholders(
+        root,
+        "clients/claude-desktop.mcp.json",
+    ));
+    checks.push(check_sidecar_placeholders(
+        root,
+        "clients/codex-cursor-mcp-command.txt",
+    ));
+    checks.push(check_sidecar_claude_desktop_client(root));
+    checks.push(check_sidecar_command_client(root));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(SidecarCheckReport {
+        root: root.to_path_buf(),
+        passed,
+        checks,
+    })
+}
+
+pub fn sidecar_run_config<F>(
+    root: impl AsRef<Path>,
+    mut lookup_env: F,
+) -> Result<SidecarRunConfig, AgentKError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let root = root.as_ref();
+    let content = fs::read_to_string(root.join("agentk-sidecar.toml"))?;
+    let manifest: SidecarManifest = toml::from_str(&content).map_err(|error| {
+        AgentKError::InvalidMcpRequest(format!("agentk-sidecar.toml did not parse: {error}"))
+    })?;
+    let check = check_sidecar_bundle(root)?;
+    if !check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar bundle did not pass preflight checks".to_string(),
+        ));
+    }
+
+    let downstream = manifest.downstream.ok_or_else(|| {
+        AgentKError::InvalidMcpRequest(
+            "agentk-sidecar.toml is missing a [downstream] section".to_string(),
+        )
+    })?;
+    if downstream.command.contains("REPLACE_WITH_")
+        || downstream
+            .args
+            .iter()
+            .any(|arg| arg.contains("REPLACE_WITH_"))
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "downstream command contains placeholders; replace them before sidecar-run".to_string(),
+        ));
+    }
+
+    let trace_out = sidecar_relative_path(root, &manifest.sidecar.audit_log)
+        .map_err(AgentKError::InvalidMcpRequest)?;
+    let mut proxy = McpSubprocessProxyConfig::new(
+        manifest.mcp.agent_id,
+        manifest.mcp.server_id,
+        downstream.command,
+    )
+    .with_args(downstream.args)
+    .with_response_timeout(Duration::from_millis(manifest.mcp.response_timeout_ms))
+    .with_max_client_messages(manifest.mcp.max_client_messages);
+
+    for name in downstream.allow_env {
+        if !is_safe_mcp_env_name(&name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "downstream MCP env names must match [A-Za-z_][A-Za-z0-9_]*".to_string(),
+            ));
+        }
+        let value = lookup_env(&name).ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(format!(
+                "allowed env var {name} is not present or is not valid UTF-8"
+            ))
+        })?;
+        proxy = proxy.with_env(name, value);
+    }
+
+    Ok(SidecarRunConfig {
+        root: root.to_path_buf(),
+        trace_out,
+        proxy,
+    })
+}
+
+fn check_sidecar_manifest(root: &Path, manifest: &SidecarManifest) -> Vec<ReadinessCheck> {
+    let mut checks = Vec::new();
+    checks.push(if manifest.sidecar.name.trim().is_empty() {
+        sidecar_check(
+            "sidecar name",
+            ReadinessStatus::Fail,
+            "name must be non-empty",
+        )
+    } else {
+        sidecar_check("sidecar name", ReadinessStatus::Pass, "name configured")
+    });
+    checks.push(if manifest.sidecar.mode == "local" {
+        sidecar_check(
+            "sidecar mode",
+            ReadinessStatus::Pass,
+            "local sidecar mode configured",
+        )
+    } else {
+        sidecar_check(
+            "sidecar mode",
+            ReadinessStatus::Fail,
+            "only local sidecar mode is supported today",
+        )
+    });
+    checks.push(check_sidecar_relative_path(
+        "sidecar audit log",
+        &manifest.sidecar.audit_log,
+    ));
+
+    match sidecar_relative_path(root, &manifest.sidecar.policy) {
+        Ok(path) => match Policy::from_path(&path) {
+            Ok(policy) => checks.push(sidecar_check(
+                "sidecar policy",
+                ReadinessStatus::Pass,
+                format!("{} rules loaded", policy.rules.len()),
+            )),
+            Err(error) => checks.push(sidecar_check(
+                "sidecar policy",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            )),
+        },
+        Err(error) => checks.push(sidecar_check(
+            "sidecar policy",
+            ReadinessStatus::Fail,
+            error,
+        )),
+    }
+
+    match sidecar_relative_path(root, &manifest.sidecar.secrets) {
+        Ok(path) => match secret_reference_manifest_report_from_path(&path) {
+            Ok(report) => checks.push(sidecar_check(
+                "sidecar secret refs",
+                ReadinessStatus::Pass,
+                format!("{} secret references configured", report.secret_count),
+            )),
+            Err(error) => checks.push(sidecar_check(
+                "sidecar secret refs",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            )),
+        },
+        Err(error) => checks.push(sidecar_check(
+            "sidecar secret refs",
+            ReadinessStatus::Fail,
+            error,
+        )),
+    }
+
+    match sidecar_relative_path(root, &manifest.sidecar.permissions) {
+        Ok(path) => match team_permissions_report_from_path(&path) {
+            Ok(report) => checks.push(sidecar_check(
+                "sidecar team permissions",
+                ReadinessStatus::Pass,
+                format!(
+                    "{} users, {} roles, {} reviewers",
+                    report.users,
+                    report.roles,
+                    report.reviewers.len()
+                ),
+            )),
+            Err(error) => checks.push(sidecar_check(
+                "sidecar team permissions",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            )),
+        },
+        Err(error) => checks.push(sidecar_check(
+            "sidecar team permissions",
+            ReadinessStatus::Fail,
+            error,
+        )),
+    }
+
+    checks.push(if manifest.mcp.agent_id.trim().is_empty() {
+        sidecar_check(
+            "sidecar mcp agent",
+            ReadinessStatus::Fail,
+            "agent_id must be non-empty",
+        )
+    } else {
+        sidecar_check(
+            "sidecar mcp agent",
+            ReadinessStatus::Pass,
+            "agent_id configured",
+        )
+    });
+    checks.push(if manifest.mcp.server_id.trim().is_empty() {
+        sidecar_check(
+            "sidecar mcp server",
+            ReadinessStatus::Fail,
+            "server_id must be non-empty",
+        )
+    } else {
+        sidecar_check(
+            "sidecar mcp server",
+            ReadinessStatus::Pass,
+            "server_id configured",
+        )
+    });
+    checks.push(if manifest.mcp.response_timeout_ms == 0 {
+        sidecar_check(
+            "sidecar timeout",
+            ReadinessStatus::Fail,
+            "response_timeout_ms must be positive",
+        )
+    } else {
+        sidecar_check(
+            "sidecar timeout",
+            ReadinessStatus::Pass,
+            format!("{} ms", manifest.mcp.response_timeout_ms),
+        )
+    });
+    checks.push(if manifest.mcp.max_client_messages == 0 {
+        sidecar_check(
+            "sidecar client message limit",
+            ReadinessStatus::Fail,
+            "max_client_messages must be positive",
+        )
+    } else {
+        sidecar_check(
+            "sidecar client message limit",
+            ReadinessStatus::Pass,
+            format!("{} messages", manifest.mcp.max_client_messages),
+        )
+    });
+    match &manifest.downstream {
+        Some(downstream) => {
+            checks.push(if downstream.command.trim().is_empty() {
+                sidecar_check(
+                    "sidecar downstream command",
+                    ReadinessStatus::Fail,
+                    "command must be non-empty",
+                )
+            } else if downstream.command.contains("REPLACE_WITH_") {
+                sidecar_check(
+                    "sidecar downstream command",
+                    ReadinessStatus::Warn,
+                    "command contains placeholders; replace before live use",
+                )
+            } else {
+                sidecar_check(
+                    "sidecar downstream command",
+                    ReadinessStatus::Pass,
+                    "command configured",
+                )
+            });
+            checks.push(
+                if downstream
+                    .allow_env
+                    .iter()
+                    .all(|name| is_safe_mcp_env_name(name))
+                {
+                    sidecar_check(
+                        "sidecar downstream env",
+                        ReadinessStatus::Pass,
+                        format!("{} allowed env names", downstream.allow_env.len()),
+                    )
+                } else {
+                    sidecar_check(
+                        "sidecar downstream env",
+                        ReadinessStatus::Fail,
+                        "allowed env names must match [A-Za-z_][A-Za-z0-9_]*",
+                    )
+                },
+            );
+        }
+        None => checks.push(sidecar_check(
+            "sidecar downstream command",
+            ReadinessStatus::Fail,
+            "missing [downstream] section",
+        )),
+    }
+    checks.push(if manifest.approvals.mode == "audit-first" {
+        sidecar_check(
+            "sidecar approvals",
+            ReadinessStatus::Pass,
+            "audit-first mode configured",
+        )
+    } else {
+        sidecar_check(
+            "sidecar approvals",
+            ReadinessStatus::Warn,
+            "unknown approval mode; verify it does not silently bypass policy",
+        )
+    });
+    checks.push(if manifest.approvals.review_command.trim().is_empty() {
+        sidecar_check(
+            "sidecar review command",
+            ReadinessStatus::Fail,
+            "review_command must be non-empty",
+        )
+    } else {
+        sidecar_check(
+            "sidecar review command",
+            ReadinessStatus::Pass,
+            "review command configured",
+        )
+    });
+
+    checks
+}
+
+fn check_sidecar_required_file(root: &Path, relative: &str) -> ReadinessCheck {
+    if root.join(relative).is_file() {
+        sidecar_check(relative, ReadinessStatus::Pass, "present")
+    } else {
+        sidecar_check(relative, ReadinessStatus::Fail, "missing")
+    }
+}
+
+fn check_sidecar_relative_path(name: &str, value: &str) -> ReadinessCheck {
+    match validate_sidecar_relative_path(value) {
+        Ok(()) => sidecar_check(name, ReadinessStatus::Pass, "relative path stays in bundle"),
+        Err(error) => sidecar_check(name, ReadinessStatus::Fail, error),
+    }
+}
+
+fn sidecar_relative_path(root: &Path, value: &str) -> Result<PathBuf, String> {
+    validate_sidecar_relative_path(value)?;
+    Ok(root.join(value))
+}
+
+fn validate_sidecar_relative_path(value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    if value.trim().is_empty() {
+        return Err("path must be non-empty".to_string());
+    }
+    if path.is_absolute() {
+        return Err("absolute paths are not allowed in the sidecar bundle".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("parent-directory components are not allowed".to_string());
+    }
+
+    Ok(())
+}
+
+fn check_sidecar_placeholders(root: &Path, relative: &str) -> ReadinessCheck {
+    match fs::read_to_string(root.join(relative)) {
+        Ok(content) if content.contains("REPLACE_WITH_") => sidecar_check(
+            relative,
+            ReadinessStatus::Warn,
+            "contains placeholders; replace before live use",
+        ),
+        Ok(_) => sidecar_check(relative, ReadinessStatus::Pass, "no placeholders found"),
+        Err(error) => sidecar_check(
+            relative,
+            ReadinessStatus::Fail,
+            format!("could not read file: {error}"),
+        ),
+    }
+}
+
+fn check_sidecar_claude_desktop_client(root: &Path) -> ReadinessCheck {
+    let relative = "clients/claude-desktop.mcp.json";
+    let content = match fs::read_to_string(root.join(relative)) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "Claude Desktop MCP client",
+                ReadinessStatus::Fail,
+                format!("could not read {relative}: {error}"),
+            );
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) => value,
+        Err(error) => {
+            return sidecar_check(
+                "Claude Desktop MCP client",
+                ReadinessStatus::Fail,
+                format!("{relative} is not valid JSON: {error}"),
+            );
+        }
+    };
+    let Some(server) = value
+        .get("mcpServers")
+        .and_then(|value| value.as_object())
+        .and_then(|servers| servers.get("agentk-team-sidecar"))
+        .and_then(|value| value.as_object())
+    else {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "missing mcpServers.agentk-team-sidecar object",
+        );
+    };
+    let Some(command) = server.get("command").and_then(|value| value.as_str()) else {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "mcpServers.agentk-team-sidecar.command must be a string",
+        );
+    };
+    if command.trim().is_empty() {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "mcpServers.agentk-team-sidecar.command must be non-empty",
+        );
+    }
+    let Some(args) = server.get("args").and_then(|value| value.as_array()) else {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "mcpServers.agentk-team-sidecar.args must be an array",
+        );
+    };
+    let args = args
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    if !args.contains(&"sidecar-run") || !args.contains(&"--root") {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "Claude snippet must invoke sidecar-run with --root",
+        );
+    }
+    if server.get("env").is_some_and(|value| !value.is_object()) {
+        return sidecar_check(
+            "Claude Desktop MCP client",
+            ReadinessStatus::Fail,
+            "mcpServers.agentk-team-sidecar.env must be an object when present",
+        );
+    }
+
+    sidecar_check(
+        "Claude Desktop MCP client",
+        ReadinessStatus::Pass,
+        "client JSON invokes AgentK sidecar-run",
+    )
+}
+
+fn check_sidecar_command_client(root: &Path) -> ReadinessCheck {
+    let relative = "clients/codex-cursor-mcp-command.txt";
+    let content = match fs::read_to_string(root.join(relative)) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "Codex/Cursor MCP command",
+                ReadinessStatus::Fail,
+                format!("could not read {relative}: {error}"),
+            );
+        }
+    };
+    if !content.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line.contains("agentk")
+            && line.contains("sidecar-run")
+            && line.contains("--root")
+    }) {
+        return sidecar_check(
+            "Codex/Cursor MCP command",
+            ReadinessStatus::Fail,
+            "command snippet must include `agentk sidecar-run --root ...`",
+        );
+    }
+    if !content.contains("agentk audit") || !content.contains("agentk approvals") {
+        return sidecar_check(
+            "Codex/Cursor MCP command",
+            ReadinessStatus::Warn,
+            "command snippet is runnable but missing audit/approval review hints",
+        );
+    }
+
+    sidecar_check(
+        "Codex/Cursor MCP command",
+        ReadinessStatus::Pass,
+        "command snippet invokes AgentK sidecar-run and review commands",
+    )
+}
+
+fn sidecar_check(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    ReadinessCheck {
+        name: name.into(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+fn write_sidecar_file(path: &Path, content: &str, force: bool) -> Result<(), AgentKError> {
+    if path.exists() && !force {
+        return Err(AgentKError::FileExists(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn copy_sidecar_dir(from: &Path, to: &Path) -> Result<(), AgentKError> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "sidecar paths must be valid UTF-8".to_string(),
+            ));
+        };
+        if name == ".agentk" {
+            continue;
+        }
+        let target = to.join(name);
+        if source.is_dir() {
+            copy_sidecar_dir(&source, &target)?;
+        } else if source.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_packaged_sidecar_file(
+    root: &Path,
+    relative: &str,
+    content: &str,
+) -> Result<PathBuf, AgentKError> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+fn write_store_json<T: Serialize>(
+    root: &Path,
+    relative: &str,
+    value: &T,
+) -> Result<PathBuf, AgentKError> {
+    write_store_file(root, relative, &serde_json::to_string_pretty(value)?)
+}
+
+fn write_store_jsonl<T: Serialize, I: IntoIterator<Item = T>>(
+    root: &Path,
+    relative: &str,
+    rows: I,
+) -> Result<PathBuf, AgentKError> {
+    let mut content = String::new();
+    for row in rows {
+        content.push_str(&serde_json::to_string(&row)?);
+        content.push('\n');
+    }
+    write_store_file(root, relative, &content)
+}
+
+fn read_store_json<T: for<'de> Deserialize<'de>>(
+    root: &Path,
+    relative: &str,
+) -> Result<T, AgentKError> {
+    let content = fs::read_to_string(root.join(relative))?;
+    serde_json::from_str(&content).map_err(AgentKError::from)
+}
+
+fn write_store_file(root: &Path, relative: &str, content: &str) -> Result<PathBuf, AgentKError> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+fn audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> {
+    [
+        "audit.json",
+        "approvals.json",
+        "postgres-schema.sql",
+        "README.md",
+        "postgres/load.sql",
+        "postgres/traces.tsv",
+        "postgres/audit_events.tsv",
+        "postgres/approval_decisions.tsv",
+        "postgres/team_users.tsv",
+        "postgres/team_roles.tsv",
+        "postgres/team_user_roles.tsv",
+        "postgres/team_role_scopes.tsv",
+    ]
+    .into_iter()
+    .map(|relative| {
+        if root.join(relative).is_file() {
+            readiness_check(
+                format!("store file {relative}"),
+                ReadinessStatus::Pass,
+                "present",
+            )
+        } else {
+            readiness_check(
+                format!("store file {relative}"),
+                ReadinessStatus::Fail,
+                "missing",
+            )
+        }
+    })
+    .collect()
+}
+
+fn durable_audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> {
+    [
+        "current/audit.json",
+        "current/approvals.json",
+        "current/notifications.json",
+        "store-schema.json",
+        "tables/traces.jsonl",
+        "tables/audit_events.jsonl",
+        "tables/approval_decisions.jsonl",
+        "tables/notifications.jsonl",
+        "tables/team_reviewers.jsonl",
+        "README.md",
+    ]
+    .into_iter()
+    .map(|relative| {
+        if root.join(relative).is_file() {
+            readiness_check(
+                format!("durable store file {relative}"),
+                ReadinessStatus::Pass,
+                "present",
+            )
+        } else {
+            readiness_check(
+                format!("durable store file {relative}"),
+                ReadinessStatus::Fail,
+                "missing",
+            )
+        }
+    })
+    .collect()
+}
+
+fn check_audit_store_load_sql(root: &Path) -> ReadinessCheck {
+    let path = root.join("postgres/load.sql");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return readiness_check("postgres load script", ReadinessStatus::Fail, "missing");
+    };
+    let required = [
+        "\\ir ../postgres-schema.sql",
+        "\\copy agentk_traces",
+        "\\copy agentk_audit_events",
+        "\\copy agentk_approval_decisions",
+        "\\copy agentk_team_users",
+        "\\copy agentk_team_roles",
+        "\\copy agentk_team_user_roles",
+        "\\copy agentk_team_role_scopes",
+    ];
+    let missing = required
+        .iter()
+        .filter(|needle| !content.contains(**needle))
+        .copied()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        readiness_check(
+            "postgres load script",
+            ReadinessStatus::Pass,
+            "schema include and copy targets present",
+        )
+    } else {
+        readiness_check(
+            "postgres load script",
+            ReadinessStatus::Fail,
+            format!("missing {}", missing.join(", ")),
+        )
+    }
+}
+
+fn check_durable_store_schema(root: &Path) -> ReadinessCheck {
+    let schema = match read_store_json::<serde_json::Value>(root, "store-schema.json") {
+        Ok(schema) => schema,
+        Err(error) => {
+            return readiness_check(
+                "durable store schema",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            );
+        }
+    };
+    let schema_name_ok = schema
+        .get("schema")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value == "agentk.durable_audit_store");
+    let version_ok = schema
+        .get("version")
+        .and_then(|value| value.as_u64())
+        .is_some_and(|value| value == 1);
+    let raw_payloads_ok = schema
+        .get("raw_payloads")
+        .and_then(|value| value.as_bool())
+        .is_some_and(|value| !value);
+    let tables = schema
+        .get("tables")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let required_tables = [
+        "tables/traces.jsonl",
+        "tables/audit_events.jsonl",
+        "tables/approval_decisions.jsonl",
+        "tables/notifications.jsonl",
+        "tables/team_reviewers.jsonl",
+    ];
+    let tables_ok = required_tables.iter().all(|required| {
+        tables
+            .iter()
+            .any(|table| table.as_str().is_some_and(|table| table == *required))
+    });
+
+    if schema_name_ok && version_ok && raw_payloads_ok && tables_ok {
+        readiness_check(
+            "durable store schema",
+            ReadinessStatus::Pass,
+            "schema version, table list, and raw payload flag match",
+        )
+    } else {
+        readiness_check(
+            "durable store schema",
+            ReadinessStatus::Fail,
+            "store-schema.json must be agentk.durable_audit_store v1 with raw_payloads=false and required tables",
+        )
+    }
+}
+
+fn check_durable_store_jsonl_counts(
+    root: &Path,
+    audit: Option<&AuditInboxReport>,
+    approvals: Option<&ApprovalReviewReport>,
+    permissions: Option<&TeamPermissionsReport>,
+) -> ReadinessCheck {
+    let traces = count_jsonl_rows(root.join("tables/traces.jsonl"));
+    let events = count_jsonl_rows(root.join("tables/audit_events.jsonl"));
+    let decisions = count_jsonl_rows(root.join("tables/approval_decisions.jsonl"));
+    let notifications = count_jsonl_rows(root.join("tables/notifications.jsonl"));
+    let reviewers = count_jsonl_rows(root.join("tables/team_reviewers.jsonl"));
+    let (Ok(traces), Ok(events), Ok(decisions), Ok(notifications), Ok(reviewers)) =
+        (traces, events, decisions, notifications, reviewers)
+    else {
+        return readiness_check(
+            "durable jsonl rows",
+            ReadinessStatus::Fail,
+            "one or more durable JSONL tables could not be read or parsed",
+        );
+    };
+    let expected_events = audit
+        .map(|audit| audit.pending_approvals.len() + audit.allowed_side_effects.len())
+        .unwrap_or(events);
+    let expected_decisions = approvals
+        .map(|approvals| approvals.decided_approvals.len())
+        .unwrap_or(decisions);
+    let expected_notifications = approvals
+        .map(|approvals| approvals.open_approvals.len() + approvals.decided_approvals.len())
+        .unwrap_or(notifications);
+    let expected_reviewers = permissions
+        .map(|permissions| permissions.reviewers.len())
+        .unwrap_or(0);
+
+    if traces == 1
+        && events == expected_events
+        && decisions == expected_decisions
+        && notifications == expected_notifications
+        && reviewers == expected_reviewers
+    {
+        readiness_check(
+            "durable jsonl rows",
+            ReadinessStatus::Pass,
+            format!(
+                "{traces} trace, {events} audit events, {decisions} decisions, {notifications} notifications, {reviewers} reviewers"
+            ),
+        )
+    } else {
+        readiness_check(
+            "durable jsonl rows",
+            ReadinessStatus::Fail,
+            format!(
+                "expected 1/{expected_events}/{expected_decisions}/{expected_notifications}/{expected_reviewers} rows, found {traces}/{events}/{decisions}/{notifications}/{reviewers}"
+            ),
+        )
+    }
+}
+
+fn check_audit_store_tsv_counts(
+    root: &Path,
+    audit: Option<&AuditInboxReport>,
+    approvals: Option<&ApprovalReviewReport>,
+) -> ReadinessCheck {
+    let traces = count_tsv_rows(root.join("postgres/traces.tsv"));
+    let events = count_tsv_rows(root.join("postgres/audit_events.tsv"));
+    let decisions = count_tsv_rows(root.join("postgres/approval_decisions.tsv"));
+    let (Ok(traces), Ok(events), Ok(decisions)) = (traces, events, decisions) else {
+        return readiness_check(
+            "postgres tsv rows",
+            ReadinessStatus::Fail,
+            "one or more TSV files could not be read",
+        );
+    };
+    let expected_events = audit
+        .map(|audit| audit.pending_approvals.len() + audit.allowed_side_effects.len())
+        .unwrap_or(events);
+    let expected_decisions = approvals
+        .map(|approvals| approvals.decided_approvals.len())
+        .unwrap_or(decisions);
+    if traces == 1 && events == expected_events && decisions == expected_decisions {
+        readiness_check(
+            "postgres tsv rows",
+            ReadinessStatus::Pass,
+            format!("{traces} trace, {events} audit events, {decisions} decisions"),
+        )
+    } else {
+        readiness_check(
+            "postgres tsv rows",
+            ReadinessStatus::Fail,
+            format!(
+                "expected 1/{expected_events}/{expected_decisions} rows, found {traces}/{events}/{decisions}"
+            ),
+        )
+    }
+}
+
+fn count_tsv_rows(path: impl AsRef<Path>) -> Result<usize, AgentKError> {
+    let content = fs::read_to_string(path.as_ref())?;
+    Ok(content.lines().filter(|line| !line.is_empty()).count())
+}
+
+fn count_jsonl_rows(path: impl AsRef<Path>) -> Result<usize, AgentKError> {
+    let content = fs::read_to_string(path.as_ref())?;
+    let mut rows = 0;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<serde_json::Value>(line)?;
+        rows += 1;
+    }
+    Ok(rows)
+}
+
+fn durable_audit_event_rows(trace_id: &str, inbox: &AuditInboxReport) -> Vec<serde_json::Value> {
+    inbox
+        .pending_approvals
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "trace_id": trace_id,
+                "event_hash": item.event_hash,
+                "approval_id": item.id,
+                "agent_id": item.agent_id,
+                "step": item.step,
+                "syscall": item.syscall,
+                "target": item.target,
+                "verdict": "deny",
+                "rule_id": item.rule,
+                "reason": item.reason,
+                "missing_capability": item.missing_capability,
+                "labels": item.labels,
+                "evidence_refs": item.evidence_refs
+            })
+        })
+        .chain(inbox.allowed_side_effects.iter().map(|item| {
+            serde_json::json!({
+                "trace_id": trace_id,
+                "event_hash": item.event_hash,
+                "agent_id": item.agent_id,
+                "step": item.step,
+                "syscall": item.syscall,
+                "target": item.target,
+                "verdict": "allow",
+                "rule_id": item.rule,
+                "reason": "allowed side effect",
+                "missing_capability": null,
+                "labels": [],
+                "evidence_refs": item.evidence_refs
+            })
+        }))
+        .collect()
+}
+
+fn durable_team_reviewer_rows(
+    permissions: Option<&TeamPermissionsReport>,
+) -> Vec<serde_json::Value> {
+    permissions
+        .into_iter()
+        .flat_map(|permissions| {
+            permissions.reviewers.iter().map(|reviewer| {
+                serde_json::json!({
+                    "user_id": reviewer,
+                    "role": "reviewer"
+                })
+            })
+        })
+        .collect()
+}
+
+fn durable_notification_rows(
+    trace_id: &str,
+    review: &ApprovalReviewReport,
+) -> Vec<serde_json::Value> {
+    review
+        .open_approvals
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "notification_id": format!("notif_requested_{}", item.id),
+                "kind": "approval_requested",
+                "trace_id": trace_id,
+                "approval_id": item.id,
+                "event_hash": item.event_hash,
+                "agent_id": item.agent_id,
+                "syscall": item.syscall,
+                "target": item.target,
+                "rule_id": item.rule,
+                "missing_capability": item.missing_capability,
+                "review_hint": item.review_hint,
+                "status": "pending"
+            })
+        })
+        .chain(review.decided_approvals.iter().map(|record| {
+            serde_json::json!({
+                "notification_id": format!("notif_decided_{}_{}", record.approval_id, record.created_at_unix),
+                "kind": "approval_decided",
+                "trace_id": trace_id,
+                "approval_id": record.approval_id,
+                "event_hash": record.event_hash,
+                "agent_id": record.agent_id,
+                "syscall": record.syscall,
+                "target": record.target,
+                "decision": record.decision.as_str(),
+                "reviewer": record.reviewer,
+                "reason": record.reason,
+                "created_at_unix": record.created_at_unix,
+                "status": "ready"
+            })
+        }))
+        .collect()
+}
+
+fn write_postgres_store_files(
+    root: &Path,
+    inbox: &AuditInboxReport,
+    review: &ApprovalReviewReport,
+    permissions: Option<&TeamPermissionsReport>,
+) -> Result<Vec<PathBuf>, AgentKError> {
+    let trace_id = postgres_trace_id(inbox);
+    let files = vec![
+        write_store_file(
+            root,
+            "postgres/traces.tsv",
+            &postgres_traces_tsv(&trace_id, inbox),
+        )?,
+        write_store_file(
+            root,
+            "postgres/audit_events.tsv",
+            &postgres_audit_events_tsv(&trace_id, inbox),
+        )?,
+        write_store_file(
+            root,
+            "postgres/approval_decisions.tsv",
+            &postgres_approval_decisions_tsv(review),
+        )?,
+        write_store_file(
+            root,
+            "postgres/team_users.tsv",
+            &postgres_team_users_tsv(permissions),
+        )?,
+        write_store_file(
+            root,
+            "postgres/team_roles.tsv",
+            &postgres_team_roles_tsv(permissions),
+        )?,
+        write_store_file(
+            root,
+            "postgres/team_user_roles.tsv",
+            &postgres_team_empty_tsv(),
+        )?,
+        write_store_file(
+            root,
+            "postgres/team_role_scopes.tsv",
+            &postgres_team_empty_tsv(),
+        )?,
+        write_store_file(root, "postgres/load.sql", &postgres_load_sql())?,
+    ];
+    Ok(files)
+}
+
+fn postgres_trace_id(inbox: &AuditInboxReport) -> String {
+    format!(
+        "trace_{}",
+        &inbox.final_hash[..16.min(inbox.final_hash.len())]
+    )
+}
+
+fn postgres_traces_tsv(trace_id: &str, inbox: &AuditInboxReport) -> String {
+    postgres_tsv_rows([[
+        trace_id.to_string(),
+        inbox.path.display().to_string(),
+        inbox.final_hash.clone(),
+        inbox.events_checked.to_string(),
+        inbox.signatures_ok.to_string(),
+    ]])
+}
+
+fn postgres_audit_events_tsv(trace_id: &str, inbox: &AuditInboxReport) -> String {
+    let rows = inbox
+        .pending_approvals
+        .iter()
+        .map(|item| {
+            [
+                item.event_hash.clone(),
+                trace_id.to_string(),
+                item.agent_id.clone().unwrap_or_default(),
+                item.step.to_string(),
+                item.syscall.clone(),
+                item.target.clone(),
+                "deny".to_string(),
+                item.rule.clone(),
+                item.reason.clone(),
+                item.missing_capability.clone().unwrap_or_default(),
+                postgres_text_array(&item.labels),
+                postgres_text_array(&item.evidence_refs),
+            ]
+        })
+        .chain(inbox.allowed_side_effects.iter().map(|item| {
+            [
+                item.event_hash.clone(),
+                trace_id.to_string(),
+                item.agent_id.clone().unwrap_or_default(),
+                item.step.to_string(),
+                item.syscall.clone(),
+                item.target.clone(),
+                "allow".to_string(),
+                item.rule.clone(),
+                "allowed side effect".to_string(),
+                String::new(),
+                "{}".to_string(),
+                postgres_text_array(&item.evidence_refs),
+            ]
+        }));
+    postgres_tsv_rows(rows)
+}
+
+fn postgres_approval_decisions_tsv(review: &ApprovalReviewReport) -> String {
+    postgres_tsv_rows(review.decided_approvals.iter().map(|item| {
+        [
+            item.approval_id.clone(),
+            item.event_hash.clone(),
+            item.agent_id.clone().unwrap_or_default(),
+            item.trace_final_hash.clone(),
+            item.decision.as_str().to_string(),
+            item.reviewer.clone(),
+            item.reason.clone(),
+            item.created_at_unix.to_string(),
+        ]
+    }))
+}
+
+fn postgres_team_users_tsv(permissions: Option<&TeamPermissionsReport>) -> String {
+    postgres_tsv_rows(
+        permissions
+            .into_iter()
+            .flat_map(|permissions| permissions.reviewers.iter())
+            .map(|reviewer| [reviewer.clone()]),
+    )
+}
+
+fn postgres_team_roles_tsv(permissions: Option<&TeamPermissionsReport>) -> String {
+    if permissions.is_some() {
+        postgres_tsv_rows([["reviewer".to_string()]])
+    } else {
+        String::new()
+    }
+}
+
+fn postgres_team_empty_tsv() -> String {
+    String::new()
+}
+
+fn postgres_tsv_rows<I, const N: usize>(rows: I) -> String
+where
+    I: IntoIterator<Item = [String; N]>,
+{
+    let mut out = String::new();
+    for row in rows {
+        for (index, field) in row.iter().enumerate() {
+            if index > 0 {
+                out.push('\t');
+            }
+            out.push_str(&postgres_tsv_field(field));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn postgres_tsv_field(value: &str) -> String {
+    if value.is_empty() {
+        return r"\N".to_string();
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str(r"\\"),
+            '\t' => escaped.push_str(r"\t"),
+            '\n' => escaped.push_str(r"\n"),
+            '\r' => escaped.push_str(r"\r"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn postgres_text_array(values: &[String]) -> String {
+    if values.is_empty() {
+        return "{}".to_string();
+    }
+    let mut out = String::from("{");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for ch in value.chars() {
+            match ch {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out
+}
+
+fn postgres_load_sql() -> String {
+    r#"\set ON_ERROR_STOP on
+\ir ../postgres-schema.sql
+
+\copy agentk_traces(trace_id, trace_path, final_hash, events_checked, signatures_ok) from 'postgres/traces.tsv' with (format text, null '\N')
+\copy agentk_audit_events(event_hash, trace_id, agent_id, step, syscall, target, verdict, rule_id, reason, missing_capability, labels, evidence_refs) from 'postgres/audit_events.tsv' with (format text, null '\N')
+\copy agentk_approval_decisions(approval_id, event_hash, agent_id, trace_final_hash, decision, reviewer, reason, created_at_unix) from 'postgres/approval_decisions.tsv' with (format text, null '\N')
+\copy agentk_team_users(user_id) from 'postgres/team_users.tsv' with (format text, null '\N')
+\copy agentk_team_roles(role_id) from 'postgres/team_roles.tsv' with (format text, null '\N')
+\copy agentk_team_user_roles(user_id, role_id) from 'postgres/team_user_roles.tsv' with (format text, null '\N')
+\copy agentk_team_role_scopes(role_id, decision, scope_pattern) from 'postgres/team_role_scopes.tsv' with (format text, null '\N')
+"#
+    .to_string()
+}
+
+fn sidecar_config() -> &'static str {
+    r#"# AgentK team sidecar starter config.
+# This file is intentionally plain TOML so teams can review it in code review.
+
+[sidecar]
+name = "agentk-team-sidecar"
+mode = "local"
+audit_log = ".agentk/runs/team-sidecar.jsonl"
+policy = "policies/team-sidecar.toml"
+permissions = "team-permissions.toml"
+secrets = "secrets.toml"
+
+[mcp]
+agent_id = "agent://team/default"
+server_id = "team-mcp"
+response_timeout_ms = 30000
+max_client_messages = 10000
+
+[downstream]
+# The starter bundle runs against AgentK's built-in minimal MCP server so the
+# sidecar path can be tested immediately. Replace command/args with your real
+# GitHub, Postgres, Slack, filesystem, or internal MCP server.
+command = "agentk"
+args = ["mcp-server"]
+allow_env = []
+
+[approvals]
+# V0 bundle convention: denied high-risk actions stay blocked and are reviewed
+# from the audit log. A future approval broker should use this section for
+# retry-based approvals instead of silently forwarding risky calls.
+mode = "audit-first"
+review_command = "agentk approvals .agentk/runs/team-sidecar.jsonl"
+"#
+}
+
+fn sidecar_secret_refs() -> &'static str {
+    r#"# Secret references for the team sidecar.
+# Values are environment variable names, not secret values.
+
+version = 1
+
+[[secrets]]
+target = "secret://github/token"
+provider = "env"
+reference = "GITHUB_TOKEN"
+
+[[secrets]]
+target = "secret://slack/token"
+provider = "env"
+reference = "SLACK_BOT_TOKEN"
+
+[[secrets]]
+target = "secret://postgres/url"
+provider = "env"
+reference = "DATABASE_URL"
+"#
+}
+
+fn sidecar_team_permissions() -> &'static str {
+    r#"# Team permissions for local AgentK approval review.
+# Replace the sample user ids with your team's stable identities.
+
+version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+# Optional for dashboard API writes:
+# token_env = "AGENTK_REVIEWER_TOM_TOKEN"
+
+[[users]]
+id = "security-reviewer"
+roles = ["security_reviewer"]
+# token_env = "AGENTK_REVIEWER_SECURITY_TOKEN"
+
+[[users]]
+id = "support-lead"
+roles = ["support_reviewer"]
+# token_env = "AGENTK_REVIEWER_SUPPORT_TOKEN"
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+
+[[roles]]
+id = "security_reviewer"
+can_approve = ["tool.invoke:github.*", "tool.invoke:filesystem.*", "network.send:*"]
+can_deny = ["*"]
+
+[[roles]]
+id = "support_reviewer"
+can_approve = ["tool.invoke:slack.*"]
+can_deny = ["tool.invoke:slack.*"]
+"#
+}
+
+fn sidecar_claude_desktop_config() -> &'static str {
+    r#"{
+  "mcpServers": {
+    "agentk-team-sidecar": {
+      "command": "agentk",
+      "args": [
+        "sidecar-run",
+        "--root",
+        "REPLACE_WITH_AGENTK_SIDECAR_PATH"
+      ],
+      "env": {
+        "AGENTK_SIGNING_KEY_FILE": "REPLACE_WITH_LOCAL_SIGNING_KEY_PATH"
+      }
+    }
+  }
+}
+"#
+}
+
+fn sidecar_mcp_command_snippet() -> &'static str {
+    r#"# Generic MCP sidecar command for clients that accept a command/args server.
+# Configure the downstream command in agentk-sidecar.toml, then point the MCP
+# client at the sidecar root.
+
+agentk sidecar-run --root REPLACE_WITH_AGENTK_SIDECAR_PATH
+
+# Review the audit log:
+agentk audit .agentk/runs/team-sidecar.jsonl
+agentk approvals .agentk/runs/team-sidecar.jsonl
+"#
+}
+
+fn sidecar_readme() -> &'static str {
+    r#"# AgentK Team Sidecar Starter
+
+This bundle is the first step from prototype to installable team product. It
+puts AgentK in front of one downstream MCP server, records a redacted audit log,
+and gives the team a policy file they can review before agents touch real tools.
+
+## Files
+
+- `agentk-sidecar.toml`: local sidecar conventions and audit path.
+- `team-permissions.toml`: local users, reviewer roles, and approval scopes.
+- `policies/team-sidecar.toml`: default-deny AgentK policy starter.
+- `secrets.toml`: environment-backed secret references, never secret values.
+- `clients/claude-desktop.mcp.json`: MCP client snippet for Claude Desktop.
+- `clients/codex-cursor-mcp-command.txt`: generic command/args snippet for MCP clients.
+- `demos/safe-agent-demo.md`: packaged GitHub/Postgres/Slack/filesystem demo plan.
+
+## First Run
+
+1. Build or install `agentk`.
+2. Generate a signing key outside git:
+
+   ```sh
+   agentk keygen --out ../agentk-signing-key
+   export AGENTK_SIGNING_KEY_FILE=../agentk-signing-key
+   ```
+
+3. Point your MCP client at the configured sidecar command:
+
+   ```sh
+   agentk sidecar-check --root .
+   agentk sidecar-run --root .
+   ```
+
+4. Replace `[downstream]` in `agentk-sidecar.toml` with your real MCP server
+   command when you are ready to front GitHub, Postgres, Slack, filesystem, or
+   internal tools.
+5. Start the MCP client through AgentK.
+6. Review the audit log:
+
+   ```sh
+   agentk audit .agentk/runs/team-sidecar.jsonl
+   agentk approvals .agentk/runs/team-sidecar.jsonl
+   agentk approve .agentk/runs/team-sidecar.jsonl appr_... --permissions team-permissions.toml --reviewer tom --reason "one-shot approval"
+   agentk dashboard .agentk/runs/team-sidecar.jsonl --permissions team-permissions.toml --out .agentk/dashboard.html
+   agentk dashboard-serve .agentk/runs/team-sidecar.jsonl --permissions team-permissions.toml --store-root .agentk/team-store
+   agentk trace-inspect .agentk/runs/team-sidecar.jsonl
+   ```
+
+   The local dashboard server exposes `/api/review` and permission-checked
+   `/api/approve` and `/api/deny` JSON endpoints for appending decisions.
+   Add `token_env = "AGENTK_REVIEWER_NAME_TOKEN"` to a user to require
+   `reviewer_token` in dashboard write requests.
+
+## Operating Rule
+
+Start audit-first and default-deny. Only widen policy after the trace shows a
+specific safe action that the team wants to allow.
+"#
+}
+
+fn sidecar_safe_agent_demo() -> &'static str {
+    r#"# Safe-Agent Demo: GitHub, Postgres, Slack, Filesystem
+
+Goal: show a useful agent workflow where reads are allowed, risky writes are
+blocked or moved to human review, and every boundary leaves replayable evidence.
+
+Run the packaged no-credential version:
+
+```sh
+agentk safe-agent-demo
+agentk audit .agentk/runs/safe-agent-demo.jsonl
+```
+
+## Scenario
+
+Ask the agent:
+
+> Investigate a customer bug. Check GitHub issues, inspect recent Postgres rows,
+> draft a Slack summary, and prepare a filesystem patch if needed.
+
+## Expected Boundaries
+
+- GitHub issue and PR reads: allowed after descriptor mediation.
+- Postgres read-only query: allowed when the downstream tool is scoped read-only.
+- Slack draft message: allowed only as a draft/write candidate, not sent.
+- Filesystem patch: blocked unless an explicit policy capability exists.
+- Database update/delete/insert/drop: blocked.
+- Secret material: represented as `secret://` handles, never raw model context.
+
+## Demo Checklist
+
+1. Run a downstream MCP server for one tool family at a time.
+2. Put AgentK in front with `agentk mcp-proxy-stdio`.
+3. Capture `.agentk/runs/team-sidecar.jsonl`.
+4. Review pending approvals with `agentk audit`.
+5. Inspect detailed evidence with `agentk trace-inspect`.
+6. Fork replay with a narrower or wider policy before changing live behavior.
+
+This demo should become the clean onboarding path for teams. Keep it boring,
+repeatable, and safe: no credentials, no live writes, no production targets.
+"#
+}
+
+fn sidecar_package_readme() -> String {
+    r#"# AgentK Packaged Team Sidecar
+
+This package is a local deployable sidecar wrapper. It assumes `agentk` is
+installed on the host PATH, keeps the reviewable bundle in `sidecar/`, and gives
+MCP clients stable launcher scripts in `bin/`.
+
+## Contents
+
+- `sidecar/`: generated AgentK sidecar bundle.
+- `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
+  command/args MCP client.
+- `bin/agentk-sidecar-tcp`: bounded TCP JSON-RPC gateway launcher for internal
+  clients that cannot use stdio directly.
+- `bin/agentk-sidecar-http`: local Streamable HTTP MCP gateway launcher for
+  clients that support the HTTP transport.
+- `bin/agentk-dashboard`: writes `.agentk/dashboard.html` from the package trace
+  and approval decisions.
+- `bin/agentk-dashboard-server`: serves the same review surface and JSON API on
+  localhost.
+- `bin/agentk-store-export`: writes `.agentk/store` from the package trace,
+  approvals, and permissions.
+- `bin/agentk-store-check`: validates `.agentk/store` before a Postgres load.
+- `bin/agentk-store-sync`: refreshes `.agentk/team-store` as the live durable
+  team dashboard store.
+- `bin/agentk-store-push`: preflights and loads `.agentk/store` with `psql`.
+- `clients/`: ready-to-copy client snippets.
+- `storage/postgres-schema.sql`: durable audit and approval store schema
+  contract.
+- `deploy/`: systemd, launchd, and Docker Compose templates for running the
+  packaged dashboard and store workflow.
+
+## Commands
+
+```sh
+./bin/agentk-sidecar
+AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
+./bin/agentk-sidecar-http
+./bin/agentk-dashboard
+./bin/agentk-dashboard-server
+./bin/agentk-store-export
+./bin/agentk-store-check
+./bin/agentk-store-sync
+./bin/agentk-store-push --dry-run
+agentk sidecar-check --root sidecar
+agentk permissions --path sidecar/team-permissions.toml
+```
+
+`bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
+`/api/approve` and `/api/deny` JSON endpoints. Set
+`AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
+`X-AgentK-Admin-Token`, on write requests. If a reviewer has `token_env` in
+`sidecar/team-permissions.toml`, write requests must also include
+`reviewer_token`. Decisions are appended to `sidecar/.agentk/approvals.jsonl`;
+the signed trace is not mutated. The packaged dashboard server also refreshes
+`sidecar/.agentk/team-store` so dashboard reads and reviewer decisions maintain
+the live durable team store.
+
+`bin/agentk-sidecar-tcp` listens on `127.0.0.1:9797` by default, accepts the
+configured number of newline-delimited MCP JSON-RPC TCP sessions, and proxies
+each session through the same reviewed sidecar config as `bin/agentk-sidecar`.
+Set `AGENTK_MCP_TCP_HOST`, `AGENTK_MCP_TCP_PORT`, and
+`AGENTK_MCP_TCP_MAX_SESSIONS` to change the bind address or total session
+count, and `AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS` to bound simultaneous
+client sessions. This is a bounded local gateway surface for internal adapters;
+Claude, Codex, and Cursor should continue to use the stdio launcher unless
+their MCP client configuration supports a TCP JSONL adapter.
+
+`bin/agentk-sidecar-http` listens on `127.0.0.1:9798/mcp` by default and serves
+the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
+direct JSON responses, Origin validation, optional bearer-token auth from
+`AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
+`AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`, and
+`AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` to tune the local service. GET/SSE
+streams are currently rejected with 405 until the gateway grows resumable SSE
+support.
+
+`bin/agentk-store-export`, `bin/agentk-store-check`, and
+`bin/agentk-store-push` are the packaged path from local review evidence to a
+shared Postgres audit store. `bin/agentk-store-sync` maintains the live local
+team store under `sidecar/.agentk/team-store` for dashboard/control-plane
+processes that need stable current JSON and normalized JSONL tables.
+`agentk-store-push` accepts the same flags as `agentk store-push`, including
+`--dry-run`, `--database-url-env`, and `--psql`.
+
+`deploy/` contains service/container templates wired to the packaged launchers.
+Treat them as reviewed starting points: set the real `agentk` binary path,
+environment variables, and downstream MCP server command before production use.
+
+Edit `sidecar/agentk-sidecar.toml` to replace the starter downstream MCP server
+with your GitHub, Postgres, Slack, filesystem, or internal MCP server.
+"#
+    .to_string()
+}
+
+fn audit_store_readme() -> String {
+    r#"# AgentK Audit Store Export
+
+This directory is a durable, reviewable export of one signed AgentK trace and
+its local approval state.
+
+- `audit.json`: signed trace audit inbox with pending approvals and side effects.
+- `approvals.json`: reconciliation of open, decided, and stale approvals.
+- `permissions.json`: reviewer summary, when a team permissions manifest was
+  provided.
+- `postgres-schema.sql`: schema contract for a shared Postgres-backed store.
+- `postgres/*.tsv`: Postgres text-format rows for traces, audit events,
+  decisions, and reviewer metadata.
+- `postgres/load.sql`: psql load script. From this export directory, run
+  `agentk store-check --root .`, then `agentk store-push --root . --dry-run`,
+  then `agentk store-push --root .`.
+
+The export contains redacted evidence and hashes, not raw tool payloads or
+secret values.
+"#
+    .to_string()
+}
+
+fn durable_audit_store_readme() -> String {
+    r#"# AgentK Durable Team Store
+
+This directory is an idempotent local durable store for the latest signed
+AgentK trace, approval decisions, and reviewer metadata. It is designed for a
+team dashboard or sidecar process that needs stable files it can mount, back up,
+or mirror into a database.
+
+- `current/audit.json`: latest redacted audit inbox.
+- `current/approvals.json`: latest reconciled approval state.
+- `current/notifications.json`: notification outbox counts for local bridges.
+- `current/permissions.json`: latest reviewer summary, when configured.
+- `tables/*.jsonl`: normalized row-shaped tables for traces, audit events,
+  approval decisions, notification outbox entries, and reviewers.
+- `store-schema.json`: durable store contract and version.
+
+The store contains redacted evidence and hashes, not raw tool payloads or secret
+values. Re-running `agentk store-sync` refreshes the current view and rewrites
+the normalized tables from the signed trace plus append-only decision log.
+`tables/notifications.jsonl` is a credential-free outbox; Slack, GitHub, email,
+or ticketing bridges can consume it without AgentK storing delivery tokens.
+"#
+    .to_string()
+}
+
+fn postgres_audit_store_schema() -> &'static str {
+    r#"-- AgentK durable audit and approval store schema.
+-- This is a schema contract for teams that want to back the local JSON export
+-- with Postgres. Keep raw tool payloads and secret values out of this store.
+
+create table if not exists agentk_traces (
+  trace_id text primary key,
+  trace_path text not null,
+  final_hash text not null,
+  events_checked bigint not null,
+  signatures_ok boolean not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists agentk_audit_events (
+  event_hash text primary key,
+  trace_id text not null references agentk_traces(trace_id) on delete cascade,
+  agent_id text,
+  step bigint not null,
+  syscall text not null,
+  target text not null,
+  verdict text not null check (verdict in ('allow', 'deny')),
+  rule_id text not null,
+  reason text not null,
+  missing_capability text,
+  labels text[] not null default '{}',
+  evidence_refs text[] not null default '{}'
+);
+
+create table if not exists agentk_approval_decisions (
+  approval_id text not null,
+  event_hash text not null references agentk_audit_events(event_hash) on delete cascade,
+  agent_id text,
+  trace_final_hash text not null,
+  decision text not null check (decision in ('approve', 'deny')),
+  reviewer text not null,
+  reason text not null,
+  created_at_unix bigint not null,
+  primary key (approval_id, trace_final_hash, created_at_unix)
+);
+
+create table if not exists agentk_team_users (
+  user_id text primary key
+);
+
+create table if not exists agentk_team_roles (
+  role_id text primary key
+);
+
+create table if not exists agentk_team_user_roles (
+  user_id text not null references agentk_team_users(user_id) on delete cascade,
+  role_id text not null references agentk_team_roles(role_id) on delete cascade,
+  primary key (user_id, role_id)
+);
+
+create table if not exists agentk_team_role_scopes (
+  role_id text not null references agentk_team_roles(role_id) on delete cascade,
+  decision text not null check (decision in ('approve', 'deny')),
+  scope_pattern text not null,
+  primary key (role_id, decision, scope_pattern)
+);
+
+create index if not exists agentk_audit_events_trace_step_idx
+  on agentk_audit_events(trace_id, step);
+
+create index if not exists agentk_approval_decisions_event_idx
+  on agentk_approval_decisions(event_hash);
+"#
+}
+
+fn sidecar_launcher_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" sidecar-run --root "$ROOT/sidecar"
+"#
+    .to_string()
+}
+
+fn sidecar_tcp_launcher_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" sidecar-serve-tcp --root "$ROOT/sidecar" \
+  --host "${AGENTK_MCP_TCP_HOST:-127.0.0.1}" \
+  --port "${AGENTK_MCP_TCP_PORT:-9797}" \
+  --max-sessions "${AGENTK_MCP_TCP_MAX_SESSIONS:-1}" \
+  --max-concurrent-sessions "${AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS:-1}"
+"#
+    .to_string()
+}
+
+fn sidecar_http_launcher_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
+  --host "${AGENTK_MCP_HTTP_HOST:-127.0.0.1}" \
+  --port "${AGENTK_MCP_HTTP_PORT:-9798}" \
+  --endpoint "${AGENTK_MCP_HTTP_ENDPOINT:-/mcp}" \
+  --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}"
+"#
+    .to_string()
+}
+
+fn sidecar_dashboard_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" dashboard "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
+  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
+  --permissions "$ROOT/sidecar/team-permissions.toml" \
+  --out "$ROOT/sidecar/.agentk/dashboard.html"
+"#
+    .to_string()
+}
+
+fn sidecar_dashboard_server_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" dashboard-serve "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
+  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
+  --permissions "$ROOT/sidecar/team-permissions.toml" \
+  --store-root "$ROOT/sidecar/.agentk/team-store"
+"#
+    .to_string()
+}
+
+fn sidecar_store_export_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" store-export "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
+  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
+  --permissions "$ROOT/sidecar/team-permissions.toml" \
+  --out "$ROOT/sidecar/.agentk/store" \
+  "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_check_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" store-check --root "$ROOT/sidecar/.agentk/store" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_sync_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" store-sync "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
+  --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
+  --permissions "$ROOT/sidecar/team-permissions.toml" \
+  --root "$ROOT/sidecar/.agentk/team-store" \
+  "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_push_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" store-push --root "$ROOT/sidecar/.agentk/store" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_systemd_dashboard_service(package_root: &Path) -> String {
+    format!(
+        r#"[Unit]
+Description=AgentK team dashboard server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={}
+Environment=AGENTK_BIN=agentk
+# Set this in an EnvironmentFile to require write API auth.
+# EnvironmentFile=%h/.config/agentk/dashboard.env
+ExecStart={}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"#,
+        package_root.display(),
+        package_root.join("bin/agentk-dashboard-server").display()
+    )
+}
+
+fn sidecar_launchd_dashboard_plist(package_root: &Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentk.dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{}</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{}</string>
+  <key>StandardErrorPath</key>
+  <string>{}</string>
+</dict>
+</plist>
+"#,
+        package_root.join("bin/agentk-dashboard-server").display(),
+        package_root.display(),
+        package_root
+            .join("sidecar/.agentk/dashboard-server.out.log")
+            .display(),
+        package_root
+            .join("sidecar/.agentk/dashboard-server.err.log")
+            .display()
+    )
+}
+
+fn sidecar_dockerfile() -> String {
+    r#"FROM debian:bookworm-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates postgresql-client \
+  && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 10001 agentk
+WORKDIR /opt/agentk-sidecar
+COPY . /opt/agentk-sidecar
+ENV AGENTK_BIN=/usr/local/bin/agentk
+USER agentk
+EXPOSE 8765
+CMD ["./bin/agentk-dashboard-server"]
+"#
+    .to_string()
+}
+
+fn sidecar_docker_compose() -> String {
+    r#"services:
+  agentk-dashboard:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      AGENTK_BIN: /usr/local/bin/agentk
+      AGENTK_DASHBOARD_ADMIN_TOKEN: ${AGENTK_DASHBOARD_ADMIN_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ../../sidecar/.agentk:/opt/agentk-sidecar/sidecar/.agentk
+    command: ["./bin/agentk-dashboard-server"]
+"#
+    .to_string()
+}
+
+fn sidecar_deploy_readme() -> String {
+    r#"# AgentK Deployment Templates
+
+These templates are starting points for running the packaged dashboard and store
+workflow as a team sidecar. Review paths, users, and secret handling before
+installing them.
+
+Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
+`X-AgentK-Admin-Token`, for `/api/approve` and `/api/deny` writes. Reviewer
+`token_env` entries in `sidecar/team-permissions.toml` are still enforced after
+the dashboard admin token passes.
+
+## systemd user service
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/agentk-dashboard.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agentk-dashboard.service
+```
+
+## launchd
+
+```sh
+cp deploy/launchd/com.agentk.dashboard.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.agentk.dashboard.plist
+```
+
+## Docker Compose
+
+The Dockerfile expects an `agentk` binary at `/usr/local/bin/agentk` in the
+image. Add it during your own image build or bind-mount it for local testing.
+
+```sh
+docker compose -f deploy/docker/compose.yml up --build
+```
+
+Use `bin/agentk-store-sync` to refresh the live local team store. Use
+`bin/agentk-store-export`, `bin/agentk-store-check`, and
+`bin/agentk-store-push --dry-run` before loading audit rows into Postgres.
+"#
+    .to_string()
+}
+
+fn sidecar_packaged_claude_config(package_root: &Path) -> String {
+    let launcher = package_root.join("bin/agentk-sidecar");
+    format!(
+        r#"{{
+  "mcpServers": {{
+    "agentk-team-sidecar": {{
+      "command": "sh",
+      "args": [
+        "{}"
+      ]
+    }}
+  }}
+}}
+"#,
+        json_string_escape(&launcher.display().to_string())
+    )
+}
+
+fn sidecar_packaged_command_snippet(package_root: &Path) -> String {
+    format!(
+        r#"# Generic MCP client command/args wiring.
+
+command: sh
+args:
+  - {}
+
+# Dashboard:
+{}
+
+# Dashboard server:
+{}
+
+# Audit store sync/export/check/push:
+{}
+{}
+{}
+{}
+"#,
+        package_root.join("bin/agentk-sidecar").display(),
+        package_root.join("bin/agentk-dashboard").display(),
+        package_root.join("bin/agentk-dashboard-server").display(),
+        package_root.join("bin/agentk-store-export").display(),
+        package_root.join("bin/agentk-store-check").display(),
+        package_root.join("bin/agentk-store-sync").display(),
+        package_root.join("bin/agentk-store-push").display()
+    )
+}
+
+fn json_string_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn labels(values: &[Label]) -> BTreeSet<Label> {
     values.iter().copied().collect()
 }
@@ -12620,6 +16594,407 @@ mod tests {
         kernel.syscall(syscall).decision.clone()
     }
 
+    #[test]
+    fn sidecar_bundle_init_writes_team_onboarding_files() {
+        let root = temp_path("agentk-sidecar-bundle", "dir");
+        let report = init_sidecar_bundle(&root, false).expect("sidecar bundle should be generated");
+
+        assert_eq!(report.root, root);
+        assert_eq!(report.files.len(), 8);
+        assert!(root.join("README.md").exists());
+        assert!(root.join("agentk-sidecar.toml").exists());
+        assert!(root.join("team-permissions.toml").exists());
+        assert!(root.join("policies/team-sidecar.toml").exists());
+        assert!(root.join("secrets.toml").exists());
+        assert!(root.join("clients/claude-desktop.mcp.json").exists());
+        assert!(root.join("clients/codex-cursor-mcp-command.txt").exists());
+        assert!(root.join("demos/safe-agent-demo.md").exists());
+
+        let readme = fs::read_to_string(root.join("README.md")).expect("readme should be readable");
+        assert!(readme.contains("AgentK Team Sidecar Starter"));
+        assert!(readme.contains("agentk trace-inspect"));
+        let config = fs::read_to_string(root.join("agentk-sidecar.toml"))
+            .expect("sidecar config should be readable");
+        assert!(config.contains("max_client_messages = 10000"));
+
+        let client = fs::read_to_string(root.join("clients/claude-desktop.mcp.json"))
+            .expect("client snippet should be readable");
+        assert!(client.contains("sidecar-run"));
+        assert!(client.contains("REPLACE_WITH_AGENTK_SIDECAR_PATH"));
+        assert!(!client.contains("/Users/"));
+
+        let policy = Policy::from_path(root.join("policies/team-sidecar.toml"))
+            .expect("generated policy should parse");
+        assert!(!policy.rules.is_empty());
+
+        let secrets = secret_reference_manifest_report_from_path(root.join("secrets.toml"))
+            .expect("generated secret refs should parse without secret values");
+        assert_eq!(secrets.secret_count, 3);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_bundle_init_refuses_to_overwrite_without_force() {
+        let root = temp_path("agentk-sidecar-overwrite", "dir");
+        init_sidecar_bundle(&root, false).expect("first bundle generation should succeed");
+
+        let error = init_sidecar_bundle(&root, false)
+            .expect_err("second generation should require --force")
+            .to_string();
+        assert!(error.contains("file already exists"));
+
+        fs::write(root.join("README.md"), "custom local note")
+            .expect("test should be able to customize generated file");
+        init_sidecar_bundle(&root, true).expect("force should overwrite generated files");
+        let readme = fs::read_to_string(root.join("README.md")).expect("readme should be readable");
+        assert!(readme.contains("AgentK Team Sidecar Starter"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_accepts_generated_bundle_with_placeholder_warnings() {
+        let root = temp_path("agentk-sidecar-check", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar policy" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar secret refs" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar team permissions" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar downstream command" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar client message limit" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "Claude Desktop MCP client" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "Codex/Cursor MCP command" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "clients/claude-desktop.mcp.json" && check.status == ReadinessStatus::Warn
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_broken_client_snippets() {
+        let root = temp_path("agentk-sidecar-bad-client-snippets", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        fs::write(root.join("clients/claude-desktop.mcp.json"), "{}")
+            .expect("test should be able to corrupt Claude snippet");
+        fs::write(
+            root.join("clients/codex-cursor-mcp-command.txt"),
+            "agentk audit .agentk/runs/team-sidecar.jsonl",
+        )
+        .expect("test should be able to corrupt command snippet");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "Claude Desktop MCP client" && check.status == ReadinessStatus::Fail
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "Codex/Cursor MCP command" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_invalid_policy() {
+        let root = temp_path("agentk-sidecar-bad-policy", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        fs::write(root.join("policies/team-sidecar.toml"), "not = [valid")
+            .expect("test should be able to corrupt policy");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar policy" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_absolute_audit_paths() {
+        let root = temp_path("agentk-sidecar-absolute-audit", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        let config_path = root.join("agentk-sidecar.toml");
+        let config = fs::read_to_string(&config_path).expect("config should be readable");
+        fs::write(
+            &config_path,
+            config.replace(
+                "audit_log = \".agentk/runs/team-sidecar.jsonl\"",
+                "audit_log = \"/tmp/agentk-sidecar.jsonl\"",
+            ),
+        )
+        .expect("test should be able to edit config");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar audit log" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_run_config_loads_generated_bundle_without_secret_values() {
+        let root = temp_path("agentk-sidecar-run-config", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+
+        let config = sidecar_run_config(&root, |_| None).expect("generated config should load");
+
+        assert_eq!(config.root, root);
+        assert_eq!(
+            config.trace_out,
+            root.join(".agentk/runs/team-sidecar.jsonl")
+        );
+        assert_eq!(config.proxy.agent_id, "agent://team/default");
+        assert_eq!(config.proxy.server_id, "team-mcp");
+        assert_eq!(config.proxy.command, "agentk");
+        assert_eq!(config.proxy.args, vec!["mcp-server".to_string()]);
+        assert!(config.proxy.env.is_empty());
+        assert_eq!(config.proxy.max_client_messages, Some(10000));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_zero_client_message_limit() {
+        let root = temp_path("agentk-sidecar-bad-client-limit", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        let config_path = root.join("agentk-sidecar.toml");
+        let config = fs::read_to_string(&config_path).expect("config should be readable");
+        fs::write(
+            &config_path,
+            config.replace("max_client_messages = 10000", "max_client_messages = 0"),
+        )
+        .expect("test should be able to edit config");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar client message limit" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_run_config_collects_only_allowed_env_names() {
+        let root = temp_path("agentk-sidecar-run-env", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        let config_path = root.join("agentk-sidecar.toml");
+        let config = fs::read_to_string(&config_path).expect("config should be readable");
+        fs::write(
+            &config_path,
+            config.replace("allow_env = []", "allow_env = [\"GITHUB_TOKEN\"]"),
+        )
+        .expect("test should be able to edit config");
+
+        let config = sidecar_run_config(&root, |name| {
+            (name == "GITHUB_TOKEN").then(|| "token-from-parent-env".to_string())
+        })
+        .expect("allowed env should load");
+
+        assert_eq!(
+            config.proxy.env.get("GITHUB_TOKEN"),
+            Some(&"token-from-parent-env".to_string())
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_unsafe_downstream_env_names() {
+        let root = temp_path("agentk-sidecar-bad-env", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        let config_path = root.join("agentk-sidecar.toml");
+        let config = fs::read_to_string(&config_path).expect("config should be readable");
+        fs::write(
+            &config_path,
+            config.replace("allow_env = []", "allow_env = [\"BAD-NAME\"]"),
+        )
+        .expect("test should be able to edit config");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar downstream env" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_check_blocks_invalid_team_permissions() {
+        let root = temp_path("agentk-sidecar-bad-permissions", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        fs::write(
+            root.join("team-permissions.toml"),
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["missing_role"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+"#,
+        )
+        .expect("test should be able to corrupt permissions");
+
+        let report = check_sidecar_bundle(&root).expect("sidecar check should run");
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar team permissions" && check.status == ReadinessStatus::Fail
+        }));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn sidecar_package_writes_launchers_and_client_snippets() {
+        let root = temp_path("agentk-sidecar-package-root", "dir");
+        let out = temp_path("agentk-sidecar-package-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+
+        let report =
+            package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        assert_eq!(report.root, root);
+        assert_eq!(report.package, out);
+        assert_eq!(report.files.len(), 18);
+        assert!(out.join("sidecar/agentk-sidecar.toml").exists());
+        assert!(out.join("sidecar/team-permissions.toml").exists());
+        assert!(out.join("bin/agentk-sidecar").exists());
+        assert!(out.join("bin/agentk-sidecar-tcp").exists());
+        assert!(out.join("bin/agentk-sidecar-http").exists());
+        assert!(out.join("bin/agentk-dashboard").exists());
+        assert!(out.join("bin/agentk-dashboard-server").exists());
+        assert!(out.join("bin/agentk-store-export").exists());
+        assert!(out.join("bin/agentk-store-check").exists());
+        assert!(out.join("bin/agentk-store-sync").exists());
+        assert!(out.join("bin/agentk-store-push").exists());
+        assert!(out.join("clients/claude-desktop.mcp.json").exists());
+        assert!(out.join("storage/postgres-schema.sql").exists());
+        assert!(out.join("deploy/systemd/agentk-dashboard.service").exists());
+        assert!(
+            out.join("deploy/launchd/com.agentk.dashboard.plist")
+                .exists()
+        );
+        assert!(out.join("deploy/docker/Dockerfile").exists());
+        assert!(out.join("deploy/docker/compose.yml").exists());
+        assert!(out.join("deploy/README.md").exists());
+
+        let launcher =
+            fs::read_to_string(out.join("bin/agentk-sidecar")).expect("launcher should read");
+        assert!(launcher.contains("sidecar-run"));
+        assert!(launcher.contains("AGENTK_BIN"));
+        let tcp_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-tcp"))
+            .expect("tcp launcher should read");
+        assert!(tcp_launcher.contains("sidecar-serve-tcp"));
+        assert!(tcp_launcher.contains("AGENTK_MCP_TCP_PORT"));
+        assert!(tcp_launcher.contains("AGENTK_MCP_TCP_MAX_SESSIONS"));
+        assert!(tcp_launcher.contains("AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS"));
+        let http_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-http"))
+            .expect("http launcher should read");
+        assert!(http_launcher.contains("sidecar-serve-http"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_PORT"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_ENDPOINT"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
+        let dashboard =
+            fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
+        assert!(dashboard.contains("dashboard"));
+        assert!(dashboard.contains("AGENTK_BIN"));
+        let dashboard_server = fs::read_to_string(out.join("bin/agentk-dashboard-server"))
+            .expect("dashboard server should read");
+        assert!(dashboard_server.contains("dashboard-serve"));
+        assert!(dashboard_server.contains("AGENTK_BIN"));
+        assert!(dashboard_server.contains("--store-root"));
+        assert!(dashboard_server.contains("team-store"));
+        let store_export = fs::read_to_string(out.join("bin/agentk-store-export"))
+            .expect("store export should read");
+        assert!(store_export.contains("store-export"));
+        assert!(store_export.contains("team-permissions.toml"));
+        assert!(store_export.contains("\"$@\""));
+        let store_check = fs::read_to_string(out.join("bin/agentk-store-check"))
+            .expect("store check should read");
+        assert!(store_check.contains("store-check"));
+        assert!(store_check.contains("\"$@\""));
+        let store_sync =
+            fs::read_to_string(out.join("bin/agentk-store-sync")).expect("store sync should read");
+        assert!(store_sync.contains("store-sync"));
+        assert!(store_sync.contains("team-store"));
+        assert!(store_sync.contains("\"$@\""));
+        let store_push =
+            fs::read_to_string(out.join("bin/agentk-store-push")).expect("store push should read");
+        assert!(store_push.contains("store-push"));
+        assert!(store_push.contains("\"$@\""));
+        let client = fs::read_to_string(out.join("clients/claude-desktop.mcp.json"))
+            .expect("client should read");
+        assert!(client.contains("bin/agentk-sidecar"));
+        let command = fs::read_to_string(out.join("clients/codex-cursor-command.txt"))
+            .expect("command snippet should read");
+        assert!(command.contains("agentk-store-sync"));
+        assert!(command.contains("agentk-store-push"));
+        let service = fs::read_to_string(out.join("deploy/systemd/agentk-dashboard.service"))
+            .expect("service should read");
+        assert!(service.contains("agentk-dashboard-server"));
+        let plist = fs::read_to_string(out.join("deploy/launchd/com.agentk.dashboard.plist"))
+            .expect("plist should read");
+        assert!(plist.contains("agentk-dashboard-server"));
+        let compose =
+            fs::read_to_string(out.join("deploy/docker/compose.yml")).expect("compose should read");
+        assert!(compose.contains("agentk-dashboard"));
+        assert!(compose.contains("127.0.0.1:8765:8765"));
+        assert!(!out.join("sidecar/.agentk").exists());
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_refuses_existing_output_without_force() {
+        let root = temp_path("agentk-sidecar-package-existing-root", "dir");
+        let out = temp_path("agentk-sidecar-package-existing-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("first package should write");
+
+        let error = package_sidecar_bundle(&root, &out, false)
+            .expect_err("second package should require force")
+            .to_string();
+        assert!(error.contains("file already exists"));
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
     fn syscall(kind: SyscallKind, target: &str, labels: &[Label]) -> Syscall {
         Syscall {
             kind,
@@ -12702,6 +17077,150 @@ mod tests {
 
         assert!(error.contains("failed to spawn downstream MCP server process"));
         assert!(!error.contains(RAW_COMMAND));
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_resolves_bare_commands_before_env_clear() {
+        let dir = temp_path("agentk-command-resolver", "dir");
+        fs::create_dir_all(&dir).expect("resolver temp dir should be created");
+        let executable = dir.join("fake-agentk-mcp");
+        fs::write(&executable, "#!/bin/sh\n").expect("resolver executable should be written");
+        let path_env = env::join_paths([dir.as_path()]).expect("path env should join");
+
+        assert_eq!(
+            resolve_downstream_command_with_path("fake-agentk-mcp", Some(path_env.as_os_str())),
+            executable
+        );
+        assert_eq!(
+            resolve_downstream_command_with_path("./fake-agentk-mcp", Some(path_env.as_os_str())),
+            PathBuf::from("./fake-agentk-mcp")
+        );
+        assert_eq!(
+            resolve_downstream_command_with_path("missing-agentk-mcp", Some(path_env.as_os_str())),
+            PathBuf::from("missing-agentk-mcp")
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_rejects_zero_client_message_limit_before_spawn() {
+        let error = McpSubprocessProxy::spawn(
+            McpSubprocessProxyConfig::new("agent://test", "demo-server", "sh")
+                .with_max_client_messages(0),
+        )
+        .expect_err("zero client message limit should be rejected before spawn")
+        .to_string();
+
+        assert!(error.contains("client message limit must be positive"));
+    }
+
+    #[test]
+    fn subprocess_mcp_proxy_closes_after_client_message_limit_without_reflection() {
+        const RAW_SECOND_REQUEST: &str = "RAW_LIMIT_PAYLOAD_SHOULD_NOT_REFLECT";
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"limit-probe","version":"test"}}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unexpected forwarded request"}}'
+      ;;
+  esac
+done
+"#;
+        let input = format!(
+            "{}\n{}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "ping",
+                "params": {
+                    "raw": RAW_SECOND_REQUEST
+                }
+            })
+        );
+        let config = McpSubprocessProxyConfig::new("agent://test", "limit-probe", "sh")
+            .with_args(["-c".to_string(), script.to_string()])
+            .with_max_client_messages(1)
+            .with_response_timeout(Duration::from_millis(500));
+
+        let report = mcp_subprocess_proxy_json_lines(&input, config)
+            .expect("proxy stream should close cleanly after client message limit");
+        let output = report.output;
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"result\""));
+        assert!(lines[1].contains("MCP client message limit exceeded"));
+        assert!(!output.contains(RAW_SECOND_REQUEST));
+        assert!(!output.contains("unexpected forwarded request"));
+        assert_eq!(report.session.agent_id, "agent://test");
+        assert_eq!(report.session.server_id, "limit-probe");
+        assert_eq!(report.session.client_messages_seen, 1);
+        assert_eq!(report.session.max_client_messages, Some(1));
+        assert!(report.session.client_message_limit_exceeded);
+        assert!(report.session.initialized);
+        assert!(!report.session.ready);
+        assert_eq!(report.session.events, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_mcp_proxy_closes_child_stdin_on_client_eof_before_kill() {
+        let cleanup_log = temp_path("agentk-subprocess-mcp-clean-shutdown", "log");
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"clean-shutdown","version":"test"}}}'
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"method":"ping"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+      ;;
+    *)
+      printf '%s\n' '{"jsonrpc":"2.0","id":999,"error":{"code":-32601,"message":"unexpected forwarded request"}}'
+      ;;
+  esac
+done
+printf '%s\n' 'client eof observed' > "$1"
+"#;
+        let input = r#"
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+"#;
+        let config = McpSubprocessProxyConfig::new("agent://test", "clean-shutdown", "sh")
+            .with_args([
+                "-c".to_string(),
+                script.to_string(),
+                "agentk-clean-shutdown".to_string(),
+                cleanup_log.display().to_string(),
+            ]);
+
+        let report =
+            mcp_subprocess_proxy_json_lines(input, config).expect("proxy stream should finish");
+        let responses = report.output.lines().collect::<Vec<_>>();
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].contains("\"clean-shutdown\""));
+        assert!(responses[1].contains("\"id\":2"));
+        assert_eq!(report.session.agent_id, "agent://test");
+        assert_eq!(report.session.server_id, "clean-shutdown");
+        assert!(report.session.initialized);
+        assert!(report.session.ready);
+        assert_eq!(report.session.client_messages_seen, 3);
+        assert_eq!(report.session.events, 0);
+        assert_eq!(
+            fs::read_to_string(&cleanup_log).expect("child should observe client EOF"),
+            "client eof observed\n"
+        );
+
+        let _ = fs::remove_file(cleanup_log);
     }
 
     #[derive(Default)]
@@ -16164,6 +20683,702 @@ done
     }
 
     #[test]
+    fn audit_inbox_surfaces_pending_approval_without_raw_inputs() {
+        let path = temp_path("agentk-audit-inbox", "jsonl");
+        let raw_input = "RAW_APPROVAL_INPUT_SHOULD_NOT_APPEAR";
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "github.merge_pull_request".to_string(),
+            intent: "merge after agent review".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![raw_input.to_string()],
+        });
+        kernel.write_jsonl(&path).expect("log should write");
+
+        let audit = audit_inbox_jsonl(&path).expect("audit inbox should verify");
+        let serialized = serde_json::to_string(&audit).expect("audit should serialize");
+
+        assert_eq!(audit.events_checked, 1);
+        assert!(audit.signatures_ok);
+        assert_eq!(audit.pending_approvals.len(), 1);
+        assert_eq!(audit.allowed_side_effects.len(), 0);
+        assert_eq!(
+            audit.pending_approvals[0].agent_id.as_deref(),
+            Some("agent://test")
+        );
+        assert!(audit.pending_approvals[0].id.starts_with("appr_"));
+        assert_eq!(audit.pending_approvals[0].syscall, "tool.invoke");
+        assert_eq!(
+            audit.pending_approvals[0].target,
+            "github.merge_pull_request"
+        );
+        assert_eq!(
+            audit.pending_approvals[0].missing_capability.as_deref(),
+            Some("tool.invoke:github.merge_pull_request")
+        );
+        assert!(
+            audit.pending_approvals[0]
+                .review_hint
+                .contains("tool.invoke:github.merge_pull_request")
+        );
+        assert!(audit.pending_approvals[0].evidence_refs[0].starts_with("input_sha256:"));
+        assert!(!serialized.contains(raw_input));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn event_agent_id_is_hash_bound_when_present() {
+        let mut kernel = AgentKernel::new("agent://test");
+        let event = kernel
+            .syscall(Syscall {
+                kind: SyscallKind::ToolInvoke,
+                target: "github.merge_pull_request".to_string(),
+                intent: "merge after agent review".to_string(),
+                labels: labels(&[Label::Trusted]),
+                inputs: vec![format!("args_sha256:{}", hash_json(&serde_json::json!({})))],
+            })
+            .clone();
+
+        assert_eq!(event.agent_id.as_deref(), Some("agent://test"));
+        assert!(event.verify_hash());
+
+        let mut tampered = event.clone();
+        tampered.agent_id = Some("agent://other".to_string());
+        assert!(!tampered.verify_hash());
+
+        let legacy = Event::new(
+            event.step,
+            event.syscall.clone(),
+            event.decision.clone(),
+            event.previous_hash.clone(),
+        );
+        assert!(legacy.agent_id.is_none());
+        assert!(legacy.verify_hash());
+    }
+
+    #[test]
+    fn audit_inbox_reports_allowed_side_effects() {
+        let path = temp_path("agentk-audit-side-effects", "jsonl");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.grant("network.send:https://api.example.invalid/status");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::NetworkSend,
+            target: "https://api.example.invalid/status".to_string(),
+            intent: "send public status ping".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![format!("args_sha256:{}", hash_json(&serde_json::json!({})))],
+        });
+        kernel.write_jsonl(&path).expect("log should write");
+
+        let audit = audit_inbox_jsonl(&path).expect("audit inbox should verify");
+
+        assert_eq!(audit.events_checked, 1);
+        assert_eq!(audit.pending_approvals.len(), 0);
+        assert_eq!(audit.allowed_side_effects.len(), 1);
+        assert_eq!(audit.allowed_side_effects[0].syscall, "network.send");
+        assert_eq!(
+            audit.allowed_side_effects[0].target,
+            "https://api.example.invalid/status"
+        );
+        assert!(audit.allowed_side_effects[0].receipt_id.is_some());
+        assert!(audit.allowed_side_effects[0].evidence_refs[0].starts_with("args_sha256:"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn approval_review_records_decision_against_signed_trace() {
+        let trace_path = temp_path("agentk-approval-review", "jsonl");
+        let decisions_path = temp_path("agentk-approval-decisions", "jsonl");
+        let raw_input = "RAW_APPROVAL_DECISION_INPUT_SHOULD_NOT_APPEAR";
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "slack.send_message".to_string(),
+            intent: "send reviewed support update".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![raw_input.to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+
+        let before = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should read missing decisions as empty");
+        assert_eq!(before.open_approvals.len(), 1);
+        assert_eq!(before.decided_approvals.len(), 0);
+        let approval_id = before.open_approvals[0].id.clone();
+
+        let record = record_approval_decision_jsonl(
+            &trace_path,
+            &decisions_path,
+            &approval_id,
+            ApprovalDecision::Approve,
+            "tom",
+            "one-shot support reply is approved",
+        )
+        .expect("approval decision should append");
+        assert_eq!(record.approval_id, approval_id);
+        assert_eq!(record.decision, ApprovalDecision::Approve);
+        assert_eq!(
+            record.missing_capability.as_deref(),
+            Some("tool.invoke:slack.send_message")
+        );
+
+        let after = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should reconcile decision");
+        let serialized = serde_json::to_string(&after).expect("review should serialize");
+        assert_eq!(after.open_approvals.len(), 0);
+        assert_eq!(after.decided_approvals.len(), 1);
+        assert_eq!(after.approved, 1);
+        assert_eq!(after.denied, 0);
+        assert!(after.signatures_ok);
+        assert!(!serialized.contains(raw_input));
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+    }
+
+    #[test]
+    fn approval_decision_rejects_unknown_approval_id() {
+        let trace_path = temp_path("agentk-approval-unknown", "jsonl");
+        let decisions_path = temp_path("agentk-approval-unknown-decisions", "jsonl");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "github.merge_pull_request".to_string(),
+            intent: "merge without review".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["input_sha256:demo".to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+
+        let error = record_approval_decision_jsonl(
+            &trace_path,
+            &decisions_path,
+            "appr_missing",
+            ApprovalDecision::Deny,
+            "tom",
+            "not this item",
+        )
+        .expect_err("unknown approval id should fail")
+        .to_string();
+
+        assert!(error.contains("approval id was not found"));
+        assert!(!decisions_path.exists());
+
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
+    fn team_permissions_authorize_reviewer_decisions_by_scope() {
+        let trace_path = temp_path("agentk-permissioned-approval", "jsonl");
+        let decisions_path = temp_path("agentk-permissioned-decisions", "jsonl");
+        let permissions_path = temp_path("agentk-team-permissions", "toml");
+        fs::write(
+            &permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "support-lead"
+roles = ["support"]
+
+[[users]]
+id = "intern"
+roles = ["observer"]
+
+[[roles]]
+id = "support"
+can_approve = ["tool.invoke:slack.*"]
+can_deny = ["tool.invoke:slack.*"]
+
+[[roles]]
+id = "observer"
+can_approve = []
+can_deny = []
+"#,
+        )
+        .expect("permissions should write");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "slack.send_message".to_string(),
+            intent: "send support reply".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["input_sha256:demo".to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+        let approval_id = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should load")
+            .open_approvals[0]
+            .id
+            .clone();
+
+        let denied = record_approval_decision_jsonl_with_permissions(
+            &trace_path,
+            &decisions_path,
+            &permissions_path,
+            &approval_id,
+            ApprovalDecision::Approve,
+            "intern",
+            "observer should not approve",
+        )
+        .expect_err("unauthorized reviewer should fail")
+        .to_string();
+        assert!(denied.contains("not authorized"));
+
+        let record = record_approval_decision_jsonl_with_permissions(
+            &trace_path,
+            &decisions_path,
+            &permissions_path,
+            &approval_id,
+            ApprovalDecision::Approve,
+            "support-lead",
+            "support reply allowed",
+        )
+        .expect("authorized reviewer should append");
+
+        assert_eq!(record.reviewer, "support-lead");
+        assert_eq!(record.decision, ApprovalDecision::Approve);
+        let report = team_permissions_report_from_path(&permissions_path)
+            .expect("permissions report should parse");
+        assert_eq!(report.reviewers, vec!["support-lead".to_string()]);
+        assert_eq!(report.token_protected_reviewers, 0);
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+        let _ = fs::remove_file(permissions_path);
+    }
+
+    #[test]
+    fn team_permissions_verify_optional_reviewer_tokens() {
+        let permissions_path = temp_path("agentk-team-token-permissions", "toml");
+        let bad_permissions_path = temp_path("agentk-team-bad-token-permissions", "toml");
+        let token_env = format!(
+            "AGENTK_REVIEWER_TOKEN_TEST_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        );
+        fs::write(
+            &permissions_path,
+            format!(
+                r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+token_env = "{token_env}"
+
+[[users]]
+id = "viewer"
+roles = ["observer"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+
+[[roles]]
+id = "observer"
+can_approve = []
+can_deny = []
+"#
+            ),
+        )
+        .expect("permissions should write");
+        fs::write(
+            &bad_permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+token_env = "BAD-NAME"
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+"#,
+        )
+        .expect("bad permissions should write");
+
+        let bad = team_permissions_report_from_path(&bad_permissions_path)
+            .expect_err("unsafe token env should fail")
+            .to_string();
+        assert!(bad.contains("token_env must be a safe environment variable name"));
+        let report = team_permissions_report_from_path(&permissions_path)
+            .expect("permissions report should parse");
+        assert_eq!(report.reviewers, vec!["tom".to_string()]);
+        assert_eq!(report.token_protected_reviewers, 1);
+        verify_team_reviewer_token(&permissions_path, "viewer", None)
+            .expect("users without token env should not require tokens");
+        let missing = verify_team_reviewer_token(&permissions_path, "tom", None)
+            .expect_err("token-protected reviewer should require env")
+            .to_string();
+        assert!(missing.contains("requires token env"));
+
+        unsafe {
+            env::set_var(&token_env, "correct-token");
+        }
+        let absent = verify_team_reviewer_token(&permissions_path, "tom", None)
+            .expect_err("token-protected reviewer should require a provided token")
+            .to_string();
+        assert!(absent.contains("requires reviewer_token"));
+        let wrong = verify_team_reviewer_token(&permissions_path, "tom", Some("wrong-token"))
+            .expect_err("wrong reviewer token should fail")
+            .to_string();
+        assert!(wrong.contains("token did not match"));
+        verify_team_reviewer_token(&permissions_path, "tom", Some("correct-token"))
+            .expect("correct reviewer token should pass");
+        unsafe {
+            env::remove_var(&token_env);
+        }
+
+        let _ = fs::remove_file(permissions_path);
+        let _ = fs::remove_file(bad_permissions_path);
+    }
+
+    #[test]
+    fn approval_dashboard_writes_escaped_local_review_html() {
+        let trace_path = temp_path("agentk-dashboard-trace", "jsonl");
+        let decisions_path = temp_path("agentk-dashboard-decisions", "jsonl");
+        let permissions_path = temp_path("agentk-dashboard-permissions", "toml");
+        let output_path = temp_path("agentk-dashboard", "html");
+        fs::write(
+            &permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+"#,
+        )
+        .expect("permissions should write");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "slack.send_message<script>".to_string(),
+            intent: "send support reply".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["input_sha256:demo".to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+        let approval_id = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should load")
+            .open_approvals[0]
+            .id
+            .clone();
+        record_approval_decision_jsonl_with_permissions(
+            &trace_path,
+            &decisions_path,
+            &permissions_path,
+            &approval_id,
+            ApprovalDecision::Deny,
+            "tom",
+            "contains <unsafe> request",
+        )
+        .expect("authorized decision should append");
+
+        let report = write_approval_dashboard_html(
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            &output_path,
+        )
+        .expect("dashboard should write");
+        let html = fs::read_to_string(&output_path).expect("dashboard should be readable");
+
+        assert_eq!(report.open, 0);
+        assert_eq!(report.denied, 1);
+        assert_eq!(report.reviewers, 1);
+        assert!(html.contains("AgentK Approval Dashboard"));
+        assert!(html.contains("slack.send_message&lt;script&gt;"));
+        assert!(html.contains("contains &lt;unsafe&gt; request"));
+        assert!(!html.contains("slack.send_message<script>"));
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+        let _ = fs::remove_file(permissions_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn audit_store_export_writes_normalized_files_and_schema() {
+        let trace_path = temp_path("agentk-store-trace", "jsonl");
+        let decisions_path = temp_path("agentk-store-decisions", "jsonl");
+        let permissions_path = temp_path("agentk-store-permissions", "toml");
+        let output_dir = temp_path("agentk-store-export", "dir");
+        fs::write(
+            &permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+"#,
+        )
+        .expect("permissions should write");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "slack.send_message".to_string(),
+            intent: "send support reply".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["input_sha256:demo".to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+        let approval_id = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should load")
+            .open_approvals[0]
+            .id
+            .clone();
+        record_approval_decision_jsonl_with_permissions(
+            &trace_path,
+            &decisions_path,
+            &permissions_path,
+            &approval_id,
+            ApprovalDecision::Deny,
+            "tom",
+            "not approved for export test",
+        )
+        .expect("authorized decision should append");
+
+        let report = export_audit_store(
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            &output_dir,
+        )
+        .expect("store export should write");
+
+        assert_eq!(report.output_dir, output_dir);
+        assert_eq!(report.files.len(), 13);
+        assert_eq!(report.open, 0);
+        assert_eq!(report.denied, 1);
+        assert!(report.signatures_ok);
+        assert!(output_dir.join("audit.json").exists());
+        assert!(output_dir.join("approvals.json").exists());
+        assert!(output_dir.join("permissions.json").exists());
+        assert!(output_dir.join("README.md").exists());
+        assert!(output_dir.join("postgres/traces.tsv").exists());
+        assert!(output_dir.join("postgres/audit_events.tsv").exists());
+        assert!(output_dir.join("postgres/approval_decisions.tsv").exists());
+        assert!(output_dir.join("postgres/team_users.tsv").exists());
+        assert!(output_dir.join("postgres/load.sql").exists());
+        let schema = fs::read_to_string(output_dir.join("postgres-schema.sql"))
+            .expect("schema should be readable");
+        assert!(schema.contains("create table if not exists agentk_traces"));
+        let load_sql =
+            fs::read_to_string(output_dir.join("postgres/load.sql")).expect("load should read");
+        assert!(load_sql.contains("\\ir ../postgres-schema.sql"));
+        assert!(load_sql.contains("\\copy agentk_audit_events"));
+        let audit_events = fs::read_to_string(output_dir.join("postgres/audit_events.tsv"))
+            .expect("audit event rows should read");
+        assert!(audit_events.contains("slack.send_message"));
+        assert!(audit_events.contains("tool.invoke:slack.send_message"));
+        let decision_rows = fs::read_to_string(output_dir.join("postgres/approval_decisions.tsv"))
+            .expect("decision rows should read");
+        assert!(decision_rows.contains("not approved for export test"));
+        let team_users = fs::read_to_string(output_dir.join("postgres/team_users.tsv"))
+            .expect("team user rows should read");
+        assert!(team_users.contains("tom"));
+        let approvals = fs::read_to_string(output_dir.join("approvals.json"))
+            .expect("approvals should be readable");
+        assert!(approvals.contains("\"denied\": 1"));
+        let check = check_audit_store_export(&output_dir).expect("store check should run");
+        assert!(check.passed);
+        assert!(check.checks.iter().any(|check| {
+            check.name == "postgres tsv rows" && check.status == ReadinessStatus::Pass
+        }));
+        let general_check = check_audit_store(&output_dir).expect("general store check should run");
+        assert!(general_check.passed);
+        assert!(general_check.checks.iter().any(|check| {
+            check.name == "postgres tsv rows" && check.status == ReadinessStatus::Pass
+        }));
+
+        fs::remove_file(output_dir.join("postgres/load.sql")).expect("load script should remove");
+        let broken = check_audit_store_export(&output_dir).expect("broken store check should run");
+        assert!(!broken.passed);
+        assert!(broken.checks.iter().any(|check| {
+            check.name == "store file postgres/load.sql" && check.status == ReadinessStatus::Fail
+        }));
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+        let _ = fs::remove_file(permissions_path);
+        fs::remove_dir_all(output_dir).ok();
+    }
+
+    #[test]
+    fn durable_audit_store_sync_writes_current_views_and_jsonl_tables() {
+        let trace_path = temp_path("agentk-durable-store-trace", "jsonl");
+        let decisions_path = temp_path("agentk-durable-store-decisions", "jsonl");
+        let permissions_path = temp_path("agentk-durable-store-permissions", "toml");
+        let store_dir = temp_path("agentk-durable-team-store", "dir");
+        fs::write(
+            &permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+"#,
+        )
+        .expect("permissions should write");
+        let mut kernel = AgentKernel::new("agent://test");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "slack.send_message".to_string(),
+            intent: "send support reply".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec!["input_sha256:demo".to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+        let approval_id = approval_review_jsonl(&trace_path, &decisions_path)
+            .expect("review should load")
+            .open_approvals[0]
+            .id
+            .clone();
+        record_approval_decision_jsonl_with_permissions(
+            &trace_path,
+            &decisions_path,
+            &permissions_path,
+            &approval_id,
+            ApprovalDecision::Approve,
+            "tom",
+            "approved for durable store test",
+        )
+        .expect("authorized decision should append");
+
+        let report = sync_durable_audit_store(
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            &store_dir,
+        )
+        .expect("durable store should sync");
+
+        assert_eq!(report.root, store_dir);
+        assert_eq!(report.files.len(), 11);
+        assert_eq!(report.open, 0);
+        assert_eq!(report.approved, 1);
+        assert_eq!(report.reviewers, 1);
+        assert_eq!(report.notifications, 1);
+        assert!(report.signatures_ok);
+        assert!(store_dir.join("current/audit.json").exists());
+        assert!(store_dir.join("current/approvals.json").exists());
+        assert!(store_dir.join("current/notifications.json").exists());
+        assert!(store_dir.join("current/permissions.json").exists());
+        assert!(store_dir.join("tables/traces.jsonl").exists());
+        assert!(store_dir.join("tables/audit_events.jsonl").exists());
+        assert!(store_dir.join("tables/approval_decisions.jsonl").exists());
+        assert!(store_dir.join("tables/notifications.jsonl").exists());
+        assert!(store_dir.join("tables/team_reviewers.jsonl").exists());
+        let schema =
+            fs::read_to_string(store_dir.join("store-schema.json")).expect("schema should read");
+        assert!(schema.contains("\"raw_payloads\": false"));
+        assert!(schema.contains("tables/notifications.jsonl"));
+        let audit_events = fs::read_to_string(store_dir.join("tables/audit_events.jsonl"))
+            .expect("audit events should read");
+        assert!(audit_events.contains("slack.send_message"));
+        assert!(audit_events.contains(&report.trace_id));
+        assert!(!audit_events.contains("send support reply"));
+        let decisions = fs::read_to_string(store_dir.join("tables/approval_decisions.jsonl"))
+            .expect("decision rows should read");
+        assert!(decisions.contains("approved for durable store test"));
+        let notification_counts = fs::read_to_string(store_dir.join("current/notifications.json"))
+            .expect("notification counts should read");
+        assert!(notification_counts.contains("\"notifications\": 1"));
+        let notifications = fs::read_to_string(store_dir.join("tables/notifications.jsonl"))
+            .expect("notification rows should read");
+        assert!(notifications.contains("\"kind\":\"approval_decided\""));
+        assert!(notifications.contains("\"status\":\"ready\""));
+        assert!(notifications.contains("approved for durable store test"));
+        assert!(!notifications.contains("send support reply"));
+        let reviewers = fs::read_to_string(store_dir.join("tables/team_reviewers.jsonl"))
+            .expect("reviewer rows should read");
+        assert!(reviewers.contains("\"user_id\":\"tom\""));
+        let check = check_audit_store(&store_dir).expect("durable store check should run");
+        assert!(check.passed);
+        assert!(check.checks.iter().any(|check| {
+            check.name == "durable store schema" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(check.checks.iter().any(|check| {
+            check.name == "durable jsonl rows" && check.status == ReadinessStatus::Pass
+        }));
+
+        fs::write(store_dir.join("tables/approval_decisions.jsonl"), "")
+            .expect("test should be able to corrupt durable decision rows");
+        let broken = check_audit_store(&store_dir).expect("broken durable check should run");
+        assert!(!broken.passed);
+        assert!(broken.checks.iter().any(|check| {
+            check.name == "durable jsonl rows" && check.status == ReadinessStatus::Fail
+        }));
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+        let _ = fs::remove_file(permissions_path);
+        fs::remove_dir_all(store_dir).ok();
+    }
+
+    #[test]
+    fn durable_audit_store_sync_writes_pending_notification_outbox_rows() {
+        let trace_path = temp_path("agentk-durable-store-pending-trace", "jsonl");
+        let decisions_path = temp_path("agentk-durable-store-pending-decisions", "jsonl");
+        let store_dir = temp_path("agentk-durable-pending-outbox", "dir");
+        let raw_input = "RAW_PENDING_NOTIFICATION_INPUT_SHOULD_NOT_APPEAR";
+        let mut kernel = AgentKernel::new("agent://support-agent");
+        kernel.syscall(Syscall {
+            kind: SyscallKind::ToolInvoke,
+            target: "github.merge_pull_request".to_string(),
+            intent: "merge after support review".to_string(),
+            labels: labels(&[Label::Trusted]),
+            inputs: vec![raw_input.to_string()],
+        });
+        kernel.write_jsonl(&trace_path).expect("log should write");
+
+        let report = sync_durable_audit_store(&trace_path, &decisions_path, None, &store_dir)
+            .expect("durable store should sync");
+
+        assert_eq!(report.open, 1);
+        assert_eq!(report.approved, 0);
+        assert_eq!(report.notifications, 1);
+        let notification_counts = fs::read_to_string(store_dir.join("current/notifications.json"))
+            .expect("notification counts should read");
+        assert!(notification_counts.contains("\"pending\": 1"));
+        let notifications = fs::read_to_string(store_dir.join("tables/notifications.jsonl"))
+            .expect("notification rows should read");
+        assert!(notifications.contains("\"kind\":\"approval_requested\""));
+        assert!(notifications.contains("\"status\":\"pending\""));
+        assert!(notifications.contains("\"agent_id\":\"agent://support-agent\""));
+        assert!(notifications.contains("github.merge_pull_request"));
+        assert!(!notifications.contains(raw_input));
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_file(decisions_path);
+        fs::remove_dir_all(store_dir).ok();
+    }
+
+    #[test]
     fn replay_uses_recorded_events_without_side_effects() {
         let path = temp_path("agentk-replay", "jsonl");
         let demo = run_poisoned_webpage_demo(&path).expect("demo should run");
@@ -16641,6 +21856,33 @@ done
         let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
         assert!(!trace.contains("DEMO_PRIVATE_MARKER"));
         assert!(!trace.contains("https://evil.example.invalid/upload"));
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
+    fn safe_agent_demo_blocks_writes_and_preserves_safe_actions() {
+        let trace_path = temp_path("agentk-safe-agent-demo", "jsonl");
+        let report = run_safe_agent_demo(&trace_path).expect("safe-agent demo should run");
+
+        assert_eq!(report.total_checks, 7);
+        assert_eq!(report.improved_checks, report.total_checks);
+        assert_eq!(report.agentk.allowed_read_or_draft_actions, 4);
+        assert_eq!(report.agentk.blocked_followups, 5);
+        assert!(!report.agentk.github_write_executed);
+        assert!(!report.agentk.postgres_write_executed);
+        assert!(!report.agentk.slack_send_executed);
+        assert!(!report.agentk.filesystem_patch_executed);
+        assert!(!report.agentk.secret_exfiltration_executed);
+        assert!(report.agentk.replayable_evidence);
+        assert_eq!(report.audit.pending_approvals.len(), 5);
+        assert_eq!(report.audit.allowed_side_effects.len(), 4);
+        assert!(report.audit.signatures_ok);
+
+        let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
+        assert!(!trace.contains("GITHUB_TOKEN"));
+        assert!(!trace.contains("SLACK_BOT_TOKEN"));
+        assert!(!trace.contains("DATABASE_URL"));
+
         let _ = fs::remove_file(trace_path);
     }
 
