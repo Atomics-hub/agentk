@@ -239,13 +239,13 @@ The safest first productization slice is the local team sidecar path:
     trace/session evidence. The HTTP parser rejects malformed or non-UTF-8
     request/header lines, LF-only line endings, duplicate `Content-Length`
     headers, control characters in header values, and any transfer-encoding
-    header with sanitized 400 responses. Request lines must be exactly
-    space-delimited and header names cannot carry whitespace before `:`. The
-    HTTP gateway validates configured browser origins before bind, matches
-    built-in localhost/loopback origins only with optional numeric ports,
-    rejects ambiguous duplicate MCP control headers, dual token-carrier
-    headers, and invalid JSON POST media types before spawning downstream MCP
-    work. Follow-up
+    header, expectation header, or upgrade header with sanitized 400 responses.
+    Request lines must be exactly space-delimited and header names cannot carry
+    whitespace before `:`. The HTTP gateway validates configured browser
+    origins before bind, matches built-in localhost/loopback origins only with
+    optional numeric ports, rejects ambiguous duplicate MCP control headers,
+    dual token-carrier headers, and invalid JSON POST media types before
+    spawning downstream MCP work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. HTTP/1.1 requests
     require exactly one syntactically valid `Host` authority with no userinfo,

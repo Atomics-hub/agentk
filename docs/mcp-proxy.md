@@ -137,10 +137,11 @@ then fail closed with sanitized 501 responses plus a redacted
 unsupported-SSE counter until resumable SSE support lands.
 Malformed request lines or header lines, including invalid UTF-8, duplicate
 `Content-Length` headers, LF-only line endings, control characters in header
-values, and any `Transfer-Encoding` header are rejected with sanitized 400
-responses because the adapter only accepts origin-form, CRLF-delimited,
-fixed-length HTTP/1.x requests with exactly space-delimited request lines and
-token-shaped header names without whitespace before `:`. HTTP/1.1 requests must
+values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected
+with sanitized 400 responses because the adapter only accepts origin-form,
+CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
+request lines and token-shaped header names without whitespace before `:`.
+HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
 literals; duplicate `Host` headers are rejected for all accepted HTTP versions.

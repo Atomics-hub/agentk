@@ -313,8 +313,9 @@ oversized request bodies with 413 and excess initialized sessions with 429.
 POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, including invalid UTF-8, duplicate
 `Content-Length` headers, LF-only line endings, control characters in header
-values, ambiguous MCP control headers, and any `Transfer-Encoding` header are
-rejected as invalid framing or control ambiguity. Request lines must be exactly
+values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
+`Expect`/`Upgrade` headers are rejected as invalid framing or control
+ambiguity. Request lines must be exactly
 space-delimited, and header names must be token-shaped without whitespace
 before `:`. HTTP/1.1 requests must include exactly one syntactically valid
 `Host` authority with no userinfo, wildcards, paths, queries, fragments,
@@ -457,10 +458,10 @@ HTTP binds fail closed unless
 non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
 including invalid UTF-8, duplicate `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
-`Transfer-Encoding` header are rejected as invalid framing; request lines must
-be exactly space-delimited, header names must be token-shaped without
-whitespace before `:`, and duplicate MCP control headers and dual token-carrier
-headers are rejected as ambiguous.
+`Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid
+framing; request lines must be exactly space-delimited, header names must be
+token-shaped without whitespace before `:`, and duplicate MCP control headers
+and dual token-carrier headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
 that Host value must be a clean authority with no userinfo, wildcards, paths,
 queries, fragments, invalid ports, or unbracketed IPv6 literals. Truncated
