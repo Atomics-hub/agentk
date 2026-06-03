@@ -18,7 +18,7 @@ pub const ZERO_HASH: &str = "000000000000000000000000000000000000000000000000000
 
 const DEFAULT_POLICY_TOML: &str = include_str!("../examples/agentk.policy.toml");
 const PROOF_ALGORITHM: &str = "ed25519";
-const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_MEDIATE_TOOL: &str = "agentk.mediate";
 const MCP_MEDIATE_DESCRIPTOR_TOOL: &str = "agentk.mediate_descriptor";
 const MCP_RECORD_RESPONSE_TOOL: &str = "agentk.record_response";
