@@ -9445,6 +9445,25 @@ pub struct ReleaseAuditCheck {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlphaReleaseStatusReport {
+    pub root: PathBuf,
+    pub release: String,
+    pub ready_for_alpha_rc: bool,
+    pub shipped_surfaces: Vec<AlphaReleaseStatusItem>,
+    pub accepted_limits: Vec<AlphaReleaseStatusItem>,
+    pub final_release_blockers: Vec<AlphaReleaseStatusItem>,
+    pub verification_gates: Vec<AlphaReleaseStatusItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlphaReleaseStatusItem {
+    pub name: String,
+    pub status: ReadinessStatus,
+    pub detail: String,
+    pub evidence: Vec<String>,
+}
+
 struct ReleaseAuditCommandSpec {
     name: &'static str,
     program: &'static str,
@@ -9588,6 +9607,331 @@ pub fn release_audit_report(root: impl AsRef<Path>) -> ReleaseAuditReport {
     }
 
     release_audit_from_checks(root, checks)
+}
+
+pub fn alpha_release_status_report(root: impl AsRef<Path>) -> AlphaReleaseStatusReport {
+    let root = root.as_ref().to_path_buf();
+    let shipped_surfaces = alpha_release_shipped_surfaces(&root);
+    let accepted_limits = alpha_release_accepted_limits(&root);
+    let final_release_blockers = alpha_release_final_blockers(&root);
+    let verification_gates = alpha_release_verification_gates(&root);
+    let ready_for_alpha_rc = shipped_surfaces
+        .iter()
+        .chain(accepted_limits.iter())
+        .chain(final_release_blockers.iter())
+        .chain(verification_gates.iter())
+        .all(|item| item.status != ReadinessStatus::Fail);
+
+    AlphaReleaseStatusReport {
+        root,
+        release: "v0.2-alpha".to_string(),
+        ready_for_alpha_rc,
+        shipped_surfaces,
+        accepted_limits,
+        final_release_blockers,
+        verification_gates,
+    }
+}
+
+fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
+    vec![
+        alpha_release_source_surface(
+            root,
+            "installable team sidecar package",
+            "package/archive/install/release-manifest workflow is present",
+            &[
+                ("src/main.rs", "ReleaseCandidateSmoke"),
+                ("src/lib.rs", "sidecar-package-release-manifest"),
+                ("src/lib.rs", "package.lock.json"),
+            ],
+            &[
+                "agentk sidecar-package --archive-out dist/agentk-sidecar.tar",
+                "agentk sidecar-package-install --archive dist/agentk-sidecar.tar",
+                "agentk sidecar-package-release-manifest --package installed/agentk-sidecar",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "production MCP gateway adapters",
+            "stdio, TCP, and local Streamable HTTP sidecar launchers are present",
+            &[
+                ("src/main.rs", "sidecar-serve-tcp"),
+                ("src/main.rs", "sidecar-serve-http"),
+                ("src/lib.rs", "bin/agentk-sidecar-http"),
+            ],
+            &[
+                "bin/agentk-sidecar",
+                "bin/agentk-sidecar-tcp",
+                "bin/agentk-sidecar-http",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "approvals and audit dashboard",
+            "static and served dashboards expose permission-checked review paths",
+            &[
+                ("src/main.rs", "DashboardServe"),
+                ("src/main.rs", "/api/approve"),
+                ("src/main.rs", "/api/deny"),
+            ],
+            &[
+                "agentk dashboard",
+                "agentk dashboard-serve --store-root <team-store>",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "multi-user permissions and identity mappings",
+            "local roles, reviewer scopes, reviewer tokens, and IdP mapping checks are present",
+            &[
+                ("src/main.rs", "IdentityCheck"),
+                ("src/lib.rs", "team_identity_report_from_path"),
+                ("src/lib.rs", "token_env"),
+            ],
+            &[
+                "agentk permissions --path agentk-sidecar/team-permissions.toml",
+                "agentk identity-check --identity agentk-sidecar/team-identity.toml",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "durable audit store and notification bridges",
+            "Postgres export plus Slack/GitHub/email local bridge payload paths are present",
+            &[
+                ("src/main.rs", "StoreEmailSend"),
+                ("src/lib.rs", "export_github_notification_payloads"),
+                ("src/lib.rs", "export_email_notification_payloads"),
+            ],
+            &[
+                "agentk store-sync",
+                "agentk store-export",
+                "agentk store-slack-send --dry-run",
+                "agentk store-github-send --dry-run",
+                "agentk store-email-send --dry-run",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "safe-agent demo package path",
+            "no-credential GitHub/Postgres/Slack/filesystem demo is packaged and release-gated",
+            &[
+                ("src/main.rs", "SafeAgentDemo"),
+                ("src/lib.rs", "run_safe_agent_demo"),
+                ("src/lib.rs", "agentk-safe-agent-demo"),
+            ],
+            &[
+                "agentk safe-agent-demo --json",
+                "bin/agentk-safe-agent-demo --json",
+            ],
+        ),
+    ]
+}
+
+fn alpha_release_accepted_limits(root: &Path) -> Vec<AlphaReleaseStatusItem> {
+    let notes = "docs/v0.2-alpha-release-notes.md";
+    let status = if root.join(notes).is_file() {
+        ReadinessStatus::Warn
+    } else {
+        ReadinessStatus::Fail
+    };
+    [
+        (
+            "hosted control plane",
+            "deferred: v0.2 alpha is a local/team sidecar, not managed SaaS",
+        ),
+        (
+            "public internet MCP gateway",
+            "deferred: TCP/HTTP adapters are bounded local deployment surfaces",
+        ),
+        (
+            "live IdP authentication",
+            "deferred: identity mappings are validated, live OIDC/JWT verification is not claimed",
+        ),
+        (
+            "production secret retrieval",
+            "deferred: production-shaped refs are validated without fetching secret bytes",
+        ),
+        (
+            "hosted ticketing integrations",
+            "deferred: Slack/GitHub/email bridges are local env-held delivery paths",
+        ),
+        (
+            "OS sandboxing and kernel isolation",
+            "deferred: AgentK remains an MCP governance layer, not an OS sandbox",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, detail)| {
+        alpha_release_item(
+            name,
+            status,
+            detail,
+            vec![notes.to_string(), "docs/productization-plan.md".to_string()],
+        )
+    })
+    .collect()
+}
+
+fn alpha_release_final_blockers(root: &Path) -> Vec<AlphaReleaseStatusItem> {
+    vec![
+        alpha_release_required_path_item(
+            root,
+            "v0.2 alpha release notes draft",
+            "current release-note draft exists, with final evidence placeholders still to fill at tag time",
+            "docs/v0.2-alpha-release-notes.md",
+            ReadinessStatus::Warn,
+        ),
+        alpha_release_item(
+            "protected branch and CI",
+            ReadinessStatus::Warn,
+            "final release still needs merge through protected master with GitHub Actions audit green",
+            vec![
+                "docs/release-checklist.md".to_string(),
+                "GitHub Actions audit check".to_string(),
+            ],
+        ),
+        alpha_release_item(
+            "strict signed release audit",
+            ReadinessStatus::Warn,
+            "final release still needs AGENTK_REQUIRE_SIGNING_KEY=1 strict audit with an outside-repo key",
+            vec![
+                "docs/release-checklist.md".to_string(),
+                "cargo run --locked -- release-audit --strict".to_string(),
+            ],
+        ),
+        alpha_release_item(
+            "signed tag and release publication",
+            ReadinessStatus::Warn,
+            "final release still needs signed tag verification and GitHub release evidence",
+            vec![
+                "git tag -s vX.Y.Z".to_string(),
+                "git verify-tag vX.Y.Z".to_string(),
+            ],
+        ),
+    ]
+}
+
+fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> {
+    vec![
+        alpha_release_source_surface(
+            root,
+            "release audit includes packaged RC smoke",
+            "release-audit command list runs release-candidate-smoke --json",
+            &[("src/lib.rs", "release-candidate-smoke")],
+            &["cargo run --locked -- release-audit"],
+        ),
+        alpha_release_source_surface(
+            root,
+            "release checklist covers package handoff",
+            "signed release checklist requires package archive/install/release-manifest evidence",
+            &[
+                ("docs/release-checklist.md", "sidecar-package-install"),
+                (
+                    "docs/release-checklist.md",
+                    "sidecar-package-release-manifest",
+                ),
+            ],
+            &["docs/release-checklist.md"],
+        ),
+        alpha_release_source_surface(
+            root,
+            "public readiness covers alpha package smoke",
+            "public-readiness checklist requires release-candidate-smoke and package release manifest",
+            &[
+                ("docs/public-readiness.md", "release-candidate-smoke"),
+                (
+                    "docs/public-readiness.md",
+                    "sidecar-package-release-manifest",
+                ),
+            ],
+            &["docs/public-readiness.md"],
+        ),
+        alpha_release_source_surface(
+            root,
+            "release notes capture accepted alpha limits",
+            "v0.2 alpha release notes name accepted limits and final evidence placeholders",
+            &[
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "Accepted v0.2 Alpha Limits",
+                ),
+                ("docs/v0.2-alpha-release-notes.md", "Final Release Evidence"),
+            ],
+            &["docs/v0.2-alpha-release-notes.md"],
+        ),
+    ]
+}
+
+fn alpha_release_source_surface(
+    root: &Path,
+    name: &str,
+    detail: &str,
+    required_patterns: &[(&str, &str)],
+    evidence: &[&str],
+) -> AlphaReleaseStatusItem {
+    let missing = required_patterns
+        .iter()
+        .filter_map(|(path, pattern)| {
+            let content = fs::read_to_string(root.join(path)).ok()?;
+            if content.contains(pattern) {
+                None
+            } else {
+                Some(format!("{path} missing {pattern}"))
+            }
+        })
+        .chain(required_patterns.iter().filter_map(|(path, _)| {
+            if root.join(path).is_file() {
+                None
+            } else {
+                Some(format!("{path} missing"))
+            }
+        }))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        alpha_release_item(
+            name,
+            ReadinessStatus::Pass,
+            detail,
+            evidence.iter().map(|value| (*value).to_string()).collect(),
+        )
+    } else {
+        let detail = missing.join("; ");
+        alpha_release_item(name, ReadinessStatus::Fail, &detail, Vec::new())
+    }
+}
+
+fn alpha_release_required_path_item(
+    root: &Path,
+    name: &str,
+    detail: &str,
+    path: &str,
+    present_status: ReadinessStatus,
+) -> AlphaReleaseStatusItem {
+    if root.join(path).is_file() {
+        alpha_release_item(name, present_status, detail, vec![path.to_string()])
+    } else {
+        alpha_release_item(
+            name,
+            ReadinessStatus::Fail,
+            "required release artifact is missing",
+            vec![path.to_string()],
+        )
+    }
+}
+
+fn alpha_release_item(
+    name: &str,
+    status: ReadinessStatus,
+    detail: &str,
+    evidence: Vec<String>,
+) -> AlphaReleaseStatusItem {
+    AlphaReleaseStatusItem {
+        name: name.to_string(),
+        status,
+        detail: detail.to_string(),
+        evidence,
+    }
 }
 
 fn release_audit_from_checks(root: PathBuf, checks: Vec<ReleaseAuditCheck>) -> ReleaseAuditReport {
@@ -29457,6 +29801,115 @@ reviewer = "tom"
             smoke.args,
             &["run", "--locked", "--", "release-candidate-smoke", "--json"]
         );
+    }
+
+    #[test]
+    fn alpha_release_status_report_summarizes_v02_alpha_train() {
+        let report = alpha_release_status_report(".");
+
+        assert_eq!(report.release, "v0.2-alpha");
+        assert!(report.ready_for_alpha_rc);
+        assert!(
+            report
+                .shipped_surfaces
+                .iter()
+                .any(|item| item.name == "installable team sidecar package")
+        );
+        assert!(
+            report
+                .shipped_surfaces
+                .iter()
+                .any(|item| item.name == "production MCP gateway adapters")
+        );
+        assert!(
+            report
+                .shipped_surfaces
+                .iter()
+                .any(|item| item.name == "safe-agent demo package path")
+        );
+        assert!(
+            report
+                .shipped_surfaces
+                .iter()
+                .all(|item| item.status == ReadinessStatus::Pass)
+        );
+        assert!(
+            report
+                .verification_gates
+                .iter()
+                .all(|item| item.status == ReadinessStatus::Pass)
+        );
+        assert!(
+            report
+                .accepted_limits
+                .iter()
+                .all(|item| item.status == ReadinessStatus::Warn)
+        );
+        assert!(
+            report
+                .final_release_blockers
+                .iter()
+                .all(|item| item.status == ReadinessStatus::Warn)
+        );
+        assert!(
+            report
+                .verification_gates
+                .iter()
+                .flat_map(|item| item.evidence.iter())
+                .any(|evidence| evidence == "cargo run --locked -- release-audit")
+        );
+    }
+
+    #[test]
+    fn alpha_release_status_report_fails_without_release_notes() {
+        let root = temp_path("agentk-alpha-release-status", "dir");
+        fs::create_dir_all(root.join("src")).expect("src dir should be writable");
+        fs::create_dir_all(root.join("docs")).expect("docs dir should be writable");
+        fs::write(
+            root.join("src/main.rs"),
+            "ReleaseCandidateSmoke sidecar-serve-tcp sidecar-serve-http DashboardServe \
+             /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo",
+        )
+        .expect("main fixture should be writable");
+        fs::write(
+            root.join("src/lib.rs"),
+            "sidecar-package-release-manifest package.lock.json bin/agentk-sidecar-http \
+             team_identity_report_from_path token_env export_github_notification_payloads \
+             export_email_notification_payloads run_safe_agent_demo agentk-safe-agent-demo \
+             release-candidate-smoke",
+        )
+        .expect("lib fixture should be writable");
+        fs::write(
+            root.join("docs/release-checklist.md"),
+            "sidecar-package-install sidecar-package-release-manifest",
+        )
+        .expect("release checklist fixture should be writable");
+        fs::write(
+            root.join("docs/public-readiness.md"),
+            "release-candidate-smoke sidecar-package-release-manifest",
+        )
+        .expect("public readiness fixture should be writable");
+        fs::write(root.join("docs/productization-plan.md"), "v0.2 alpha")
+            .expect("productization fixture should be writable");
+
+        let report = alpha_release_status_report(&root);
+
+        assert!(!report.ready_for_alpha_rc);
+        assert!(
+            report
+                .accepted_limits
+                .iter()
+                .all(|item| item.status == ReadinessStatus::Fail)
+        );
+        assert!(
+            report
+                .final_release_blockers
+                .iter()
+                .any(|item| item.name == "v0.2 alpha release notes draft"
+                    && item.status == ReadinessStatus::Fail)
+        );
+
+        fs::remove_dir_all(root).expect("fixture dir should be removable");
     }
 
     #[test]

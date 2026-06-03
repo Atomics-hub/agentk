@@ -34,6 +34,8 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo test` passes.
 - [ ] `cargo clippy` reviewed.
 - [ ] `cargo run -- release-audit` passes.
+- [ ] `cargo run --locked -- release-status --json` reports the shipped alpha
+      surfaces, accepted limits, final blockers, and verification gates.
 - [ ] `cargo run --locked -- release-candidate-smoke --json` passes and writes
       package, archive, install receipt, release manifest, demo trace, dashboard,
       durable store, notification payload, and deploy-template artifacts.
@@ -102,6 +104,7 @@ cargo run -- release-audit --strict
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features
+cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 cargo run -- readiness
 cargo run -- signing-key

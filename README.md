@@ -216,6 +216,15 @@ cargo run -- release-audit
 This includes formatting, tests, clippy, runtime security smokes, and the
 packaged sidecar release-candidate smoke.
 
+Summarize the v0.2 alpha release train before running heavier gates:
+
+```sh
+cargo run --locked -- release-status
+```
+
+This prints the shipped team sidecar surfaces, accepted alpha limits, final
+release blockers, and verification gates.
+
 Run the packaged sidecar release-candidate smoke:
 
 ```sh
@@ -733,8 +742,10 @@ dist/agentk-sidecar/bin/agentk-store-email --to agentk-alerts@example.com
 dist/agentk-sidecar/bin/agentk-store-email-send --dry-run
 ```
 
-Maintainers can run `cargo run --locked -- release-candidate-smoke` to recreate
-the package, `dist/agentk-sidecar.tar`, and
+Maintainers can run `cargo run --locked -- release-status` to summarize the
+v0.2 alpha shipped surfaces, accepted limits, final blockers, and verification
+gates. Run `cargo run --locked -- release-candidate-smoke` to recreate the
+package, `dist/agentk-sidecar.tar`, and
 `dist/agentk-sidecar.tar.sha256`, write
 `dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
 packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,

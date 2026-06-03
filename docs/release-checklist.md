@@ -83,6 +83,7 @@ Slack/GitHub/email notification payload exporters, dry-run delivery launchers,
 and Postgres dry-run push:
 
 ```sh
+cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 ```
 
@@ -134,6 +135,7 @@ Then run the explicit command set used by reviewers:
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
+cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>

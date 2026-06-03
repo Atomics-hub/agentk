@@ -1,10 +1,10 @@
 use agentk::{
     AgentKError, ApprovalDecision, ApprovalDecisionRecord, ApprovalReviewReport, AuditApprovalItem,
     MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
-    TeamPermissionsReport, Verdict, approval_review_jsonl, archive_sidecar_package,
-    audit_inbox_jsonl, check_audit_store, check_audit_store_export, check_sidecar_bundle,
-    check_sidecar_package, check_sidecar_package_archive, default_log_path, export_audit_store,
-    export_email_notification_payloads, export_github_notification_payloads,
+    TeamPermissionsReport, Verdict, alpha_release_status_report, approval_review_jsonl,
+    archive_sidecar_package, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
+    check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive, default_log_path,
+    export_audit_store, export_email_notification_payloads, export_github_notification_payloads,
     export_slack_notification_payloads, fork_replay_behavior_jsonl, fork_replay_jsonl,
     generate_signing_key_file, init_sidecar_bundle, inspect_jsonl, install_sidecar_package_archive,
     mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
@@ -868,6 +868,12 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Summarize the v0.2 alpha release train status without running heavy gates.
+    ReleaseStatus {
+        /// Emit the full release train status report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run an end-to-end local packaged sidecar release-candidate smoke test.
     ReleaseCandidateSmoke {
         /// Temporary root for the generated bundle and package.
@@ -1288,6 +1294,7 @@ fn run() -> Result<(), AgentKError> {
         Command::TrustedSignersCheck { manifest, json } => trusted_signers_check(manifest, json),
         Command::Readiness { json } => readiness(json),
         Command::ReleaseAudit { json, strict } => release_audit(json, strict),
+        Command::ReleaseStatus { json } => release_status(json),
         Command::ReleaseCandidateSmoke {
             root,
             force,
@@ -8168,6 +8175,50 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
     Ok(())
 }
 
+fn release_status(json: bool) -> Result<(), AgentKError> {
+    let report = alpha_release_status_report(".");
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.ready_for_alpha_rc {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    println!("AgentK v0.2 alpha release train status");
+    println!("release   {}", report.release);
+    println!(
+        "verdict   {}",
+        if report.ready_for_alpha_rc {
+            "alpha RC surface ready"
+        } else {
+            "blocked"
+        }
+    );
+    print_alpha_release_status_section("shipped", &report.shipped_surfaces);
+    print_alpha_release_status_section("gates", &report.verification_gates);
+    print_alpha_release_status_section("limits", &report.accepted_limits);
+    print_alpha_release_status_section("final blockers", &report.final_release_blockers);
+
+    if !report.ready_for_alpha_rc {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+fn print_alpha_release_status_section(title: &str, items: &[agentk::AlphaReleaseStatusItem]) {
+    println!();
+    println!("{title}");
+    for item in items {
+        println!("[{}] {:<42} {}", item.status, item.name, item.detail);
+        if !item.evidence.is_empty() {
+            println!("       evidence: {}", item.evidence.join("; "));
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ReleaseCandidateSmokeReport {
     root: PathBuf,
@@ -12856,6 +12907,13 @@ done
         assert_eq!(root, Some(PathBuf::from("agentk-rc-smoke")));
         assert!(force);
         assert!(keep_root);
+
+        let release_status = Cli::try_parse_from(["agentk", "release-status", "--json"])
+            .expect("release status should parse");
+        let Some(Command::ReleaseStatus { json }) = release_status.command else {
+            panic!("expected release-status command");
+        };
+        assert!(json);
 
         let release_homebrew_formula = Cli::try_parse_from([
             "agentk",
