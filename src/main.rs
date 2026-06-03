@@ -1527,7 +1527,9 @@ fn read_dashboard_http_request_with_limits(
         let mut line = String::new();
         let read = reader.read_line(&mut line)?;
         if read == 0 {
-            break;
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP header block is incomplete".to_string(),
+            ));
         }
         bytes += read;
         if bytes > max_header_bytes {
@@ -1595,7 +1597,13 @@ fn read_dashboard_http_request_with_limits(
 
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body)?;
+        reader.read_exact(&mut body).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                AgentKError::InvalidMcpRequest("HTTP request body is incomplete".to_string())
+            } else {
+                AgentKError::Io(error)
+            }
+        })?;
     }
 
     Ok(Some(DashboardHttpRequest {
@@ -6845,12 +6853,14 @@ done
             b"GET /mcp HTTP/1.1\r\nHost: \r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nHost: 127.0.0.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: bad host\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBadHeader\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
             let response = response_for(raw_request);
             assert!(response.starts_with("HTTP/1.1 400 Bad Request"));

@@ -15558,8 +15558,10 @@ operations. Malformed request lines or header lines, duplicate
 `Content-Length` headers, and `Transfer-Encoding` requests are rejected as
 invalid framing because the adapter only accepts origin-form, fixed-length
 HTTP/1.x requests. HTTP/1.1 requests must include exactly one nonblank `Host`
-header. Duplicate MCP control headers and dual token-carrier headers are
-rejected as ambiguous, and POSTs require an exact `application/json` media type.
+header. Incomplete header blocks and short fixed-length bodies are rejected
+before handling. Duplicate MCP control headers and dual token-carrier headers
+are rejected as ambiguous, and POSTs require an exact `application/json` media
+type.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
@@ -17030,6 +17032,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("requests; `GET /healthz` remains open"));
         assert!(package_readme.contains("Malformed request lines or header lines"));
         assert!(package_readme.contains("exactly one nonblank `Host`"));
+        assert!(package_readme.contains("Incomplete header blocks"));
         assert!(package_readme.contains("Duplicate MCP control headers"));
         assert!(package_readme.contains("exact `application/json` media"));
         assert!(package_readme.contains("fixed-length"));
