@@ -251,4 +251,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Enforce MCP HTTP Host header requirements for HTTP/1.1 requests.
 - [x] Reject incomplete MCP HTTP header blocks and fixed-length bodies.
 - [x] Reject unexpected bodies on non-POST MCP HTTP and operational requests.
+- [x] Validate MCP HTTP CORS preflight requested methods and headers.
 - [ ] Build production MCP gateway transport hardening.

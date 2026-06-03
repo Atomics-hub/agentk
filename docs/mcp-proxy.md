@@ -142,6 +142,9 @@ responses, and clients must choose either `Authorization` or
 media type; parameters such as `charset` are allowed. Request bodies are
 accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
 operational probes reject bodies before auth, session, or probe handling.
+Allowed browser preflights must request `POST` or `DELETE` and only known MCP
+HTTP headers; unsupported requested methods or headers return sanitized 400
+responses with CORS visibility for allowed origins.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root
