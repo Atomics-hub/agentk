@@ -316,7 +316,9 @@ GET/SSE streams return 405 until resumable SSE support lands. It also serves
 local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
-gateway gauges for service supervisors.
+gateway gauges for service supervisors. When `AGENTK_MCP_HTTP_TOKEN` is set,
+`/readyz` and `/metrics` require the same bearer token as MCP requests;
+`/healthz` remains open for minimal liveness checks.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -403,10 +405,9 @@ and rejects unsupported `MCP-Protocol-Version` headers, oversized request
 bodies, or excess initialized sessions, and reaps idle sessions. `/readyz`
 reports the configured allowed-origin count without raw origin values;
 `/metrics` reports redacted numeric gateway gauges for supervisors. Non-loopback
-HTTP binds fail
-closed unless `--allow-non-local-bind` is passed; the packaged launcher only
-passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds
-also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. LAN/public exposure is
+HTTP binds fail closed unless `--allow-non-local-bind` is passed; the packaged
+launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
+those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. LAN/public exposure is
 therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and

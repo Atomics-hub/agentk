@@ -119,7 +119,9 @@ protocol on follow-up POST/DELETE requests. The adapter also serves local
 active-session cap, idle timeout, request-concurrency, request body cap,
 configured allowed-origin count, and auth-required metadata without raw MCP
 payloads or raw origin values. `/metrics` exposes the same operational posture
-as redacted numeric gateway gauges for service supervisors.
+as redacted numeric gateway gauges for service supervisors. When HTTP auth is
+configured, `/readyz` and `/metrics` require the same bearer token as MCP
+requests; `/healthz` remains open for minimal liveness checks.
 `--max-active-sessions` caps initialized MCP HTTP
 sessions and excess initialize requests return 429.
 `--session-idle-timeout-ms` reaps idle initialized sessions and releases their
