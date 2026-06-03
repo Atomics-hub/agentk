@@ -327,9 +327,10 @@ GET/SSE streams return 405 until resumable SSE support lands. It also serves
 local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
-gateway gauges for service supervisors. When `AGENTK_MCP_HTTP_TOKEN` is set,
-`/readyz` and `/metrics` require the same bearer token as MCP requests;
-`/healthz` remains open for minimal liveness checks.
+gateway gauges and cumulative request/session counters for service supervisors.
+When `AGENTK_MCP_HTTP_TOKEN` is set, `/readyz` and `/metrics` require the same
+bearer token as MCP requests; `/healthz` remains open for minimal liveness
+checks.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -430,8 +431,9 @@ local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`,
 and rejects unsupported `MCP-Protocol-Version` headers, oversized request
 bodies, or excess initialized sessions, and reaps idle sessions. `/readyz`
 reports the configured allowed-origin count without raw origin values;
-`/metrics` reports redacted numeric gateway gauges for supervisors. Non-loopback
-HTTP binds fail closed unless `--allow-non-local-bind` is passed; the packaged
+`/metrics` reports redacted numeric gateway gauges plus cumulative request,
+rejection, and session lifecycle counters for supervisors. Non-loopback HTTP
+binds fail closed unless `--allow-non-local-bind` is passed; the packaged
 launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
 those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
 lines or header lines, duplicate `Content-Length` headers, and

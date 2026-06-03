@@ -3508,7 +3508,27 @@ struct McpHttpGatewayState {
     auth_token: Option<String>,
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
+    metrics: Mutex<McpHttpGatewayMetrics>,
     sessions: Mutex<BTreeMap<String, McpHttpSession>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct McpHttpGatewayMetrics {
+    requests_total: usize,
+    post_requests: usize,
+    get_requests: usize,
+    delete_requests: usize,
+    options_requests: usize,
+    other_method_requests: usize,
+    client_error_responses: usize,
+    server_error_responses: usize,
+    auth_rejections: usize,
+    origin_rejections: usize,
+    method_rejections: usize,
+    sessions_created: usize,
+    sessions_deleted: usize,
+    sessions_expired: usize,
+    session_not_found: usize,
 }
 
 struct McpHttpSession {
@@ -3599,6 +3619,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         auth_token: config.auth_token,
         trace_out: config.trace_out,
         session_report_out: config.session_report_out,
+        metrics: Mutex::new(McpHttpGatewayMetrics::default()),
         sessions: Mutex::new(BTreeMap::new()),
     });
     mcp_proxy_http_accept_loop(
@@ -3867,10 +3888,24 @@ fn mcp_http_prune_expired_sessions(state: &Arc<McpHttpGatewayState>) -> Result<u
     for (session_id, session) in &expired {
         mcp_http_write_session_outputs(session_id, &session.proxy, state)?;
     }
+    if !expired.is_empty() {
+        mcp_http_update_metrics(state, |metrics| {
+            metrics.sessions_expired += expired.len();
+        })?;
+    }
     Ok(expired.len())
 }
 
 fn mcp_http_response(
+    request: &DashboardHttpRequest,
+    state: &Arc<McpHttpGatewayState>,
+) -> Result<DashboardHttpResponse, AgentKError> {
+    let response = mcp_http_response_inner(request, state)?;
+    mcp_http_record_response_metrics(request, &response, state)?;
+    Ok(response)
+}
+
+fn mcp_http_response_inner(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
@@ -3976,6 +4011,59 @@ fn mcp_http_response(
     Ok(response)
 }
 
+fn mcp_http_record_response_metrics(
+    request: &DashboardHttpRequest,
+    response: &DashboardHttpResponse,
+    state: &Arc<McpHttpGatewayState>,
+) -> Result<(), AgentKError> {
+    mcp_http_update_metrics(state, |metrics| {
+        metrics.requests_total += 1;
+        match request.method.as_str() {
+            "POST" => metrics.post_requests += 1,
+            "GET" | "HEAD" => metrics.get_requests += 1,
+            "DELETE" => metrics.delete_requests += 1,
+            "OPTIONS" => metrics.options_requests += 1,
+            _ => metrics.other_method_requests += 1,
+        }
+
+        if response.status.starts_with('4') {
+            metrics.client_error_responses += 1;
+        } else if response.status.starts_with('5') {
+            metrics.server_error_responses += 1;
+        }
+        match response.status {
+            "401 Unauthorized" => metrics.auth_rejections += 1,
+            "403 Forbidden" => metrics.origin_rejections += 1,
+            "405 Method Not Allowed" => metrics.method_rejections += 1,
+            "404 Not Found"
+                if request.target.split('?').next() == Some(state.endpoint.as_str()) =>
+            {
+                metrics.session_not_found += 1;
+            }
+            _ => {}
+        }
+    })
+}
+
+fn mcp_http_update_metrics(
+    state: &Arc<McpHttpGatewayState>,
+    update: impl FnOnce(&mut McpHttpGatewayMetrics),
+) -> Result<(), AgentKError> {
+    let mut metrics = state.metrics.lock().map_err(|_| {
+        AgentKError::InvalidMcpRequest("MCP HTTP metrics lock poisoned".to_string())
+    })?;
+    update(&mut metrics);
+    Ok(())
+}
+
+fn mcp_http_metrics_snapshot(
+    state: &Arc<McpHttpGatewayState>,
+) -> Result<McpHttpGatewayMetrics, AgentKError> {
+    Ok(*state.metrics.lock().map_err(|_| {
+        AgentKError::InvalidMcpRequest("MCP HTTP metrics lock poisoned".to_string())
+    })?)
+}
+
 fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
     let Some(requested_method) = request.header("access-control-request-method") else {
         return Some(dashboard_http_text(
@@ -4052,12 +4140,14 @@ fn mcp_http_operational_response(
         .lock()
         .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))?
         .len();
+    let metrics = mcp_http_metrics_snapshot(state)?;
     if path == "/metrics" {
         return Ok(DashboardHttpResponse {
             status: "200 OK",
             content_type: "text/plain; version=0.0.4; charset=utf-8",
             headers: Vec::new(),
-            body: mcp_http_metrics_body(state, active_sessions, expired_sessions).into_bytes(),
+            body: mcp_http_metrics_body(state, active_sessions, expired_sessions, metrics)
+                .into_bytes(),
         });
     }
     Ok(DashboardHttpResponse {
@@ -4077,7 +4167,22 @@ fn mcp_http_operational_response(
             "max_header_bytes": state.max_header_bytes,
             "stream_timeout_ms": state.stream_timeout.as_millis(),
             "configured_allowed_origins": state.allow_origins.len(),
-            "auth_required": state.auth_token.is_some()
+            "auth_required": state.auth_token.is_some(),
+            "requests_total": metrics.requests_total,
+            "post_requests": metrics.post_requests,
+            "get_requests": metrics.get_requests,
+            "delete_requests": metrics.delete_requests,
+            "options_requests": metrics.options_requests,
+            "other_method_requests": metrics.other_method_requests,
+            "client_error_responses": metrics.client_error_responses,
+            "server_error_responses": metrics.server_error_responses,
+            "auth_rejections": metrics.auth_rejections,
+            "origin_rejections": metrics.origin_rejections,
+            "method_rejections": metrics.method_rejections,
+            "sessions_created": metrics.sessions_created,
+            "sessions_deleted": metrics.sessions_deleted,
+            "sessions_expired": metrics.sessions_expired,
+            "session_not_found": metrics.session_not_found
         }))?,
     })
 }
@@ -4086,6 +4191,7 @@ fn mcp_http_metrics_body(
     state: &McpHttpGatewayState,
     active_sessions: usize,
     expired_sessions_reaped: usize,
+    metrics: McpHttpGatewayMetrics,
 ) -> String {
     format!(
         "# HELP agentk_mcp_http_ready MCP HTTP gateway readiness state.\n\
@@ -4120,7 +4226,52 @@ agentk_mcp_http_stream_timeout_milliseconds {stream_timeout_ms}\n\
 agentk_mcp_http_configured_allowed_origins {configured_allowed_origins}\n\
 # HELP agentk_mcp_http_auth_required Whether this MCP HTTP gateway requires bearer auth.\n\
 # TYPE agentk_mcp_http_auth_required gauge\n\
-agentk_mcp_http_auth_required {auth_required}\n",
+agentk_mcp_http_auth_required {auth_required}\n\
+# HELP agentk_mcp_http_requests_total Parsed HTTP requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_requests_total counter\n\
+agentk_mcp_http_requests_total {requests_total}\n\
+# HELP agentk_mcp_http_post_requests_total Parsed HTTP POST requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_post_requests_total counter\n\
+agentk_mcp_http_post_requests_total {post_requests}\n\
+# HELP agentk_mcp_http_get_requests_total Parsed HTTP GET or HEAD requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_get_requests_total counter\n\
+agentk_mcp_http_get_requests_total {get_requests}\n\
+# HELP agentk_mcp_http_delete_requests_total Parsed HTTP DELETE requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_delete_requests_total counter\n\
+agentk_mcp_http_delete_requests_total {delete_requests}\n\
+# HELP agentk_mcp_http_options_requests_total Parsed HTTP OPTIONS requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_options_requests_total counter\n\
+agentk_mcp_http_options_requests_total {options_requests}\n\
+# HELP agentk_mcp_http_other_method_requests_total Parsed unsupported-method requests handled by this gateway.\n\
+# TYPE agentk_mcp_http_other_method_requests_total counter\n\
+agentk_mcp_http_other_method_requests_total {other_method_requests}\n\
+# HELP agentk_mcp_http_client_error_responses_total HTTP 4xx responses returned by this gateway.\n\
+# TYPE agentk_mcp_http_client_error_responses_total counter\n\
+agentk_mcp_http_client_error_responses_total {client_error_responses}\n\
+# HELP agentk_mcp_http_server_error_responses_total HTTP 5xx responses returned by this gateway.\n\
+# TYPE agentk_mcp_http_server_error_responses_total counter\n\
+agentk_mcp_http_server_error_responses_total {server_error_responses}\n\
+# HELP agentk_mcp_http_auth_rejections_total Requests rejected because MCP HTTP auth failed.\n\
+# TYPE agentk_mcp_http_auth_rejections_total counter\n\
+agentk_mcp_http_auth_rejections_total {auth_rejections}\n\
+# HELP agentk_mcp_http_origin_rejections_total Requests rejected because Origin was not allowed.\n\
+# TYPE agentk_mcp_http_origin_rejections_total counter\n\
+agentk_mcp_http_origin_rejections_total {origin_rejections}\n\
+# HELP agentk_mcp_http_method_rejections_total Requests rejected because the HTTP method is not allowed.\n\
+# TYPE agentk_mcp_http_method_rejections_total counter\n\
+agentk_mcp_http_method_rejections_total {method_rejections}\n\
+# HELP agentk_mcp_http_sessions_created_total Initialized MCP HTTP sessions created by this gateway.\n\
+# TYPE agentk_mcp_http_sessions_created_total counter\n\
+agentk_mcp_http_sessions_created_total {sessions_created}\n\
+# HELP agentk_mcp_http_sessions_deleted_total MCP HTTP sessions closed by DELETE.\n\
+# TYPE agentk_mcp_http_sessions_deleted_total counter\n\
+agentk_mcp_http_sessions_deleted_total {sessions_deleted}\n\
+# HELP agentk_mcp_http_sessions_expired_total MCP HTTP sessions reaped after idle timeout.\n\
+# TYPE agentk_mcp_http_sessions_expired_total counter\n\
+agentk_mcp_http_sessions_expired_total {sessions_expired}\n\
+# HELP agentk_mcp_http_session_not_found_total MCP endpoint requests that referenced a missing session.\n\
+# TYPE agentk_mcp_http_session_not_found_total counter\n\
+agentk_mcp_http_session_not_found_total {session_not_found}\n",
         max_active_sessions = state.max_active_sessions,
         max_concurrent_requests = state.max_concurrent_requests,
         max_body_bytes = state.max_body_bytes,
@@ -4128,7 +4279,22 @@ agentk_mcp_http_auth_required {auth_required}\n",
         session_idle_timeout_ms = state.session_idle_timeout.as_millis(),
         stream_timeout_ms = state.stream_timeout.as_millis(),
         configured_allowed_origins = state.allow_origins.len(),
-        auth_required = usize::from(state.auth_token.is_some())
+        auth_required = usize::from(state.auth_token.is_some()),
+        requests_total = metrics.requests_total,
+        post_requests = metrics.post_requests,
+        get_requests = metrics.get_requests,
+        delete_requests = metrics.delete_requests,
+        options_requests = metrics.options_requests,
+        other_method_requests = metrics.other_method_requests,
+        client_error_responses = metrics.client_error_responses,
+        server_error_responses = metrics.server_error_responses,
+        auth_rejections = metrics.auth_rejections,
+        origin_rejections = metrics.origin_rejections,
+        method_rejections = metrics.method_rejections,
+        sessions_created = metrics.sessions_created,
+        sessions_deleted = metrics.sessions_deleted,
+        sessions_expired = metrics.sessions_expired,
+        session_not_found = metrics.session_not_found
     )
 }
 
@@ -4302,6 +4468,9 @@ fn mcp_http_post_response(
                         last_seen: Instant::now(),
                     },
                 );
+                mcp_http_update_metrics(state, |metrics| {
+                    metrics.sessions_created += 1;
+                })?;
             }
             return Ok(DashboardHttpResponse {
                 status: "200 OK",
@@ -4388,6 +4557,9 @@ fn mcp_http_delete_response(
         return Ok(response);
     }
     mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
+    mcp_http_update_metrics(state, |metrics| {
+        metrics.sessions_deleted += 1;
+    })?;
     Ok(DashboardHttpResponse {
         status: "202 Accepted",
         content_type: "text/plain; charset=utf-8",
@@ -5451,6 +5623,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let common_headers = [
@@ -5564,6 +5737,14 @@ done
         let delete_response =
             mcp_http_response(&delete, &state).expect("delete should be accepted");
         assert_eq!(delete_response.status, "202 Accepted");
+
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.requests_total, 5);
+        assert_eq!(metrics.post_requests, 4);
+        assert_eq!(metrics.delete_requests, 1);
+        assert_eq!(metrics.client_error_responses, 1);
+        assert_eq!(metrics.sessions_created, 1);
+        assert_eq!(metrics.sessions_deleted, 1);
     }
 
     #[test]
@@ -5581,6 +5762,7 @@ done
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let preflight = dashboard_test_request_with_headers(
@@ -5820,6 +6002,7 @@ done
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#;
@@ -5967,6 +6150,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let request = dashboard_test_request_with_headers(
@@ -6005,6 +6189,7 @@ done
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let cases = vec![
@@ -6071,6 +6256,7 @@ done
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let cases = vec![
@@ -6153,6 +6339,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let bad_origin = dashboard_test_request_with_headers(
@@ -6228,6 +6415,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
 
@@ -6339,6 +6527,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let oversized = dashboard_test_request_with_headers(
@@ -6385,6 +6574,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let headers = [
@@ -6463,6 +6653,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let initialize = dashboard_test_request_with_headers(
@@ -6527,6 +6718,7 @@ done
             auth_token: None,
             trace_out: Some(trace_path.clone()),
             session_report_out: Some(session_report_path.clone()),
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let initialize = dashboard_test_request_with_headers(
@@ -6613,6 +6805,7 @@ done
             auth_token: Some("secret".to_string()),
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
 
@@ -6687,6 +6880,12 @@ done
             "readyz should report allowed-origin counts without raw origin values"
         );
         assert_eq!(ready_json["auth_required"], serde_json::json!(true));
+        assert_eq!(ready_json["requests_total"], serde_json::json!(2));
+        assert_eq!(ready_json["get_requests"], serde_json::json!(2));
+        assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
+        assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
+        assert_eq!(ready_json["sessions_created"], serde_json::json!(0));
+        assert_eq!(ready_json["session_not_found"], serde_json::json!(0));
 
         let unauthorized_metrics = mcp_http_response(
             &dashboard_test_request("GET", "/metrics", Vec::new()),
@@ -6716,6 +6915,12 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_max_concurrent_requests 8\n"));
         assert!(metrics_body.contains("agentk_mcp_http_configured_allowed_origins 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_required 1\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_requests_total 4\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_get_requests_total 4\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sessions_created_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_session_not_found_total 0\n"));
         assert!(
             !metrics_body.contains("https://console.example"),
             "metrics should report allowed-origin counts without raw origin values"
@@ -7110,6 +7315,7 @@ done
             auth_token: None,
             trace_out: None,
             session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
             sessions: Mutex::new(BTreeMap::new()),
         });
         let server_state = Arc::clone(&state);
@@ -7160,6 +7366,7 @@ done
                 auth_token: None,
                 trace_out: None,
                 session_report_out: None,
+                metrics: Mutex::new(McpHttpGatewayMetrics::default()),
                 sessions: Mutex::new(BTreeMap::new()),
             });
             let server_state = Arc::clone(&state);

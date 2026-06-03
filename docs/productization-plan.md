@@ -234,7 +234,8 @@ The safest first productization slice is the local team sidecar path:
     metadata, requires an explicit authenticated opt-in for non-loopback HTTP
     bind hosts, emits browser safety headers, drains active sessions on bounded
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics
-    for supervisors, uses constant-time bearer-token checks, and writes
+    for supervisors, tracks redacted cumulative request/rejection/session
+    lifecycle counters, uses constant-time bearer-token checks, and writes
     trace/session evidence. The HTTP parser rejects malformed request/header
     lines, duplicate `Content-Length` headers, and unsupported transfer
     encodings with sanitized 400 responses. The HTTP gateway rejects ambiguous

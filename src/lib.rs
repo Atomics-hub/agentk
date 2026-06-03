@@ -16102,12 +16102,14 @@ browser adapters. Non-loopback HTTP binds fail closed unless
 exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
 `GET /healthz` for liveness, `GET /readyz` for a redacted readiness summary, and
-`GET /metrics` for redacted numeric gateway gauges. The readiness summary
-includes the supported MCP protocol version, active-session cap, idle timeout,
-request body cap, request header cap, configured stream-timeout, and
-allowed-origin counts without raw origin values. When `AGENTK_MCP_HTTP_TOKEN`
-is set, `GET /readyz` and `GET /metrics` require the same bearer token as MCP
-requests; `GET /healthz` remains open for minimal liveness checks.
+`GET /metrics` for redacted numeric gateway gauges and cumulative
+request/session counters. The readiness summary includes the supported MCP
+protocol version, active-session cap, idle timeout, request body cap, request
+header cap, configured stream-timeout, parsed request totals, rejection totals,
+session lifecycle totals, and allowed-origin counts without raw origin values.
+When `AGENTK_MCP_HTTP_TOKEN` is set, `GET /readyz` and `GET /metrics` require
+the same bearer token as MCP requests; `GET /healthz` remains open for minimal
+liveness checks.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
 GET/SSE streams are currently rejected with 405 until the gateway grows
