@@ -15554,7 +15554,9 @@ direct JSON responses, Origin validation, browser CORS preflight handling,
 the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
-operations.
+operations. Duplicate `Content-Length` headers and `Transfer-Encoding` requests
+are rejected as invalid framing because the adapter only accepts fixed-length
+requests.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
@@ -17023,6 +17025,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("redacted numeric gateway gauges"));
         assert!(package_readme.contains("same bearer token as MCP"));
         assert!(package_readme.contains("requests; `GET /healthz` remains open"));
+        assert!(package_readme.contains("Duplicate `Content-Length`"));
+        assert!(package_readme.contains("fixed-length"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));

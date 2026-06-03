@@ -128,6 +128,9 @@ sessions and excess initialize requests return 429.
 downstream process/capacity. `--max-body-bytes` bounds the POST body read before
 JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
+Duplicate `Content-Length` headers and `Transfer-Encoding` requests are rejected
+with sanitized 400 responses because the adapter only accepts fixed-length
+requests.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root

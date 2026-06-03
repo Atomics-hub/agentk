@@ -1450,8 +1450,16 @@ fn handle_dashboard_http_stream(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> Result<(), AgentKError> {
-    let Some(request) = read_dashboard_http_request(stream)? else {
-        return Ok(());
+    let request = match read_dashboard_http_request(stream) {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(()),
+        Err(AgentKError::InvalidMcpRequest(_)) => {
+            let response =
+                dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
     let response = dashboard_http_response(
         &request,
@@ -1513,6 +1521,7 @@ fn read_dashboard_http_request_with_limits(
     let method = parts.next().unwrap_or_default().to_string();
     let target = parts.next().unwrap_or_default().to_string();
     let mut content_length = 0usize;
+    let mut content_length_seen = false;
     let mut headers = Vec::new();
 
     loop {
@@ -1531,9 +1540,16 @@ fn read_dashboard_http_request_with_limits(
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().map_err(|_| {
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            if name == "content-length" {
+                if content_length_seen {
+                    return Err(AgentKError::InvalidMcpRequest(
+                        "HTTP content-length header must appear at most once".to_string(),
+                    ));
+                }
+                content_length_seen = true;
+                content_length = value.parse::<usize>().map_err(|_| {
                     AgentKError::InvalidMcpRequest(
                         "dashboard HTTP content-length is invalid".to_string(),
                     )
@@ -1543,7 +1559,12 @@ fn read_dashboard_http_request_with_limits(
                         "HTTP request body is too large".to_string(),
                     ));
                 }
+            } else if name == "transfer-encoding" && !value.is_empty() {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP transfer-encoding is not supported".to_string(),
+                ));
             }
+            headers.push((name, value));
         }
     }
 
@@ -3644,6 +3665,11 @@ fn handle_mcp_http_stream(
             write_dashboard_http_response(stream, &response)?;
             return Ok(());
         }
+        Err(AgentKError::InvalidMcpRequest(_)) => {
+            let response = mcp_http_bad_request_response();
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     let response = mcp_http_response(&request, state)?;
@@ -3663,6 +3689,10 @@ fn mcp_http_headers_too_large_response(max_header_bytes: usize) -> DashboardHttp
         "431 Request Header Fields Too Large",
         &format!("MCP HTTP request headers must be at most {max_header_bytes} bytes\n"),
     )
+}
+
+fn mcp_http_bad_request_response() -> DashboardHttpResponse {
+    dashboard_http_text("400 Bad Request", "invalid MCP HTTP request\n")
 }
 
 fn mcp_http_too_many_sessions_response(max_active_sessions: usize) -> DashboardHttpResponse {
@@ -6435,6 +6465,66 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mcp_http_stream_returns_400_for_invalid_framing() {
+        fn response_for(raw_request: &[u8]) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+            let addr = listener
+                .local_addr()
+                .expect("test listener should have addr");
+            let state = Arc::new(McpHttpGatewayState {
+                proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+                endpoint: "/mcp".to_string(),
+                max_concurrent_requests: 8,
+                max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+                session_idle_timeout: Duration::from_millis(
+                    MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+                ),
+                max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+                max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+                stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+                allow_origins: Vec::new(),
+                auth_token: None,
+                trace_out: None,
+                session_report_out: None,
+                sessions: Mutex::new(BTreeMap::new()),
+            });
+            let server_state = Arc::clone(&state);
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("test client should connect");
+                handle_mcp_http_stream(&mut stream, &server_state)
+                    .expect("invalid framing response should write");
+            });
+            let mut client = TcpStream::connect(addr).expect("test client should connect");
+            client
+                .write_all(raw_request)
+                .expect("test request should write");
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .expect("test request should close write side");
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .expect("test response should read");
+            server.join().expect("server thread should finish");
+            response
+        }
+
+        for raw_request in [
+            b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+        ] {
+            let response = response_for(raw_request);
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid MCP HTTP request"));
+            let body = response
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("response should include body");
+            assert_eq!(body, "invalid MCP HTTP request\n");
+        }
     }
 
     #[test]
