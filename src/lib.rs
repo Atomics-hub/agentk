@@ -16087,10 +16087,11 @@ the local service;
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
 operations. Malformed request lines or header lines, including invalid UTF-8,
 duplicate `Content-Length` headers, LF-only line endings, control characters in
-header values, and any `Transfer-Encoding` header are rejected as invalid
-framing because the adapter only accepts origin-form, CRLF-delimited,
-fixed-length HTTP/1.x requests with exactly space-delimited request lines and
-token-shaped header names without whitespace before `:`. HTTP/1.1 requests must
+header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are
+rejected as invalid framing because the adapter only accepts origin-form,
+CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
+request lines and token-shaped header names without whitespace before `:`.
+HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
 literals. Incomplete header blocks and short fixed-length bodies are rejected
@@ -17718,9 +17719,11 @@ can_deny = ["*"]
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));
         assert!(package_readme.contains("header values"));
-        assert!(package_readme.contains("any `Transfer-Encoding` header"));
+        assert!(package_readme.contains("any `Transfer-Encoding`, `Expect`, or `Upgrade` header"));
+        assert!(package_readme.contains("`Expect`, or `Upgrade` header"));
         assert!(package_readme.contains("CRLF-delimited"));
-        assert!(package_readme.contains("space-delimited request lines"));
+        assert!(package_readme.contains("space-delimited"));
+        assert!(package_readme.contains("request lines"));
         assert!(package_readme.contains("without whitespace before `:`"));
         assert!(package_readme.contains("syntactically valid `Host` authority"));
         assert!(package_readme.contains("unbracketed IPv6"));
