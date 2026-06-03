@@ -16090,9 +16090,9 @@ operations. Malformed request lines or header lines, including invalid UTF-8,
 duplicate or non-decimal `Content-Length` headers, LF-only line endings, control
 characters in header values, and any `Transfer-Encoding`, `Expect`, or
 `Upgrade` header are rejected as invalid framing because the adapter only
-accepts origin-form, fragment-free, CRLF-delimited, fixed-length HTTP/1.x
-requests with exactly space-delimited request lines and token-shaped header
-names without whitespace before `:`.
+accepts origin-form paths beginning with exactly one `/`, fragment-free,
+CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
+request lines and token-shaped header names without whitespace before `:`.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation.

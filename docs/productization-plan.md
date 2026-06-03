@@ -244,8 +244,9 @@ The safest first productization slice is the local team sidecar path:
     sanitized 400 responses.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected. Request lines must be exactly
-    space-delimited, request targets cannot contain fragments, and header names
-    cannot carry whitespace before `:`. The HTTP gateway validates configured
+    space-delimited, request targets must begin with exactly one `/` and cannot
+    contain fragments, and header names cannot carry whitespace before `:`. The
+    HTTP gateway validates configured
     browser origins before bind, matches built-in localhost/loopback origins
     only with optional numeric ports, rejects ambiguous duplicate MCP control
     headers, dual token-carrier headers, and invalid JSON POST media types
