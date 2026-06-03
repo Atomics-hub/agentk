@@ -324,7 +324,8 @@ space-delimited, request targets must begin with exactly one `/` and must not
 contain fragments, and header names must be token-shaped without whitespace
 before `:`. All HTTP gateway requests must include exactly one syntactically
 valid `Host` authority with no userinfo, wildcards, paths, queries, fragments,
-invalid ports, or unbracketed IPv6 literals.
+invalid ports, invalid DNS labels, percent escapes, or unbracketed IPv6
+literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
@@ -343,7 +344,7 @@ Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults. Extra
 origins must be exact `scheme://authority` values or `null`, without paths,
 queries, fragments, wildcards, whitespace, invalid ports, invalid bracketed IP
-literals, or unbracketed IPv6; built-in
+literals, invalid DNS labels, percent escapes, or unbracketed IPv6; built-in
 localhost/loopback origins only match exact hosts with optional numeric ports
 and require a localhost/loopback `Host` authority on the request.
 Sandboxed/file `Origin: null` requests are allowed only when `null` is
@@ -494,7 +495,7 @@ exactly one `/` and must not contain fragments, and duplicate MCP control
 headers and dual token-carrier headers are rejected as ambiguous.
 All accepted HTTP requests must include exactly one clean `Host` authority with
 no userinfo, wildcards, paths, queries, fragments, invalid ports, or
-unbracketed IPv6 literals. Truncated
+invalid DNS labels, percent escapes, or unbracketed IPv6 literals. Truncated
 headers or bodies are rejected before request handling. The configured header
 byte cap is enforced while each request line and header line is read, so
 oversized unterminated lines fail closed before unbounded buffering. Request

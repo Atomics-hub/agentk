@@ -5636,9 +5636,35 @@ fn is_valid_http_authority(authority: &str) -> bool {
         return false;
     }
     if let Some((host, port)) = authority.rsplit_once(':') {
-        return !host.is_empty() && mcp_http_is_valid_port(port);
+        return mcp_http_is_valid_host_name(host) && mcp_http_is_valid_port(port);
     }
-    true
+    mcp_http_is_valid_host_name(authority)
+}
+
+fn mcp_http_is_valid_host_name(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+
+    host.split('.').all(mcp_http_is_valid_dns_label)
+}
+
+fn mcp_http_is_valid_dns_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
 fn mcp_http_is_valid_port(port: &str) -> bool {
@@ -7772,6 +7798,12 @@ done
             "https://user@console.example",
             "https://*",
             "https://*.example",
+            "https://bad;host",
+            "https://bad_host.example",
+            "https://bad%20host.example",
+            "https://-console.example",
+            "https://console-.example",
+            "https://console..example",
             "https://console.example:",
             "https://console.example:99999",
             "https://2001:db8::1",
@@ -9257,6 +9289,12 @@ done
             b"GET /mcp HTTP/1.1\r\nHost: http://localhost\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: user@localhost\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: *.example\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad;host\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad_host.example\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad%20host.example\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: -bad.example\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad-.example\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad..example\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost:\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost:99999\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: 2001:db8::1\r\n\r\n".as_slice(),
