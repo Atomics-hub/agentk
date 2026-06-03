@@ -613,7 +613,8 @@ policy rules, syscall rollups, and evidence-ref counts such as `args_sha256`,
 plus a Postgres schema contract and psql-loadable TSV files for teams that want
 a shared audit store. `agentk store-sync` maintains a live local team store
 with current redacted JSON snapshots plus normalized JSONL tables for dashboard
-or control-plane processes. It also writes `current/notifications.json` and
+or control-plane processes, including blocked-rule, syscall, and evidence-ref
+summary rows. It also writes `current/notifications.json` and
 `tables/notifications.jsonl`, a credential-free outbox for pending approval
 requests and recorded decisions that Slack, GitHub, email, or ticket bridges
 can consume without AgentK storing delivery tokens. `agentk store-check`
