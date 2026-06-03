@@ -141,6 +141,9 @@ values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected
 with sanitized 400 responses because the adapter only accepts origin-form,
 CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
 request lines and token-shaped header names without whitespace before `:`.
+Only `Connection: close` is accepted; other `Connection` values plus
+`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
+unsupported hop-by-hop negotiation.
 HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6

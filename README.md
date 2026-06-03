@@ -315,7 +315,9 @@ Malformed request lines or header lines, including invalid UTF-8, duplicate
 `Content-Length` headers, LF-only line endings, control characters in header
 values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
 `Expect`/`Upgrade` headers are rejected as invalid framing or control
-ambiguity. Request lines must be exactly
+ambiguity. `Connection: close` is accepted, while other `Connection` values and
+hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
+and `Trailer` are rejected. Request lines must be exactly
 space-delimited, and header names must be token-shaped without whitespace
 before `:`. HTTP/1.1 requests must include exactly one syntactically valid
 `Host` authority with no userinfo, wildcards, paths, queries, fragments,
@@ -459,7 +461,9 @@ non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
 including invalid UTF-8, duplicate `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid
-framing; request lines must be exactly space-delimited, header names must be
+framing. Only `Connection: close` is accepted; other `Connection` values plus
+`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
+Request lines must be exactly space-delimited, header names must be
 token-shaped without whitespace before `:`, and duplicate MCP control headers
 and dual token-carrier headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
