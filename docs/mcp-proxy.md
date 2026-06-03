@@ -173,6 +173,8 @@ an interactive local review UI and `/api/review` JSON endpoint on localhost.
 It also exposes `/healthz` and a redacted `/readyz` that reports trace,
 decision-log, permissions, store, and admin-auth readiness without local paths or
 approval payloads.
+Dashboard and MCP HTTP responses include no-store, no-sniff, no-referrer,
+anti-framing, and local-only CSP headers for browser-facing deployments.
 Reviewers can record approve/deny decisions from the browser page, and the
 server also accepts permission-checked JSON decisions at `/api/approve` and
 `/api/deny`, appending

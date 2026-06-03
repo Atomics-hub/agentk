@@ -422,7 +422,8 @@ variable documented in
 requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped
 `/api/review?reviewer=<id>` reads must include `X-AgentK-Reviewer-Token`, and
 write requests must include `reviewer_token` matching that environment
-variable:
+variable. Dashboard and MCP HTTP responses include no-store, no-sniff,
+no-referrer, anti-framing, and local-only CSP headers:
 
 ```sh
 curl -sS -H "X-AgentK-Reviewer-Token: <reviewer-secret>" \

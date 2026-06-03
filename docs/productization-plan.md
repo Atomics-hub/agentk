@@ -219,7 +219,7 @@ The safest first productization slice is the local team sidecar path:
     sessions, reaps idle sessions, bounds request bodies, reports local
     health/readiness for service supervisors with redacted origin-count
     metadata, requires an explicit authenticated opt-in for non-loopback HTTP
-    bind hosts, and writes trace/session evidence.
+    bind hosts, emits browser safety headers, and writes trace/session evidence.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
