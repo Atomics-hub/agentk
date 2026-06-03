@@ -313,9 +313,10 @@ not hold downstream processes forever.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
-local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`; `/readyz`
-reports the supported MCP protocol version plus session, idle-timeout, and
-request body caps.
+local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`;
+`/readyz` reports the supported MCP protocol version plus session,
+idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
+gateway gauges for service supervisors.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -397,10 +398,12 @@ For MCP clients or adapters that support Streamable HTTP POST locally, run
 bundle, binds localhost by default, answers allowed browser preflights, requires
 `AGENTK_MCP_HTTP_TOKEN` when that environment variable is set, enforces
 origin/session checks, and writes the same trace/session evidence. It serves
-local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`, and rejects
-unsupported `MCP-Protocol-Version` headers, oversized request bodies, or excess
-initialized sessions, and reaps idle sessions. `/readyz` reports the configured
-allowed-origin count without raw origin values. Non-loopback HTTP binds fail
+local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`,
+and rejects unsupported `MCP-Protocol-Version` headers, oversized request
+bodies, or excess initialized sessions, and reaps idle sessions. `/readyz`
+reports the configured allowed-origin count without raw origin values;
+`/metrics` reports redacted numeric gateway gauges for supervisors. Non-loopback
+HTTP binds fail
 closed unless `--allow-non-local-bind` is passed; the packaged launcher only
 passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds
 also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. LAN/public exposure is
