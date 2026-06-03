@@ -20,7 +20,7 @@ use agentk::{
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -1811,6 +1811,44 @@ struct DashboardDecisionRequest {
     reviewer_token: Option<String>,
 }
 
+struct DashboardDecisionUniqueKeys;
+
+impl<'de> Deserialize<'de> for DashboardDecisionUniqueKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(DashboardDecisionUniqueKeysVisitor)?;
+        Ok(Self)
+    }
+}
+
+struct DashboardDecisionUniqueKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DashboardDecisionUniqueKeysVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a dashboard decision JSON object with unique keys")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(serde::de::Error::custom(
+                    "dashboard decision JSON keys must appear at most once",
+                ));
+            }
+            map.next_value::<serde::de::IgnoredAny>()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct DashboardDecisionResponse<'a> {
     decision: &'a agentk::ApprovalDecisionRecord,
@@ -2828,6 +2866,7 @@ fn dashboard_record_decision(
     decision: ApprovalDecision,
     body: &[u8],
 ) -> Result<Vec<u8>, AgentKError> {
+    dashboard_verify_decision_json_keys(body)?;
     let request = serde_json::from_slice::<DashboardDecisionRequest>(body).map_err(|error| {
         AgentKError::InvalidMcpRequest(format!("dashboard decision JSON did not parse: {error}"))
     })?;
@@ -2863,6 +2902,16 @@ fn dashboard_record_decision(
         review: &review,
     })
     .map_err(AgentKError::from)
+}
+
+fn dashboard_verify_decision_json_keys(body: &[u8]) -> Result<(), AgentKError> {
+    serde_json::from_slice::<DashboardDecisionUniqueKeys>(body)
+        .map(|_| ())
+        .map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "dashboard decision JSON did not parse: {error}"
+            ))
+        })
 }
 
 fn dashboard_sync_store(
@@ -8957,6 +9006,29 @@ can_deny = []
         let invalid_media_type_body =
             String::from_utf8(invalid_media_type.body).expect("media type body should be utf8");
         assert!(invalid_media_type_body.contains("dashboard decision API"));
+
+        let duplicate_decision_key = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [("Content-Type", "application/json")],
+                format!(
+                    r#"{{"id":"{approval_id}","reviewer":"tom","reason":"duplicate dashboard decision key","reviewer_token":"VALUE_SHOULD_NOT_REFLECT","reviewer_token":"VALUE_SHOULD_NOT_REFLECT"}}"#
+                )
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(duplicate_decision_key.status, "400 Bad Request");
+        let duplicate_decision_key_body = String::from_utf8(duplicate_decision_key.body)
+            .expect("duplicate decision key body should be utf8");
+        assert!(duplicate_decision_key_body.contains("dashboard decision JSON"));
+        assert!(duplicate_decision_key_body.contains("at most once"));
+        assert!(!duplicate_decision_key_body.contains("VALUE_SHOULD_NOT_REFLECT"));
 
         let missing_admin = dashboard_http_response(
             &dashboard_test_request_with_headers(

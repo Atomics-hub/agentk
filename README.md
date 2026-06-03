@@ -506,8 +506,8 @@ Reviewers can record approve/deny decisions from the browser page, and the same
 permission-checked JSON decision API is available at
 `/api/approve` and `/api/deny`. Dashboard request bodies are accepted only on
 those decision endpoints and must declare `Content-Type: application/json`, so
-review reads and probes cannot smuggle ignored payload bytes. Configure the
-dashboard admin-token environment
+review reads and probes cannot smuggle ignored payload bytes. Dashboard
+decision JSON object keys must be unique. Configure the dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
 requests; clients must choose either the standard authorization bearer header or
