@@ -158,7 +158,9 @@ gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata such
 as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
 explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
-tokens instead.
+tokens instead. Method override headers such as `X-HTTP-Method-Override` and
+`X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
+intermediaries.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid
 ports, invalid DNS labels, percent escapes, or unbracketed IPv6 literals.

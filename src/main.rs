@@ -1744,6 +1744,10 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP forwarded headers are not supported".to_string(),
             ));
+        } else if is_unsupported_method_override_http_header(&name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP method override headers are not supported".to_string(),
+            ));
         } else if is_unsupported_cookie_http_header(&name) {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP cookie headers are not supported".to_string(),
@@ -1913,6 +1917,13 @@ fn is_supported_http_connection_header(value: &str) -> bool {
 
 fn is_untrusted_forwarded_http_header(name: &str) -> bool {
     name == "forwarded" || name.starts_with("x-forwarded-") || name == "x-real-ip"
+}
+
+fn is_unsupported_method_override_http_header(name: &str) -> bool {
+    matches!(
+        name,
+        "x-http-method" | "x-http-method-override" | "x-method-override"
+    )
 }
 
 fn is_unsupported_websocket_http_header(name: &str) -> bool {
@@ -9266,6 +9277,24 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_method_override_headers() {
+        for raw_request in [
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-HTTP-Method-Override: POST\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Method-Override: DELETE\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-HTTP-Method: PATCH_SHOULD_NOT_REFLECT\r\n\r\n".as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(
+                raw_request,
+                DASHBOARD_HTTP_MAX_BODY_BYTES,
+                DASHBOARD_HTTP_MAX_HEADER_BYTES,
+            );
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid dashboard HTTP request"));
+            assert!(!response.contains("PATCH_SHOULD_NOT_REFLECT"));
+        }
+    }
+
+    #[test]
     fn dashboard_http_stream_rejects_ambient_cookie_headers() {
         for raw_request in [
             b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nCookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n".as_slice(),
@@ -9549,6 +9578,12 @@ done
                 .as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nX-Real-IP: SPOOFED_IP\r\n\r\n"
                 .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nX-HTTP-Method-Override: POST\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nX-Method-Override: DELETE\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nX-HTTP-Method: PATCH_SHOULD_NOT_REFLECT\r\n\r\n"
+                .as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nCookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n"
                 .as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nSet-Cookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n"
@@ -9563,6 +9598,7 @@ done
             assert!(!response.contains("PROXY_SECRET_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("PROXY_REALM_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("SPOOFED"));
+            assert!(!response.contains("PATCH_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("COOKIE_SECRET_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("CONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("WEBSOCKET_SECRET_SHOULD_NOT_REFLECT"));
