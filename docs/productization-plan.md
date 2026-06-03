@@ -258,10 +258,11 @@ The safest first productization slice is the local team sidecar path:
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control
     paths cannot smuggle ignored payload bytes. Browser CORS preflights are
     restricted to `POST`/`DELETE` and the known MCP HTTP header set. The MCP
-    endpoint path is matched exactly and query strings are rejected before auth
-    or session handling. Operator-configured endpoints are validated before
-    bind and must be clean origin-form paths that do not overlap operational
-    probes. SSE-shaped `GET` requests require `Accept: text/event-stream`,
+    endpoint and operational probe paths are matched exactly, and query strings
+    on those paths are rejected before auth, session, or probe handling.
+    Operator-configured endpoints are validated before bind and must be clean
+    origin-form paths that do not overlap operational probes. SSE-shaped `GET`
+    requests require `Accept: text/event-stream`,
     pass the same auth/origin/protocol/session-id checks, and fail closed with
     sanitized 501 responses plus redacted unsupported-SSE metrics until
     resumable SSE support exists.
