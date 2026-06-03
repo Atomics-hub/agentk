@@ -225,4 +225,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add a subprocess MCP client message cap for runaway-session backpressure.
 - [x] Add graceful downstream subprocess shutdown on client EOF.
 - [x] Add a bounded localhost Streamable HTTP POST sidecar gateway for local adapters.
+- [x] Add local HTTP gateway health/readiness probes for service supervisors.
 - [ ] Build production MCP gateway transport hardening.

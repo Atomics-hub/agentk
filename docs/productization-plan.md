@@ -210,7 +210,8 @@ The safest first productization slice is the local team sidecar path:
     subprocess path through a bounded localhost Streamable HTTP POST adapter.
     The packaged sidecar now includes `bin/agentk-sidecar-http`, which loads the
     reviewed bundle, enforces local endpoint/origin/session checks, supports an
-    optional bearer token from environment, and writes trace/session evidence.
+    optional bearer token from environment, reports local health/readiness for
+    service supervisors, and writes trace/session evidence.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
