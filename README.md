@@ -302,7 +302,8 @@ stateful MCP endpoint:
 cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-concurrent-requests 16 --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-http-demo.jsonl --session-report-out .agentk/runs/mcp-proxy-http-demo.session.json --command sh --arg examples/mcp-poisoned-server.sh
 ```
 
-The HTTP gateway validates Origin headers, supports optional bearer auth via
+The HTTP gateway validates Origin headers, answers allowed browser CORS
+preflights without requiring auth, supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN`, returns `Mcp-Session-Id` on initialize, accepts
 subsequent POSTs with that session id, rejects unsupported
 `MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
@@ -388,12 +389,13 @@ sessions with `AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS`, and writes per-session
 trace/session reports.
 For MCP clients or adapters that support Streamable HTTP POST locally, run
 `dist/agentk-sidecar/bin/agentk-sidecar-http`; it loads the same reviewed
-bundle, binds localhost by default, requires `AGENTK_MCP_HTTP_TOKEN` when that
-environment variable is set, enforces origin/session checks, and writes the
-same trace/session evidence. It serves local `GET`/`HEAD` operational probes at
-`/healthz` and `/readyz`, and rejects unsupported `MCP-Protocol-Version`
-headers, oversized request bodies, or excess initialized sessions, and reaps
-idle sessions. Set `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
+bundle, binds localhost by default, answers allowed browser preflights, requires
+`AGENTK_MCP_HTTP_TOKEN` when that environment variable is set, enforces
+origin/session checks, and writes the same trace/session evidence. It serves
+local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`, and rejects
+unsupported `MCP-Protocol-Version` headers, oversized request bodies, or excess
+initialized sessions, and reaps idle sessions. Set
+`AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This
 is a bounded local adapter, not a hosted production HTTP/SSE control plane.

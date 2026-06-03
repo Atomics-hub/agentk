@@ -230,4 +230,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add configurable MCP HTTP active-session bounds.
 - [x] Add configurable MCP HTTP idle-session cleanup.
 - [x] Add configurable MCP HTTP request body bounds.
+- [x] Add browser CORS preflight handling for local MCP HTTP adapters.
 - [ ] Build production MCP gateway transport hardening.

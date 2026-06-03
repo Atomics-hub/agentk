@@ -209,7 +209,8 @@ The safest first productization slice is the local team sidecar path:
 21. `mcp-proxy-http` and `sidecar-serve-http` expose the same mediated
     subprocess path through a bounded localhost Streamable HTTP POST adapter.
     The packaged sidecar now includes `bin/agentk-sidecar-http`, which loads the
-    reviewed bundle, enforces local endpoint/origin/session checks, supports an
+    reviewed bundle, enforces local endpoint/origin/session checks, answers
+    allowed browser CORS preflights before bearer-token auth, supports an
     optional bearer token from environment, enforces HTTP protocol-version
     headers, caps active sessions, reaps idle sessions, bounds request bodies,
     reports local health/readiness for service supervisors, and writes
