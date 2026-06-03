@@ -210,6 +210,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add a local static HTML dashboard for approvals and audit review.
 - [x] Validate Claude/Codex/Cursor sidecar client snippets in sidecar checks.
 - [x] Add packaged sidecar launcher/client snippets for local deployment.
+- [x] Add a package-local sidecar validator launcher for deployment checks.
 - [x] Add a durable store export and Postgres schema contract.
 - [x] Add dashboard server UI for approvals and audit review.
 - [x] Add browser approve/deny controls to the served dashboard UI.
@@ -231,4 +232,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add configurable MCP HTTP idle-session cleanup.
 - [x] Add configurable MCP HTTP request body bounds.
 - [x] Add browser CORS preflight handling for local MCP HTTP adapters.
+- [x] Package a stable sidecar-check launcher for team bundle validation.
 - [ ] Build production MCP gateway transport hardening.

@@ -144,12 +144,14 @@ command snippet shape without spawning downstream tools or touching
 credentials.
 For a more stable local deployment folder, run `agentk sidecar-package --root
 <bundle> --out <package>` and point clients at `<package>/bin/agentk-sidecar`
-or the generated snippets under `<package>/clients/`. Internal adapters can run
-`<package>/bin/agentk-sidecar-tcp` for a local bounded TCP JSONL gateway; Claude,
-Codex, and Cursor should keep using the stdio launcher unless their MCP client
-configuration supports that adapter. Streamable HTTP POST-capable clients can
-run `<package>/bin/agentk-sidecar-http`; keep it bound to localhost unless a
-separate deployment layer supplies TLS, external auth, and network policy.
+or the generated snippets under `<package>/clients/`. After editing a packaged
+bundle, run `<package>/bin/agentk-sidecar-check` to validate it without spawning
+downstream tools. Internal adapters can run `<package>/bin/agentk-sidecar-tcp`
+for a local bounded TCP JSONL gateway; Claude, Codex, and Cursor should keep
+using the stdio launcher unless their MCP client configuration supports that
+adapter. Streamable HTTP POST-capable clients can run
+`<package>/bin/agentk-sidecar-http`; keep it bound to localhost unless a separate
+deployment layer supplies TLS, external auth, and network policy.
 `sidecar-run` reads `agentk-sidecar.toml`, launches the configured downstream
 MCP server, copies only the env vars named in `[downstream].allow_env`, and
 writes the configured redacted JSONL audit log plus a
