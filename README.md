@@ -400,7 +400,10 @@ origin/session checks, and writes the same trace/session evidence. It serves
 local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`, and rejects
 unsupported `MCP-Protocol-Version` headers, oversized request bodies, or excess
 initialized sessions, and reaps idle sessions. `/readyz` reports the configured
-allowed-origin count without raw origin values. Set
+allowed-origin count without raw origin values. Non-loopback HTTP binds fail
+closed unless `--allow-non-local-bind` is passed; the packaged launcher only
+passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, so LAN/public
+exposure is an explicit operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This
