@@ -1679,6 +1679,7 @@ fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, Stri
     };
     if !matches!(*version, "HTTP/1.0" | "HTTP/1.1")
         || !target.starts_with('/')
+        || target.starts_with("//")
         || method.is_empty()
         || !method.bytes().all(|byte| byte.is_ascii_uppercase())
         || target.contains('#')
@@ -7997,6 +7998,7 @@ done
             b"GET /mcp HTTP/1.1 \r\n\r\n".as_slice(),
             b"GET /\tmcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET //example.invalid/mcp HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
             b"GET /mcp#FRAGMENT_SHOULD_NOT_REFLECT HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
