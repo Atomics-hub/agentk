@@ -289,4 +289,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject unscoped dashboard reviewer-token carriers.
 - [x] Reject dashboard decision endpoint query strings.
 - [x] Require authenticated opt-in for non-loopback dashboard binds.
+- [x] Gate non-loopback dashboard reads with admin auth.
 - [ ] Build production MCP gateway transport hardening.

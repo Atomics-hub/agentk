@@ -185,7 +185,8 @@ The safest first productization slice is the local team sidecar path:
     `/healthz` and redacted `/readyz` probes for service supervisors, and those
     probe paths are matched exactly with query strings rejected. Non-loopback
     dashboard binds require explicit `--allow-non-local-bind` opt-in plus a
-    non-empty dashboard admin token. Dashboard
+    non-empty dashboard admin token, and then require that admin token for
+    dashboard reads and `/readyz` while leaving `/healthz` open. Dashboard
     request bodies are accepted only on approval decision endpoints, so review
     reads and probes cannot carry ignored payload bytes, and those write
     endpoints require `Content-Type: application/json`. Decision endpoint paths
