@@ -28,6 +28,33 @@ const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MCP_SUBPROCESS_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
 const SIDECAR_PACKAGE_SCHEMA_VERSION: u32 = 1;
+const SIDECAR_PACKAGE_NAME: &str = "agentk-team-sidecar";
+const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
+    "bin/agentk-package-info",
+    "bin/agentk-package-check",
+    "bin/agentk-sidecar",
+    "bin/agentk-sidecar-tcp",
+    "bin/agentk-sidecar-http",
+    "bin/agentk-sidecar-check",
+    "bin/agentk-dashboard",
+    "bin/agentk-dashboard-server",
+    "bin/agentk-store-export",
+    "bin/agentk-store-check",
+    "bin/agentk-store-sync",
+    "bin/agentk-store-push",
+];
+const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
+    "clients/claude-desktop.mcp.json",
+    "clients/codex-cursor-command.txt",
+];
+const SIDECAR_PACKAGE_STORAGE_CONTRACTS: &[&str] = &["storage/postgres-schema.sql"];
+const SIDECAR_PACKAGE_DEPLOY_TEMPLATES: &[&str] = &[
+    "deploy/systemd/agentk-dashboard.service",
+    "deploy/launchd/com.agentk.dashboard.plist",
+    "deploy/docker/Dockerfile",
+    "deploy/docker/compose.yml",
+    "deploy/README.md",
+];
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
 pub const SIGNING_KEY_FILE_ENV: &str = "AGENTK_SIGNING_KEY_FILE";
@@ -13817,6 +13844,13 @@ pub struct SidecarPackageReport {
     pub files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageCheckReport {
+    pub root: PathBuf,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+}
+
 pub fn init_sidecar_bundle(
     root: impl AsRef<Path>,
     force: bool,
@@ -13892,6 +13926,11 @@ pub fn package_sidecar_bundle(
             "bin/agentk-package-info",
             &sidecar_package_info_script(),
         )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-package-check",
+            &sidecar_package_check_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar", &sidecar_launcher_script())?,
         write_packaged_sidecar_file(
             out,
@@ -13951,19 +13990,7 @@ pub fn package_sidecar_bundle(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for relative in [
-            "bin/agentk-sidecar",
-            "bin/agentk-package-info",
-            "bin/agentk-sidecar-tcp",
-            "bin/agentk-sidecar-http",
-            "bin/agentk-sidecar-check",
-            "bin/agentk-dashboard",
-            "bin/agentk-dashboard-server",
-            "bin/agentk-store-export",
-            "bin/agentk-store-check",
-            "bin/agentk-store-sync",
-            "bin/agentk-store-push",
-        ] {
+        for relative in SIDECAR_PACKAGE_LAUNCHERS {
             let path = out.join(relative);
             let mut permissions = fs::metadata(&path)?.permissions();
             permissions.set_mode(0o755);
@@ -13976,6 +14003,467 @@ pub fn package_sidecar_bundle(
         package: out.to_path_buf(),
         files,
     })
+}
+
+pub fn check_sidecar_package(
+    root: impl AsRef<Path>,
+) -> Result<SidecarPackageCheckReport, AgentKError> {
+    let root = root.as_ref();
+    let mut checks = vec![
+        check_sidecar_required_file(root, "README.md"),
+        check_sidecar_required_file(root, "manifest.json"),
+        check_sidecar_required_file(root, "sidecar/agentk-sidecar.toml"),
+    ];
+    for relative in SIDECAR_PACKAGE_LAUNCHERS
+        .iter()
+        .chain(SIDECAR_PACKAGE_CLIENT_SNIPPETS)
+        .chain(SIDECAR_PACKAGE_STORAGE_CONTRACTS)
+        .chain(SIDECAR_PACKAGE_DEPLOY_TEMPLATES)
+    {
+        checks.push(check_sidecar_required_file(root, relative));
+    }
+    checks.extend(check_sidecar_package_manifest(root));
+    checks.push(check_sidecar_package_launcher_modes(root));
+    checks.push(check_sidecar_package_sidecar_bundle(root));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(SidecarPackageCheckReport {
+        root: root.to_path_buf(),
+        passed,
+        checks,
+    })
+}
+
+fn check_sidecar_package_manifest(root: &Path) -> Vec<ReadinessCheck> {
+    let manifest_path = root.join("manifest.json");
+    let manifest = match fs::read_to_string(&manifest_path)
+        .map_err(|error| error.to_string())
+        .and_then(|content| {
+            serde_json::from_str::<serde_json::Value>(&content).map_err(|error| error.to_string())
+        }) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return vec![sidecar_check(
+                "package manifest parse",
+                ReadinessStatus::Fail,
+                format!("manifest.json did not parse: {error}"),
+            )];
+        }
+    };
+
+    vec![
+        sidecar_check(
+            "package manifest parse",
+            ReadinessStatus::Pass,
+            "manifest.json parsed",
+        ),
+        check_sidecar_package_manifest_identity(&manifest),
+        check_sidecar_package_manifest_version(&manifest),
+        check_sidecar_package_manifest_inventory(&manifest),
+        check_sidecar_package_manifest_paths(root, &manifest),
+        check_sidecar_package_manifest_transports(&manifest),
+        check_sidecar_package_manifest_store_and_dashboard(&manifest),
+        check_sidecar_package_manifest_evidence_contract(&manifest),
+    ]
+}
+
+fn check_sidecar_package_manifest_identity(manifest: &serde_json::Value) -> ReadinessCheck {
+    if manifest
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        != Some(SIDECAR_PACKAGE_SCHEMA_VERSION as u64)
+    {
+        return sidecar_check(
+            "package manifest schema",
+            ReadinessStatus::Fail,
+            format!("schema_version must be {SIDECAR_PACKAGE_SCHEMA_VERSION}"),
+        );
+    }
+    if manifest.get("package").and_then(|value| value.as_str()) != Some(SIDECAR_PACKAGE_NAME) {
+        return sidecar_check(
+            "package manifest identity",
+            ReadinessStatus::Fail,
+            format!("package must be {SIDECAR_PACKAGE_NAME}"),
+        );
+    }
+    sidecar_check(
+        "package manifest identity",
+        ReadinessStatus::Pass,
+        "schema and package identity match AgentK",
+    )
+}
+
+fn check_sidecar_package_manifest_version(manifest: &serde_json::Value) -> ReadinessCheck {
+    let Some(version) = manifest
+        .get("agentk_version")
+        .and_then(|value| value.as_str())
+    else {
+        return sidecar_check(
+            "package manifest version",
+            ReadinessStatus::Fail,
+            "agentk_version must be a string",
+        );
+    };
+    if version.trim().is_empty() {
+        return sidecar_check(
+            "package manifest version",
+            ReadinessStatus::Fail,
+            "agentk_version must be non-empty",
+        );
+    }
+    if version != env!("CARGO_PKG_VERSION") {
+        return sidecar_check(
+            "package manifest version",
+            ReadinessStatus::Warn,
+            format!(
+                "package was generated by AgentK {version}; current binary is {}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+    }
+    sidecar_check(
+        "package manifest version",
+        ReadinessStatus::Pass,
+        format!("AgentK {version}"),
+    )
+}
+
+fn check_sidecar_package_manifest_inventory(manifest: &serde_json::Value) -> ReadinessCheck {
+    for (key, expected) in [
+        ("launchers", SIDECAR_PACKAGE_LAUNCHERS),
+        ("client_snippets", SIDECAR_PACKAGE_CLIENT_SNIPPETS),
+        ("storage_contracts", SIDECAR_PACKAGE_STORAGE_CONTRACTS),
+        ("deploy_templates", SIDECAR_PACKAGE_DEPLOY_TEMPLATES),
+    ] {
+        let Ok(values) = sidecar_manifest_string_array(manifest, key) else {
+            return sidecar_check(
+                "package manifest inventory",
+                ReadinessStatus::Fail,
+                format!("{key} must be an array of strings"),
+            );
+        };
+        for required in expected {
+            if !values.iter().any(|value| value == required) {
+                return sidecar_check(
+                    "package manifest inventory",
+                    ReadinessStatus::Fail,
+                    format!("{key} is missing {required}"),
+                );
+            }
+        }
+    }
+    sidecar_check(
+        "package manifest inventory",
+        ReadinessStatus::Pass,
+        "expected launchers, snippets, storage contracts, and deploy templates are listed",
+    )
+}
+
+fn check_sidecar_package_manifest_paths(
+    root: &Path,
+    manifest: &serde_json::Value,
+) -> ReadinessCheck {
+    let mut paths = Vec::new();
+    let sidecar_bundle = match sidecar_manifest_string(manifest, "sidecar_bundle") {
+        Ok(value) => value,
+        Err(error) => {
+            return sidecar_check("package manifest paths", ReadinessStatus::Fail, error);
+        }
+    };
+    paths.push((sidecar_bundle, true));
+    match sidecar_manifest_string(manifest, "safe_agent_demo") {
+        Ok(value) => paths.push((value, false)),
+        Err(error) => {
+            return sidecar_check("package manifest paths", ReadinessStatus::Fail, error);
+        }
+    }
+    for key in [
+        "launchers",
+        "client_snippets",
+        "storage_contracts",
+        "deploy_templates",
+    ] {
+        match sidecar_manifest_string_array(manifest, key) {
+            Ok(values) => paths.extend(values.into_iter().map(|value| (value, false))),
+            Err(error) => {
+                return sidecar_check("package manifest paths", ReadinessStatus::Fail, error);
+            }
+        }
+    }
+    if let Some(launcher) = manifest
+        .get("dashboard")
+        .and_then(|value| value.get("launcher"))
+        .and_then(|value| value.as_str())
+    {
+        paths.push((launcher, false));
+    }
+    if let Some(workflow) = manifest
+        .get("store_workflow")
+        .and_then(|value| value.as_object())
+    {
+        for value in workflow.values().filter_map(|value| value.as_str()) {
+            paths.push((value, false));
+        }
+    }
+    if let Some(transports) = manifest
+        .get("default_transports")
+        .and_then(|value| value.as_array())
+    {
+        for launcher in transports
+            .iter()
+            .filter_map(|transport| transport.get("launcher"))
+            .filter_map(|value| value.as_str())
+        {
+            paths.push((launcher, false));
+        }
+    }
+
+    paths.sort_unstable();
+    paths.dedup();
+    for (relative, directory) in &paths {
+        if let Err(error) = validate_sidecar_relative_path(relative) {
+            return sidecar_check(
+                "package manifest paths",
+                ReadinessStatus::Fail,
+                format!("{relative}: {error}"),
+            );
+        }
+        let path = root.join(relative);
+        let present = if *directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if !present {
+            return sidecar_check(
+                "package manifest paths",
+                ReadinessStatus::Fail,
+                format!("{relative} is missing"),
+            );
+        }
+    }
+
+    sidecar_check(
+        "package manifest paths",
+        ReadinessStatus::Pass,
+        format!("{} relative package paths exist", paths.len()),
+    )
+}
+
+fn check_sidecar_package_manifest_transports(manifest: &serde_json::Value) -> ReadinessCheck {
+    let Some(transports) = manifest
+        .get("default_transports")
+        .and_then(|value| value.as_array())
+    else {
+        return sidecar_check(
+            "package manifest transports",
+            ReadinessStatus::Fail,
+            "default_transports must be an array",
+        );
+    };
+    for required in ["stdio", "tcp-jsonl", "streamable-http"] {
+        if !transports.iter().any(|transport| {
+            transport.get("name").and_then(|value| value.as_str()) == Some(required)
+        }) {
+            return sidecar_check(
+                "package manifest transports",
+                ReadinessStatus::Fail,
+                format!("missing {required} transport"),
+            );
+        }
+    }
+    let tcp_ok = transports.iter().any(|transport| {
+        transport.get("name").and_then(|value| value.as_str()) == Some("tcp-jsonl")
+            && transport
+                .get("default_bind")
+                .and_then(|value| value.as_str())
+                == Some("127.0.0.1:9797")
+    });
+    let http_ok = transports.iter().any(|transport| {
+        transport.get("name").and_then(|value| value.as_str()) == Some("streamable-http")
+            && transport
+                .get("default_url")
+                .and_then(|value| value.as_str())
+                == Some("http://127.0.0.1:9798/mcp")
+    });
+    if !tcp_ok || !http_ok {
+        return sidecar_check(
+            "package manifest transports",
+            ReadinessStatus::Fail,
+            "local TCP and HTTP defaults must match packaged launchers",
+        );
+    }
+    sidecar_check(
+        "package manifest transports",
+        ReadinessStatus::Pass,
+        "stdio, TCP JSONL, and Streamable HTTP defaults are listed",
+    )
+}
+
+fn check_sidecar_package_manifest_store_and_dashboard(
+    manifest: &serde_json::Value,
+) -> ReadinessCheck {
+    let dashboard_ok = manifest
+        .get("dashboard")
+        .and_then(|value| value.get("launcher"))
+        .and_then(|value| value.as_str())
+        == Some("bin/agentk-dashboard-server")
+        && manifest
+            .get("dashboard")
+            .and_then(|value| value.get("default_url"))
+            .and_then(|value| value.as_str())
+            == Some("http://127.0.0.1:8765");
+    let store_ok = manifest
+        .get("store_workflow")
+        .and_then(|value| value.get("sync"))
+        .and_then(|value| value.as_str())
+        == Some("bin/agentk-store-sync")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("export"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-export")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("check"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-check")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("push"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-push");
+    if !dashboard_ok || !store_ok {
+        return sidecar_check(
+            "package manifest workflow",
+            ReadinessStatus::Fail,
+            "dashboard and store workflow launchers must be listed",
+        );
+    }
+    sidecar_check(
+        "package manifest workflow",
+        ReadinessStatus::Pass,
+        "dashboard and store workflow launchers are listed",
+    )
+}
+
+fn check_sidecar_package_manifest_evidence_contract(
+    manifest: &serde_json::Value,
+) -> ReadinessCheck {
+    let contract = manifest
+        .get("evidence_contract")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if contract.contains("redacted") && contract.contains("no raw tool payloads") {
+        sidecar_check(
+            "package manifest evidence",
+            ReadinessStatus::Pass,
+            "redacted evidence contract documented",
+        )
+    } else {
+        sidecar_check(
+            "package manifest evidence",
+            ReadinessStatus::Fail,
+            "evidence_contract must document redacted/no-raw-payload behavior",
+        )
+    }
+}
+
+fn check_sidecar_package_launcher_modes(root: &Path) -> ReadinessCheck {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in SIDECAR_PACKAGE_LAUNCHERS {
+            let path = root.join(relative);
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => {}
+                Ok(_) => {
+                    return sidecar_check(
+                        "package launcher modes",
+                        ReadinessStatus::Fail,
+                        format!("{relative} is not executable"),
+                    );
+                }
+                Err(error) => {
+                    return sidecar_check(
+                        "package launcher modes",
+                        ReadinessStatus::Fail,
+                        format!("could not inspect {relative}: {error}"),
+                    );
+                }
+            }
+        }
+        sidecar_check(
+            "package launcher modes",
+            ReadinessStatus::Pass,
+            format!("{} executable launchers", SIDECAR_PACKAGE_LAUNCHERS.len()),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        sidecar_check(
+            "package launcher modes",
+            ReadinessStatus::Pass,
+            "launcher execute bits are not checked on this platform",
+        )
+    }
+}
+
+fn check_sidecar_package_sidecar_bundle(root: &Path) -> ReadinessCheck {
+    match check_sidecar_bundle(root.join("sidecar")) {
+        Ok(report) if report.passed => sidecar_check(
+            "package sidecar bundle",
+            ReadinessStatus::Pass,
+            format!("{} sidecar checks passed", report.checks.len()),
+        ),
+        Ok(report) => sidecar_check(
+            "package sidecar bundle",
+            ReadinessStatus::Fail,
+            format!(
+                "{} sidecar checks failed",
+                report
+                    .checks
+                    .iter()
+                    .filter(|check| check.status == ReadinessStatus::Fail)
+                    .count()
+            ),
+        ),
+        Err(error) => sidecar_check(
+            "package sidecar bundle",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    }
+}
+
+fn sidecar_manifest_string<'a>(
+    manifest: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, String> {
+    manifest
+        .get(key)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("{key} must be a string"))
+}
+
+fn sidecar_manifest_string_array<'a>(
+    manifest: &'a serde_json::Value,
+    key: &str,
+) -> Result<Vec<&'a str>, String> {
+    manifest
+        .get(key)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{key} must be an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{key} entries must be strings"))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -15492,6 +15980,8 @@ MCP clients stable launcher scripts in `bin/`.
   launcher paths, default local transports, and deploy/store artifacts.
 - `bin/agentk-package-info`: prints `manifest.json` for support, deployment,
   and inventory checks.
+- `bin/agentk-package-check`: validates `manifest.json`, package artifacts,
+  launcher modes, and the embedded sidecar bundle.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
   command/args MCP client.
 - `bin/agentk-sidecar-tcp`: bounded TCP JSON-RPC gateway launcher for internal
@@ -15520,6 +16010,7 @@ MCP clients stable launcher scripts in `bin/`.
 
 ```sh
 ./bin/agentk-package-info
+./bin/agentk-package-check
 ./bin/agentk-sidecar
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
@@ -15619,37 +16110,14 @@ with your GitHub, Postgres, Slack, filesystem, or internal MCP server.
 fn sidecar_package_manifest() -> Result<String, AgentKError> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": SIDECAR_PACKAGE_SCHEMA_VERSION,
-        "package": "agentk-team-sidecar",
+        "package": SIDECAR_PACKAGE_NAME,
         "agentk_version": env!("CARGO_PKG_VERSION"),
         "sidecar_bundle": "sidecar",
         "safe_agent_demo": "sidecar/demos/safe-agent-demo.md",
-        "launchers": [
-            "bin/agentk-package-info",
-            "bin/agentk-sidecar",
-            "bin/agentk-sidecar-tcp",
-            "bin/agentk-sidecar-http",
-            "bin/agentk-sidecar-check",
-            "bin/agentk-dashboard",
-            "bin/agentk-dashboard-server",
-            "bin/agentk-store-export",
-            "bin/agentk-store-check",
-            "bin/agentk-store-sync",
-            "bin/agentk-store-push"
-        ],
-        "client_snippets": [
-            "clients/claude-desktop.mcp.json",
-            "clients/codex-cursor-command.txt"
-        ],
-        "storage_contracts": [
-            "storage/postgres-schema.sql"
-        ],
-        "deploy_templates": [
-            "deploy/systemd/agentk-dashboard.service",
-            "deploy/launchd/com.agentk.dashboard.plist",
-            "deploy/docker/Dockerfile",
-            "deploy/docker/compose.yml",
-            "deploy/README.md"
-        ],
+        "launchers": SIDECAR_PACKAGE_LAUNCHERS,
+        "client_snippets": SIDECAR_PACKAGE_CLIENT_SNIPPETS,
+        "storage_contracts": SIDECAR_PACKAGE_STORAGE_CONTRACTS,
+        "deploy_templates": SIDECAR_PACKAGE_DEPLOY_TEMPLATES,
         "default_transports": [
             {
                 "name": "stdio",
@@ -15815,6 +16283,17 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 cat "$ROOT/manifest.json"
+"#
+    .to_string()
+}
+
+fn sidecar_package_check_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" sidecar-package-check --root "$ROOT" "$@"
 "#
     .to_string()
 }
@@ -16061,8 +16540,11 @@ Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 the dashboard admin token passes.
 
 The packaged dashboard launcher runs `bin/agentk-sidecar-check --json` before
-serving. Service and container starts fail closed when policy, permissions,
-secret references, or client snippets stop validating.
+serving. Run `bin/agentk-package-check --json` after copying the package or
+building an image to validate the package manifest, launcher modes, deploy
+templates, storage schema, and embedded sidecar bundle. Service and container
+starts fail closed when policy, permissions, secret references, or client
+snippets stop validating.
 
 ## systemd user service
 
@@ -17047,11 +17529,12 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 21);
+        assert_eq!(report.files.len(), 22);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
         assert!(out.join("bin/agentk-package-info").exists());
+        assert!(out.join("bin/agentk-package-check").exists());
         assert!(out.join("bin/agentk-sidecar").exists());
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
@@ -17104,6 +17587,7 @@ can_deny = ["*"]
             fs::read_to_string(out.join("README.md")).expect("package README should read");
         assert!(package_readme.contains("manifest.json"));
         assert!(package_readme.contains("bin/agentk-package-info"));
+        assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
@@ -17161,6 +17645,13 @@ can_deny = ["*"]
                 .iter()
                 .any(|launcher| launcher == "bin/agentk-package-info")
         );
+        assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-package-check")
+        );
         assert_eq!(
             package_manifest_json["store_workflow"]["push"],
             serde_json::json!("bin/agentk-store-push")
@@ -17173,6 +17664,10 @@ can_deny = ["*"]
             .expect("package info should read");
         assert!(package_info.contains("manifest.json"));
         assert!(package_info.contains("cat"));
+        let package_check = fs::read_to_string(out.join("bin/agentk-package-check"))
+            .expect("package check should read");
+        assert!(package_check.contains("sidecar-package-check"));
+        assert!(package_check.contains("\"$@\""));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
@@ -17223,7 +17718,56 @@ can_deny = ["*"]
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
         assert!(deploy_readme.contains("agentk-sidecar-check --json"));
+        assert!(deploy_readme.contains("agentk-package-check --json"));
         assert!(!out.join("sidecar/.agentk").exists());
+        let package_check_report =
+            check_sidecar_package(&out).expect("package check should run on generated package");
+        assert!(package_check_report.passed);
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package manifest inventory" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package launcher modes" && check.status == ReadinessStatus::Pass
+        }));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_check_blocks_missing_or_unsafe_manifest_artifacts() {
+        let root = temp_path("agentk-sidecar-package-check-root", "dir");
+        let out = temp_path("agentk-sidecar-package-check-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        fs::remove_file(out.join("bin/agentk-sidecar-http"))
+            .expect("test should remove packaged launcher");
+        let missing_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!missing_report.passed);
+        assert!(missing_report.checks.iter().any(|check| {
+            check.name == "bin/agentk-sidecar-http" && check.status == ReadinessStatus::Fail
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let manifest_path = out.join("manifest.json");
+        let mut manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).expect("manifest should read"),
+        )
+        .expect("manifest should parse");
+        manifest["safe_agent_demo"] = serde_json::json!("/tmp/agentk-demo");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should write");
+        let unsafe_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_report.passed);
+        assert!(unsafe_report.checks.iter().any(|check| {
+            check.name == "package manifest paths"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("absolute paths")
+        }));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
