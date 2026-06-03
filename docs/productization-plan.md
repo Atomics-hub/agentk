@@ -225,7 +225,9 @@ The safest first productization slice is the local team sidecar path:
     for supervisors, uses constant-time bearer-token checks, and writes
     trace/session evidence. The HTTP parser rejects malformed request/header
     lines, duplicate `Content-Length` headers, and unsupported transfer
-    encodings with sanitized 400 responses.
+    encodings with sanitized 400 responses. The HTTP gateway rejects ambiguous
+    duplicate MCP control headers, dual token-carrier headers, and invalid JSON
+    POST media types before spawning downstream MCP work.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
