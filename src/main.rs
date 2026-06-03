@@ -4249,13 +4249,17 @@ fn mcp_http_auth_allowed(request: &DashboardHttpRequest, auth_token: Option<&str
     let Some(auth_token) = auth_token else {
         return true;
     };
-    request
-        .header("authorization")
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == auth_token)
-        || request
-            .header("x-agentk-mcp-token")
-            .is_some_and(|value| value == auth_token)
+    mcp_http_token_from_request(request)
+        .is_some_and(|value| constant_time_token_eq(value, auth_token))
+}
+
+fn mcp_http_token_from_request(request: &DashboardHttpRequest) -> Option<&str> {
+    if let Some(value) = request.header("authorization")
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        return Some(token);
+    }
+    request.header("x-agentk-mcp-token")
 }
 
 fn mcp_http_accepts(request: &DashboardHttpRequest, expected: &str) -> bool {
@@ -5382,6 +5386,37 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn mcp_http_auth_accepts_supported_token_headers() {
+        let bearer = dashboard_test_request_with_headers(
+            "GET",
+            "/readyz",
+            [("Authorization", "Bearer secret")],
+            Vec::new(),
+        );
+        assert!(mcp_http_auth_allowed(&bearer, Some("secret")));
+
+        let explicit_header = dashboard_test_request_with_headers(
+            "GET",
+            "/readyz",
+            [("X-AgentK-MCP-Token", "secret")],
+            Vec::new(),
+        );
+        assert!(mcp_http_auth_allowed(&explicit_header, Some("secret")));
+
+        let wrong = dashboard_test_request_with_headers(
+            "GET",
+            "/readyz",
+            [("Authorization", "Bearer wrong")],
+            Vec::new(),
+        );
+        assert!(!mcp_http_auth_allowed(&wrong, Some("secret")));
+
+        let missing = dashboard_test_request("GET", "/readyz", Vec::new());
+        assert!(!mcp_http_auth_allowed(&missing, Some("secret")));
+        assert!(mcp_http_auth_allowed(&missing, None));
     }
 
     #[test]
