@@ -32,6 +32,7 @@ const SIDECAR_PACKAGE_NAME: &str = "agentk-team-sidecar";
 const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-package-info",
     "bin/agentk-package-check",
+    "bin/agentk-safe-agent-demo",
     "bin/agentk-sidecar",
     "bin/agentk-sidecar-tcp",
     "bin/agentk-sidecar-http",
@@ -13931,6 +13932,11 @@ pub fn package_sidecar_bundle(
             "bin/agentk-package-check",
             &sidecar_package_check_script(),
         )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-safe-agent-demo",
+            &sidecar_safe_agent_demo_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar", &sidecar_launcher_script())?,
         write_packaged_sidecar_file(
             out,
@@ -15939,7 +15945,7 @@ blocked or moved to human review, and every boundary leaves replayable evidence.
 Run the packaged no-credential version:
 
 ```sh
-agentk safe-agent-demo
+agentk safe-agent-demo --trace-out .agentk/runs/safe-agent-demo.jsonl
 agentk audit .agentk/runs/safe-agent-demo.jsonl
 ```
 
@@ -15989,6 +15995,8 @@ MCP clients stable launcher scripts in `bin/`.
   and inventory checks.
 - `bin/agentk-package-check`: validates `manifest.json`, package artifacts,
   launcher modes, and the embedded sidecar bundle.
+- `bin/agentk-safe-agent-demo`: runs the no-credential GitHub/Postgres/Slack/
+  filesystem demo and writes a package-local trace for audit review.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
   command/args MCP client.
 - `bin/agentk-sidecar-tcp`: bounded TCP JSON-RPC gateway launcher for internal
@@ -16018,6 +16026,7 @@ MCP clients stable launcher scripts in `bin/`.
 ```sh
 ./bin/agentk-package-info
 ./bin/agentk-package-check
+./bin/agentk-safe-agent-demo --json
 ./bin/agentk-sidecar
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
@@ -16030,6 +16039,13 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-store-push --dry-run
 agentk permissions --path sidecar/team-permissions.toml
 ```
+
+`bin/agentk-safe-agent-demo` runs the credential-free GitHub/Postgres/Slack/
+filesystem workflow and writes
+`sidecar/.agentk/runs/safe-agent-demo.jsonl` by default. Set
+`AGENTK_SAFE_AGENT_DEMO_TRACE_OUT` to use a different trace path, then review
+the result with `agentk audit sidecar/.agentk/runs/safe-agent-demo.jsonl` or
+the packaged dashboard commands.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -16301,6 +16317,18 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 exec "$AGENTK_BIN" sidecar-package-check --root "$ROOT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_safe_agent_demo_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+TRACE_OUT="${AGENTK_SAFE_AGENT_DEMO_TRACE_OUT:-$ROOT/sidecar/.agentk/runs/safe-agent-demo.jsonl}"
+exec "$AGENTK_BIN" safe-agent-demo --trace-out "$TRACE_OUT" "$@"
 "#
     .to_string()
 }
@@ -16614,6 +16642,9 @@ args:
 # Package check:
 {}
 
+# Safe-agent demo:
+{}
+
 # Sidecar bundle check:
 {}
 
@@ -16631,6 +16662,7 @@ args:
 "#,
         package_root.join("bin/agentk-sidecar").display(),
         package_root.join("bin/agentk-package-check").display(),
+        package_root.join("bin/agentk-safe-agent-demo").display(),
         package_root.join("bin/agentk-sidecar-check").display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-dashboard-server").display(),
@@ -17540,12 +17572,13 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 22);
+        assert_eq!(report.files.len(), 23);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
         assert!(out.join("bin/agentk-package-info").exists());
         assert!(out.join("bin/agentk-package-check").exists());
+        assert!(out.join("bin/agentk-safe-agent-demo").exists());
         assert!(out.join("bin/agentk-sidecar").exists());
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
@@ -17599,6 +17632,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("manifest.json"));
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
+        assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
+        assert!(package_readme.contains("sidecar/.agentk/runs/safe-agent-demo.jsonl"));
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
@@ -17663,6 +17698,13 @@ can_deny = ["*"]
                 .iter()
                 .any(|launcher| launcher == "bin/agentk-package-check")
         );
+        assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-safe-agent-demo")
+        );
         assert_eq!(
             package_manifest_json["store_workflow"]["push"],
             serde_json::json!("bin/agentk-store-push")
@@ -17679,6 +17721,13 @@ can_deny = ["*"]
             .expect("package check should read");
         assert!(package_check.contains("sidecar-package-check"));
         assert!(package_check.contains("\"$@\""));
+        let safe_agent_demo = fs::read_to_string(out.join("bin/agentk-safe-agent-demo"))
+            .expect("safe-agent demo launcher should read");
+        assert!(safe_agent_demo.contains("safe-agent-demo"));
+        assert!(safe_agent_demo.contains("safe-agent-demo.jsonl"));
+        assert!(safe_agent_demo.contains("AGENTK_SAFE_AGENT_DEMO_TRACE_OUT"));
+        assert!(safe_agent_demo.contains("AGENTK_BIN"));
+        assert!(safe_agent_demo.contains("\"$@\""));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
@@ -17714,6 +17763,7 @@ can_deny = ["*"]
         let command = fs::read_to_string(out.join("clients/codex-cursor-command.txt"))
             .expect("command snippet should read");
         assert!(command.contains("agentk-package-check"));
+        assert!(command.contains("agentk-safe-agent-demo"));
         assert!(command.contains("agentk-sidecar-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));

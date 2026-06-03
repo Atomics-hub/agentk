@@ -404,6 +404,10 @@ client snippets, local transports, store workflow, and deploy artifacts; run
 installing the package. Run `dist/agentk-sidecar/bin/agentk-package-check` to
 validate the manifest, package artifacts, launcher modes, and embedded sidecar
 bundle after a copy, deploy, or image build.
+Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
+credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
+install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
+for audit review.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
 bundle to validate policy, permissions, secret references, and client snippets
 without spawning downstream tools.
@@ -505,6 +509,7 @@ Packaged installs include the same workflow as stable launchers:
 ```sh
 dist/agentk-sidecar/bin/agentk-package-info
 dist/agentk-sidecar/bin/agentk-package-check
+dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 dist/agentk-sidecar/bin/agentk-sidecar-check
 dist/agentk-sidecar/bin/agentk-store-export
 dist/agentk-sidecar/bin/agentk-store-check

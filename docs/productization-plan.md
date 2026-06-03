@@ -134,6 +134,9 @@ The safest first productization slice is the local team sidecar path:
 3. The checker is non-spawning and credential-free. It does not contact GitHub,
    Slack, Postgres, or a live filesystem tool.
 4. `safe-agent-demo` exercises the team workflow with no live credentials.
+   Packaged sidecars include `bin/agentk-safe-agent-demo`, which runs the same
+   no-credential GitHub/Postgres/Slack/filesystem workflow and writes a
+   package-local trace for audit review.
 5. `sidecar-run --root agentk-sidecar` reads the reviewed TOML bundle, resolves
    the configured downstream MCP command, copies only explicit allowed env vars,
    proxies stdio through AgentK, and writes the configured audit log. The
@@ -152,7 +155,8 @@ The safest first productization slice is the local team sidecar path:
    trace, append-only decisions, and optional permissions manifest.
 9. `sidecar-package` validates a sidecar bundle and writes a local deployable
    package with launcher scripts, a package-local `agentk-sidecar-check`
-   validator, Claude/Codex/Cursor client snippets, and a relative-path
+   validator, a package-local safe-agent demo launcher, Claude/Codex/Cursor
+   client snippets, and a relative-path
    `manifest.json` that records the AgentK version, schema version, launchers,
    local transports, store workflow, and deploy artifacts for support and
    inventory checks. A package-local `agentk-package-check` launcher validates
