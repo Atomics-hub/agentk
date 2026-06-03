@@ -247,10 +247,12 @@ or updating store artifacts, so copied or edited packages fail closed before
 teams rely on them.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
-`<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Set
-`AGENTK_TRACE` to that path when running the packaged dashboard or store
-launchers to review/sync/export the demo evidence instead of the default
-team-sidecar trace.
+`<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its
+JSON report includes the redacted inspect counts, syscall summary,
+evidence-ref summary, and blocked policy rules that `trace-inspect` would show
+separately. Set `AGENTK_TRACE` to that path when running the packaged dashboard
+or store launchers to review/sync/export the demo evidence instead of the
+default team-sidecar trace.
 Internal adapters can run `<package>/bin/agentk-sidecar-tcp`
 for a local bounded TCP JSONL gateway; Claude, Codex, and Cursor should keep
 using the stdio launcher unless their MCP client configuration supports that

@@ -139,7 +139,9 @@ The safest first productization slice is the local team sidecar path:
    package-local trace for audit review. The packaged dashboard and store
    launchers accept `AGENTK_TRACE`, so the demo trace can feed the same
    dashboard, durable store sync, and Postgres export path as a live sidecar
-   trace.
+   trace. The demo report embeds the redacted trace-inspect summary so one JSON
+   run shows the scorecard, audit inbox, syscall summary, evidence-ref summary,
+   and blocked rules without requiring source-code inspection.
 5. `sidecar-run --root agentk-sidecar` reads the reviewed TOML bundle, resolves
    the configured downstream MCP command, copies only explicit allowed env vars,
    proxies stdio through AgentK, and writes the configured audit log. The

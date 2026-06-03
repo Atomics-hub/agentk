@@ -3928,6 +3928,13 @@ fn safe_agent_demo(trace_out: PathBuf, json: bool) -> Result<(), AgentKError> {
         report.audit.allowed_side_effects.len(),
         report.audit.signatures_ok
     );
+    println!(
+        "inspect     events {} allowed {} blocked {} evidence-kinds {}",
+        report.inspect.events_checked,
+        report.inspect.allowed,
+        report.inspect.blocked,
+        report.inspect.evidence_summary.len()
+    );
     println!();
     println!("{:<38} {:<14} AgentK", "check", "baseline");
     println!("{:-<38} {:-<14} {:-<14}", "", "", "");

@@ -2072,6 +2072,7 @@ pub struct SafeAgentDemoReport {
     pub agentk: SafeAgentDemoModeReport,
     pub scorecard: Vec<SafeAgentDemoCheck>,
     pub audit: AuditInboxReport,
+    pub inspect: FlightLogInspectReport,
     pub improved_checks: usize,
     pub total_checks: usize,
 }
@@ -3671,6 +3672,7 @@ pub fn run_safe_agent_demo(
         agentk,
         scorecard,
         audit,
+        inspect,
         improved_checks,
         total_checks,
     })
@@ -16243,10 +16245,12 @@ filesystem workflow and writes
 `sidecar/.agentk/runs/safe-agent-demo.jsonl` by default. Set
 `AGENTK_SAFE_AGENT_DEMO_TRACE_OUT` to use a different trace path, then review
 the result with `agentk audit sidecar/.agentk/runs/safe-agent-demo.jsonl` or
-the packaged dashboard commands. Set `AGENTK_TRACE` to that demo trace before
-running `bin/agentk-dashboard`, `bin/agentk-dashboard-server`,
-`bin/agentk-store-export`, or `bin/agentk-store-sync` to use the same packaged
-demo evidence end to end.
+the packaged dashboard commands. The demo JSON includes the redacted
+trace-inspect counts, syscall summary, evidence-ref summary, and blocked policy
+rules for the generated trace, so reviewers can inspect the evidence without
+opening source code. Set `AGENTK_TRACE` to that demo trace before running
+`bin/agentk-dashboard`, `bin/agentk-dashboard-server`, `bin/agentk-store-export`,
+or `bin/agentk-store-sync` to use the same packaged demo evidence end to end.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -18108,6 +18112,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("MCP HTTP sidecar gateway"));
         assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
         assert!(package_readme.contains("sidecar/.agentk/runs/safe-agent-demo.jsonl"));
+        assert!(package_readme.contains("trace-inspect counts"));
+        assert!(package_readme.contains("evidence-ref summary"));
+        assert!(package_readme.contains("blocked policy"));
         assert!(package_readme.contains("AGENTK_TRACE"));
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
@@ -23468,6 +23475,25 @@ can_deny = ["*"]
         assert_eq!(report.audit.pending_approvals.len(), 5);
         assert_eq!(report.audit.allowed_side_effects.len(), 4);
         assert!(report.audit.signatures_ok);
+        assert_eq!(report.inspect.events_checked, 11);
+        assert_eq!(report.inspect.allowed, 6);
+        assert_eq!(report.inspect.blocked, 5);
+        assert!(report.inspect.signatures_ok);
+        assert_eq!(report.inspect.syscall_summary["tool.invoke"].allowed, 4);
+        assert_eq!(report.inspect.syscall_summary["tool.invoke"].blocked, 4);
+        assert_eq!(report.inspect.syscall_summary["network.send"].blocked, 1);
+        assert_eq!(report.inspect.evidence_summary.get("args_sha256"), Some(&9));
+        assert_eq!(
+            report.inspect.evidence_summary.get("response_sha256"),
+            Some(&2)
+        );
+        assert!(report.inspect.events.iter().all(|event| {
+            event.evidence_refs.iter().all(|evidence| {
+                evidence.starts_with("args_sha256:")
+                    || evidence.starts_with("response_sha256:")
+                    || evidence.starts_with("input_sha256:")
+            })
+        }));
 
         let trace = fs::read_to_string(&trace_path).expect("trace should be readable");
         assert!(!trace.contains("GITHUB_TOKEN"));
