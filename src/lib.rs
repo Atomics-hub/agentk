@@ -15522,7 +15522,8 @@ agentk permissions --path sidecar/team-permissions.toml
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
-`bin/agentk-sidecar-check --json`. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require
+`bin/agentk-sidecar-check --json`. It also serves `/healthz` and a redacted
+`/readyz` for service supervisors. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require
 an admin bearer token, or `X-AgentK-Admin-Token`, on write requests. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`. Decisions are appended to
@@ -16975,6 +16976,8 @@ can_deny = ["*"]
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
+        assert!(package_readme.contains("redacted"));
+        assert!(package_readme.contains("/readyz"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("configured allowed-origin count"));
         assert!(package_readme.contains("MCP-Protocol-Version"));

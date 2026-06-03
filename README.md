@@ -409,8 +409,9 @@ comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` when an approved browser adapter
 runs from a non-local origin.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
 `/api/review` JSON endpoint on `127.0.0.1:8765` after running the packaged
-sidecar check. Reviewers can record approve/deny decisions from the browser
-page, and the same permission-checked JSON decision API is available at
+sidecar check. It also serves `/healthz` and a redacted `/readyz` for service
+supervisors. Reviewers can record approve/deny decisions from the browser page,
+and the same permission-checked JSON decision API is available at
 `/api/approve` and `/api/deny`. Configure the dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write

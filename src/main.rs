@@ -1607,6 +1607,13 @@ fn dashboard_http_response(
             headers: Vec::new(),
             body: br#"{"ok":true}"#.to_vec(),
         },
+        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+        ),
         ("POST", "/api/approve") => dashboard_http_decision(
             request,
             trace_path,
@@ -1633,6 +1640,43 @@ fn dashboard_http_response(
         response.body.clear();
     }
     response
+}
+
+fn dashboard_http_ready_response(
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    store_root: Option<&PathBuf>,
+) -> DashboardHttpResponse {
+    let trace_present = trace_path.exists();
+    let decision_log_present = decisions_path.exists();
+    let permissions_present = permissions_path.is_some_and(|path| path.exists());
+    let store_present = store_root.is_some_and(|path| path.exists());
+    let permissions_ready = permissions_path.is_none() || permissions_present;
+    let ready = trace_present && permissions_ready;
+    match serde_json::to_vec(&serde_json::json!({
+        "ready": ready,
+        "trace_present": trace_present,
+        "decision_log_present": decision_log_present,
+        "permissions_configured": permissions_path.is_some(),
+        "permissions_present": permissions_present,
+        "store_root_configured": store_root.is_some(),
+        "store_root_present": store_present,
+        "admin_required": admin_token.is_some()
+    })) {
+        Ok(body) => DashboardHttpResponse {
+            status: if ready {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            },
+            content_type: "application/json",
+            headers: Vec::new(),
+            body,
+        },
+        Err(error) => dashboard_http_text("500 Internal Server Error", &format!("{error}\n")),
+    }
 }
 
 fn dashboard_http_html(
@@ -6565,6 +6609,88 @@ can_deny = []
         );
         assert_eq!(health.status, "200 OK");
         assert_eq!(health.body, br#"{"ok":true}"#);
+
+        let ready = dashboard_http_response(
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(ready.status, "200 OK");
+        assert_eq!(ready.content_type, "application/json");
+        let ready_value: serde_json::Value =
+            serde_json::from_slice(&ready.body).expect("ready response should be JSON");
+        assert_eq!(ready_value["ready"], serde_json::json!(true));
+        assert_eq!(ready_value["trace_present"], serde_json::json!(true));
+        assert_eq!(ready_value["decision_log_present"], serde_json::json!(true));
+        assert_eq!(
+            ready_value["permissions_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(ready_value["permissions_present"], serde_json::json!(true));
+        assert_eq!(
+            ready_value["store_root_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(ready_value["store_root_present"], serde_json::json!(true));
+        assert_eq!(ready_value["admin_required"], serde_json::json!(true));
+        let ready_body = String::from_utf8(ready.body).expect("ready body should be utf8");
+        assert!(!ready_body.contains(&trace_path.display().to_string()));
+        assert!(!ready_body.contains(&decisions_path.display().to_string()));
+        assert!(!ready_body.contains(&permissions_path.display().to_string()));
+        assert!(!ready_body.contains(&store_root.display().to_string()));
+
+        let ready_head = dashboard_http_response(
+            &dashboard_test_request("HEAD", "/readyz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(ready_head.status, "200 OK");
+        assert!(ready_head.body.is_empty());
+
+        let not_ready = dashboard_http_response(
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
+            &trace_path.with_extension("missing.jsonl"),
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(not_ready.status, "503 Service Unavailable");
+        let not_ready_value: serde_json::Value =
+            serde_json::from_slice(&not_ready.body).expect("not-ready response should be JSON");
+        assert_eq!(not_ready_value["ready"], serde_json::json!(false));
+        assert_eq!(not_ready_value["trace_present"], serde_json::json!(false));
+
+        let permissions_not_ready = dashboard_http_response(
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path.with_extension("missing.toml")),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(permissions_not_ready.status, "503 Service Unavailable");
+        let permissions_not_ready_value: serde_json::Value =
+            serde_json::from_slice(&permissions_not_ready.body)
+                .expect("permissions not-ready response should be JSON");
+        assert_eq!(
+            permissions_not_ready_value["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            permissions_not_ready_value["permissions_configured"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            permissions_not_ready_value["permissions_present"],
+            serde_json::json!(false)
+        );
 
         let missing = dashboard_http_response(
             &dashboard_test_request("GET", "/missing", Vec::new()),

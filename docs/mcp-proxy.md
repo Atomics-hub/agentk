@@ -166,6 +166,9 @@ before the signed trace is reconciled. `agentk dashboard <trace> --permissions
 evidence, `agentk dashboard-serve <trace> --permissions
 <bundle>/team-permissions.toml --store-root <bundle>/.agentk/team-store` serves
 an interactive local review UI and `/api/review` JSON endpoint on localhost.
+It also exposes `/healthz` and a redacted `/readyz` that reports trace,
+decision-log, permissions, store, and admin-auth readiness without local paths or
+approval payloads.
 Reviewers can record approve/deny decisions from the browser page, and the
 server also accepts permission-checked JSON decisions at `/api/approve` and
 `/api/deny`, appending
