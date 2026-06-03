@@ -182,12 +182,13 @@ The safest first productization slice is the local team sidecar path:
     With `--store-root`, dashboard reads and reviewer decisions refresh the
     durable team store. The packaged dashboard server launcher runs the
     package-local package validator before serving. The server exposes
-    `/healthz` and redacted `/readyz` probes for service supervisors, and those
-    probe paths are matched exactly with query strings rejected. Non-loopback
-    dashboard binds require explicit `--allow-non-local-bind` opt-in plus a
+    `/healthz`, redacted `/readyz`, and redacted `/metrics` probes for service
+    supervisors, and those probe paths are matched exactly with query strings
+    rejected. Non-loopback dashboard binds require explicit
+    `--allow-non-local-bind` opt-in plus a
     non-empty dashboard admin token, and then require that admin token for
-    dashboard reads and `/readyz` while leaving `/healthz` open. Accepted
-    dashboard connections use an operator-tunable read/write timeout via
+    dashboard reads, `/readyz`, and `/metrics` while leaving `/healthz` open.
+    Accepted dashboard connections use an operator-tunable read/write timeout via
     `--stream-timeout-ms` and packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS`.
     Dashboard request bodies are accepted only on approval decision endpoints,
     so review reads and probes cannot carry ignored payload bytes, and those write

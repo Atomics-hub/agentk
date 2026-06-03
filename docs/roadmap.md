@@ -293,6 +293,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Require authenticated opt-in for non-loopback dashboard binds.
 - [x] Gate non-loopback dashboard reads with admin auth.
 - [x] Add accepted-stream I/O timeouts to the dashboard server.
+- [x] Add redacted dashboard metrics gauges for service supervisors.
 - [x] Enforce MCP/dashboard HTTP header byte caps during line reads.
 - [x] Use per-session runtime locks for MCP HTTP sessions.
 - [x] Count MCP HTTP stream framing rejections in readiness and metrics.
