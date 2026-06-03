@@ -164,9 +164,9 @@ with sanitized 400 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
 rejected with sanitized 400 responses before session lookup. POSTs require an
 exact `application/json` media type; parameters such as `charset` are allowed.
-Request bodies are
-accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
-operational probes reject bodies before auth, session, or probe handling.
+Request bodies are accepted only on MCP endpoint `POST`; unknown routes, CORS
+preflights, DELETEs, GET/SSE placeholders, and operational probes reject bodies
+before route fallback, auth, session, or probe handling.
 Additional `--allow-origin` or `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values must be
 exact `scheme://authority` origins or `null`; paths, queries, fragments,
 wildcards, whitespace, invalid ports, and unbracketed IPv6 literals are

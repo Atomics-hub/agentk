@@ -481,15 +481,17 @@ Request lines must be exactly space-delimited, header names must be
 token-shaped without whitespace before `:`, request targets must begin with
 exactly one `/` and must not contain fragments, and duplicate MCP control
 headers and dual token-carrier headers are rejected as ambiguous.
-HTTP/1.1 requests must include exactly one nonblank `Host` header, and
-that Host value must be a clean authority with no userinfo, wildcards, paths,
-queries, fragments, invalid ports, or unbracketed IPv6 literals. Truncated
+All accepted HTTP requests must include exactly one clean `Host` authority with
+no userinfo, wildcards, paths, queries, fragments, invalid ports, or
+unbracketed IPv6 literals. Truncated
 headers or bodies are rejected before request handling. The configured header
 byte cap is enforced while each request line and header line is read, so
 oversized unterminated lines fail closed before unbounded buffering. Request
-bodies are accepted only on MCP `POST`, and CORS preflights must include an
-allowed `Origin` and are limited to `POST`, `DELETE`, and known MCP HTTP
-headers. MCP endpoint and operational probe paths
+bodies are accepted only on MCP endpoint `POST`; unknown routes, CORS
+preflights, probes, and session-control requests reject bodies before route
+fallback or auth handling. CORS preflights must include an allowed `Origin` and
+are limited to `POST`, `DELETE`, and known MCP HTTP headers. MCP endpoint and
+operational probe paths
 are matched exactly; query strings on those paths are rejected before auth,
 session, or probe handling. The configured endpoint must be a clean origin-form
 path beginning with `/`, without query strings, fragments, whitespace, or
