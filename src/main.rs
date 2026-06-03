@@ -3591,7 +3591,7 @@ fn mcp_http_response(
             );
             response
                 .headers
-                .push(("Allow".to_string(), "POST, DELETE".to_string()));
+                .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
             Ok(response)
         }
         "DELETE" => mcp_http_delete_response(request, state),
@@ -3600,7 +3600,7 @@ fn mcp_http_response(
                 dashboard_http_text("405 Method Not Allowed", "method not allowed\n");
             response
                 .headers
-                .push(("Allow".to_string(), "POST, DELETE".to_string()));
+                .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
             Ok(response)
         }
     }?;
@@ -4983,7 +4983,7 @@ done
         let bad_origin = dashboard_test_request_with_headers(
             "OPTIONS",
             "/mcp",
-            [("Origin", "https://evil.example.invalid")],
+            [("Origin", "http://localhost.evil.example.invalid")],
             Vec::new(),
         );
         let bad_origin_response =
