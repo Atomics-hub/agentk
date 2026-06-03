@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 const MCP_HTTP_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
 
@@ -420,6 +421,9 @@ enum Command {
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
+        /// Milliseconds before an accepted HTTP connection read/write operation times out.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
+        stream_timeout_ms: u64,
         /// Additional allowed Origin value. Repeat for multiple browser origins.
         #[arg(long = "allow-origin")]
         allow_origins: Vec<String>,
@@ -528,6 +532,9 @@ enum Command {
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
+        /// Milliseconds before an accepted HTTP connection read/write operation times out.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
+        stream_timeout_ms: u64,
         /// Additional allowed Origin value. Repeat for multiple browser origins.
         #[arg(long = "allow-origin")]
         allow_origins: Vec<String>,
@@ -833,6 +840,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -855,6 +863,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -887,6 +896,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -901,6 +911,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -3271,6 +3282,7 @@ fn mcp_proxy_http(
     max_active_sessions: usize,
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
+    stream_timeout_ms: u64,
     allow_origins: Vec<String>,
     allow_origin_env: String,
     allow_non_local_bind: bool,
@@ -3311,6 +3323,7 @@ fn mcp_proxy_http(
         max_active_sessions,
         session_idle_timeout: Duration::from_millis(session_idle_timeout_ms),
         max_body_bytes,
+        stream_timeout: Duration::from_millis(stream_timeout_ms),
         allow_origins,
         auth_token,
         allow_non_local_bind,
@@ -3330,6 +3343,7 @@ struct McpHttpGatewayConfig {
     max_active_sessions: usize,
     session_idle_timeout: Duration,
     max_body_bytes: usize,
+    stream_timeout: Duration,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
     allow_non_local_bind: bool,
@@ -3344,6 +3358,7 @@ struct McpHttpGatewayState {
     max_active_sessions: usize,
     session_idle_timeout: Duration,
     max_body_bytes: usize,
+    stream_timeout: Duration,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
     trace_out: Option<PathBuf>,
@@ -3383,6 +3398,11 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
             "MCP HTTP max-body-bytes must be positive".to_string(),
         ));
     }
+    if config.stream_timeout.is_zero() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP stream-timeout-ms must be positive".to_string(),
+        ));
+    }
     validate_mcp_http_bind_security(
         &config.host,
         config.allow_non_local_bind,
@@ -3405,6 +3425,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
     println!("sessions    {}", config.max_active_sessions);
     println!("idle ms     {}", config.session_idle_timeout.as_millis());
     println!("body bytes  {}", config.max_body_bytes);
+    println!("stream ms   {}", config.stream_timeout.as_millis());
     println!(
         "auth        {}",
         if config.auth_token.is_some() {
@@ -3421,6 +3442,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         max_active_sessions: config.max_active_sessions,
         session_idle_timeout: config.session_idle_timeout,
         max_body_bytes: config.max_body_bytes,
+        stream_timeout: config.stream_timeout,
         allow_origins: config.allow_origins,
         auth_token: config.auth_token,
         trace_out: config.trace_out,
@@ -3488,7 +3510,7 @@ fn mcp_proxy_http_accept_loop(
         }
 
         let (mut stream, peer) = listener.accept()?;
-        stream.set_nodelay(true)?;
+        configure_mcp_http_stream(&stream, state.stream_timeout)?;
         accepted_requests += 1;
         println!("accepted   {} {}", accepted_requests, peer);
         let state = Arc::clone(&state);
@@ -3515,6 +3537,16 @@ fn mcp_proxy_http_accept_loop(
             "one or more MCP HTTP requests failed: {error}"
         )));
     }
+    Ok(())
+}
+
+fn configure_mcp_http_stream(
+    stream: &TcpStream,
+    stream_timeout: Duration,
+) -> Result<(), AgentKError> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(stream_timeout))?;
+    stream.set_write_timeout(Some(stream_timeout))?;
     Ok(())
 }
 
@@ -3760,6 +3792,7 @@ fn mcp_http_operational_response(
             "expired_sessions_reaped": expired_sessions,
             "max_concurrent_requests": state.max_concurrent_requests,
             "max_body_bytes": state.max_body_bytes,
+            "stream_timeout_ms": state.stream_timeout.as_millis(),
             "configured_allowed_origins": state.allow_origins.len(),
             "auth_required": state.auth_token.is_some()
         }))?,
@@ -4292,6 +4325,7 @@ fn sidecar_serve_http(
     max_active_sessions: usize,
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
+    stream_timeout_ms: u64,
     allow_origins: Vec<String>,
     allow_origin_env: String,
     allow_non_local_bind: bool,
@@ -4318,6 +4352,7 @@ fn sidecar_serve_http(
         max_active_sessions,
         session_idle_timeout: Duration::from_millis(session_idle_timeout_ms),
         max_body_bytes,
+        stream_timeout: Duration::from_millis(stream_timeout_ms),
         allow_origins,
         auth_token,
         allow_non_local_bind,
@@ -4890,6 +4925,8 @@ done
             "60000",
             "--max-body-bytes",
             "32768",
+            "--stream-timeout-ms",
+            "12000",
             "--allow-origin",
             "http://localhost:3000",
             "--allow-origin-env",
@@ -4919,6 +4956,7 @@ done
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -4939,6 +4977,7 @@ done
         assert_eq!(max_active_sessions, 5);
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
+        assert_eq!(stream_timeout_ms, 12000);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert!(allow_non_local_bind);
@@ -4963,6 +5002,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5091,6 +5131,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec!["https://console.example".to_string()],
             auth_token: Some("secret".to_string()),
             trace_out: None,
@@ -5224,6 +5265,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5297,6 +5339,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5406,6 +5449,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: 16,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5450,6 +5494,7 @@ done
             max_active_sessions: 1,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5526,6 +5571,7 @@ done
             max_active_sessions: 1,
             session_idle_timeout: Duration::from_millis(250),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -5581,6 +5627,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec![
                 "https://console.example".to_string(),
                 "vscode-webview://agentk".to_string(),
@@ -5628,6 +5675,10 @@ done
         assert_eq!(
             ready_json["max_body_bytes"],
             serde_json::json!(MCP_HTTP_DEFAULT_MAX_BODY_BYTES)
+        );
+        assert_eq!(
+            ready_json["stream_timeout_ms"],
+            serde_json::json!(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS)
         );
         assert_eq!(
             ready_json["configured_allowed_origins"],
@@ -5893,6 +5944,8 @@ done
             "60000",
             "--max-body-bytes",
             "32768",
+            "--stream-timeout-ms",
+            "12000",
             "--allow-origin",
             "http://localhost:3000",
             "--allow-origin-env",
@@ -5913,6 +5966,7 @@ done
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            stream_timeout_ms,
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
@@ -5930,6 +5984,7 @@ done
         assert_eq!(max_active_sessions, 5);
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
+        assert_eq!(stream_timeout_ms, 12000);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert!(allow_non_local_bind);
@@ -5953,6 +6008,29 @@ done
         assert!(missing_auth.contains("auth token"));
         validate_mcp_http_bind_security("0.0.0.0", true, true)
             .expect("explicit opt-in plus auth should allow wildcard host");
+    }
+
+    #[test]
+    fn mcp_http_stream_timeouts_are_applied_to_accepted_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let client = TcpStream::connect(addr).expect("test client should connect");
+        let (stream, _) = listener.accept().expect("test server should accept");
+        let timeout = Duration::from_millis(1234);
+        configure_mcp_http_stream(&stream, timeout).expect("stream should configure");
+        assert_eq!(
+            stream.read_timeout().expect("read timeout should inspect"),
+            Some(timeout)
+        );
+        assert_eq!(
+            stream
+                .write_timeout()
+                .expect("write timeout should inspect"),
+            Some(timeout)
+        );
+        drop(client);
     }
 
     #[test]
