@@ -239,6 +239,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add configurable MCP HTTP request body bounds.
 - [x] Add browser CORS preflight handling for local MCP HTTP adapters.
 - [x] Add env-configured MCP HTTP allowed browser origins.
+- [x] Forward packaged MCP HTTP launcher arguments for operator overrides.
 - [x] Add redacted MCP HTTP allowed-origin readiness metadata.
 - [x] Package a stable sidecar-check launcher for team bundle validation.
 - [x] Require explicit opt-in for non-loopback MCP HTTP binds.
