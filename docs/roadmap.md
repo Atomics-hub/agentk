@@ -227,5 +227,6 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add a bounded localhost Streamable HTTP POST sidecar gateway for local adapters.
 - [x] Add local HTTP gateway health/readiness probes for service supervisors.
 - [x] Add Streamable HTTP protocol-version header enforcement.
+- [x] Add configurable MCP HTTP active-session bounds.
 - [x] Add configurable MCP HTTP request body bounds.
 - [ ] Build production MCP gateway transport hardening.

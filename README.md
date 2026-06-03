@@ -306,10 +306,10 @@ The HTTP gateway validates Origin headers, supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN`, returns `Mcp-Session-Id` on initialize, accepts
 subsequent POSTs with that session id, rejects unsupported
 `MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
-oversized request bodies with 413. GET/SSE streams return 405 until resumable
-SSE support lands. It also serves local `GET`/`HEAD` operational probes at
-`/healthz` and `/readyz`; `/readyz` reports the supported MCP protocol version
-and request body cap.
+oversized request bodies with 413 and excess initialized sessions with 429.
+GET/SSE streams return 405 until resumable SSE support lands. It also serves
+local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`; `/readyz`
+reports the supported MCP protocol version plus session and request body caps.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -389,8 +389,9 @@ bundle, binds localhost by default, requires `AGENTK_MCP_HTTP_TOKEN` when that
 environment variable is set, enforces origin/session checks, and writes the
 same trace/session evidence. It serves local `GET`/`HEAD` operational probes at
 `/healthz` and `/readyz`, and rejects unsupported `MCP-Protocol-Version`
-headers or oversized request bodies. Set `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to
-tune the packaged request body cap. This is a bounded local adapter, not a hosted
+headers, oversized request bodies, or excess initialized sessions. Set
+`AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS` and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to
+tune packaged session/body caps. This is a bounded local adapter, not a hosted
 production HTTP/SSE control plane.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
 `/api/review` JSON endpoint on `127.0.0.1:8765`. Reviewers can record

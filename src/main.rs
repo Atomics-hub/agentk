@@ -29,6 +29,7 @@ use std::thread;
 use std::time::Duration;
 
 const MCP_HTTP_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
+const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Parser)]
@@ -408,6 +409,9 @@ enum Command {
         /// Maximum HTTP requests to handle at the same time.
         #[arg(long, default_value_t = 16)]
         max_concurrent_requests: usize,
+        /// Maximum initialized HTTP MCP sessions to keep active.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS)]
+        max_active_sessions: usize,
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
@@ -504,6 +508,9 @@ enum Command {
         /// Maximum HTTP requests to handle at the same time.
         #[arg(long, default_value_t = 16)]
         max_concurrent_requests: usize,
+        /// Maximum initialized HTTP MCP sessions to keep active.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS)]
+        max_active_sessions: usize,
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
@@ -803,6 +810,7 @@ fn run() -> Result<(), AgentKError> {
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -821,6 +829,7 @@ fn run() -> Result<(), AgentKError> {
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -849,6 +858,7 @@ fn run() -> Result<(), AgentKError> {
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -859,6 +869,7 @@ fn run() -> Result<(), AgentKError> {
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -3181,6 +3192,7 @@ fn mcp_proxy_http(
     endpoint: String,
     max_requests: usize,
     max_concurrent_requests: usize,
+    max_active_sessions: usize,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     auth_token_env: String,
@@ -3216,6 +3228,7 @@ fn mcp_proxy_http(
         endpoint,
         max_requests,
         max_concurrent_requests,
+        max_active_sessions,
         max_body_bytes,
         allow_origins,
         auth_token,
@@ -3232,6 +3245,7 @@ struct McpHttpGatewayConfig {
     endpoint: String,
     max_requests: usize,
     max_concurrent_requests: usize,
+    max_active_sessions: usize,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
@@ -3243,6 +3257,7 @@ struct McpHttpGatewayState {
     proxy: McpSubprocessProxyConfig,
     endpoint: String,
     max_concurrent_requests: usize,
+    max_active_sessions: usize,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
@@ -3267,6 +3282,11 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
             "MCP HTTP max-concurrent-requests must be positive".to_string(),
         ));
     }
+    if config.max_active_sessions == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP max-active-sessions must be positive".to_string(),
+        ));
+    }
     if config.max_body_bytes == 0 {
         return Err(AgentKError::InvalidMcpRequest(
             "MCP HTTP max-body-bytes must be positive".to_string(),
@@ -3286,6 +3306,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         }
     );
     println!("concurrent  {}", config.max_concurrent_requests);
+    println!("sessions    {}", config.max_active_sessions);
     println!("body bytes  {}", config.max_body_bytes);
     println!(
         "auth        {}",
@@ -3300,6 +3321,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         proxy: config.proxy,
         endpoint: config.endpoint,
         max_concurrent_requests: config.max_concurrent_requests,
+        max_active_sessions: config.max_active_sessions,
         max_body_bytes: config.max_body_bytes,
         allow_origins: config.allow_origins,
         auth_token: config.auth_token,
@@ -3411,6 +3433,13 @@ fn mcp_http_payload_too_large_response(max_body_bytes: usize) -> DashboardHttpRe
     )
 }
 
+fn mcp_http_too_many_sessions_response(max_active_sessions: usize) -> DashboardHttpResponse {
+    dashboard_http_text(
+        "429 Too Many Requests",
+        &format!("MCP HTTP active session limit reached: {max_active_sessions}\n"),
+    )
+}
+
 fn mcp_http_response(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
@@ -3501,6 +3530,7 @@ fn mcp_http_operational_response(
             "endpoint": state.endpoint.as_str(),
             "protocol_version": MCP_PROTOCOL_VERSION,
             "active_sessions": active_sessions,
+            "max_active_sessions": state.max_active_sessions,
             "max_concurrent_requests": state.max_concurrent_requests,
             "max_body_bytes": state.max_body_bytes,
             "auth_required": state.auth_token.is_some()
@@ -3578,6 +3608,19 @@ fn mcp_http_post_response(
         if let Some(response) = mcp_http_protocol_version_error(request, None) {
             return Ok(response);
         }
+        if state
+            .sessions
+            .lock()
+            .map_err(|_| {
+                AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
+            })?
+            .len()
+            >= state.max_active_sessions
+        {
+            return Ok(mcp_http_too_many_sessions_response(
+                state.max_active_sessions,
+            ));
+        }
         let session_id = mcp_http_new_session_id()?;
         let mut proxy = McpSubprocessProxy::spawn(state.proxy.clone())?;
         let response = proxy.handle_json_rpc_line(&request.body, false)?;
@@ -3596,6 +3639,11 @@ fn mcp_http_post_response(
                 let mut sessions = state.sessions.lock().map_err(|_| {
                     AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
                 })?;
+                if sessions.len() >= state.max_active_sessions {
+                    return Ok(mcp_http_too_many_sessions_response(
+                        state.max_active_sessions,
+                    ));
+                }
                 sessions.insert(
                     session_id,
                     McpHttpSession {
@@ -3961,6 +4009,7 @@ fn sidecar_serve_http(
     endpoint: String,
     max_requests: usize,
     max_concurrent_requests: usize,
+    max_active_sessions: usize,
     max_body_bytes: usize,
     allow_origins: Vec<String>,
     auth_token_env: String,
@@ -3982,6 +4031,7 @@ fn sidecar_serve_http(
         endpoint,
         max_requests,
         max_concurrent_requests,
+        max_active_sessions,
         max_body_bytes,
         allow_origins,
         auth_token,
@@ -4522,6 +4572,8 @@ done
             "3",
             "--max-concurrent-requests",
             "2",
+            "--max-active-sessions",
+            "5",
             "--max-body-bytes",
             "32768",
             "--allow-origin",
@@ -4547,6 +4599,7 @@ done
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -4563,6 +4616,7 @@ done
         assert_eq!(endpoint, "/mcp");
         assert_eq!(max_requests, 3);
         assert_eq!(max_concurrent_requests, 2);
+        assert_eq!(max_active_sessions, 5);
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
@@ -4583,6 +4637,7 @@ done
                 .with_max_client_messages(10),
             endpoint: "/mcp".to_string(),
             max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
             allow_origins: Vec::new(),
             auth_token: None,
@@ -4701,6 +4756,7 @@ done
             proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
             endpoint: "/mcp".to_string(),
             max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
             allow_origins: Vec::new(),
             auth_token: None,
@@ -4772,6 +4828,7 @@ done
                 .with_max_client_messages(10),
             endpoint: "/mcp".to_string(),
             max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
             allow_origins: Vec::new(),
             auth_token: None,
@@ -4879,6 +4936,7 @@ done
             proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
             endpoint: "/mcp".to_string(),
             max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             max_body_bytes: 16,
             allow_origins: Vec::new(),
             auth_token: None,
@@ -4912,12 +4970,88 @@ done
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_response_enforces_active_session_limit() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: 1,
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let headers = [
+            ("Accept", "application/json, text/event-stream"),
+            ("Content-Type", "application/json"),
+            ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+        ];
+        let first_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            headers,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let first_response =
+            mcp_http_response(&first_initialize, &state).expect("first initialize should run");
+        assert_eq!(first_response.status, "200 OK");
+        let session_id = response_header(&first_response, "Mcp-Session-Id")
+            .expect("first initialize should return session")
+            .to_string();
+
+        let second_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            headers,
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let second_response =
+            mcp_http_response(&second_initialize, &state).expect("session cap should be handled");
+        assert_eq!(second_response.status, "429 Too Many Requests");
+        assert!(
+            String::from_utf8_lossy(&second_response.body)
+                .contains("MCP HTTP active session limit reached: 1")
+        );
+        assert_eq!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .len(),
+            1
+        );
+
+        let delete = dashboard_test_request_with_headers(
+            "DELETE",
+            "/mcp",
+            [
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            Vec::new(),
+        );
+        let delete_response =
+            mcp_http_response(&delete, &state).expect("delete should release session");
+        assert_eq!(delete_response.status, "202 Accepted");
+
+        let third_response =
+            mcp_http_response(&second_initialize, &state).expect("new initialize should fit");
+        assert_eq!(third_response.status, "200 OK");
+    }
+
     #[test]
     fn mcp_http_response_reports_operational_health_and_readiness() {
         let state = Arc::new(McpHttpGatewayState {
             proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
             endpoint: "/mcp".to_string(),
             max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
@@ -4950,6 +5084,10 @@ done
             serde_json::json!(MCP_PROTOCOL_VERSION)
         );
         assert_eq!(ready_json["active_sessions"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["max_active_sessions"],
+            serde_json::json!(MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS)
+        );
         assert_eq!(ready_json["max_concurrent_requests"], serde_json::json!(8));
         assert_eq!(
             ready_json["max_body_bytes"],
@@ -5205,6 +5343,8 @@ done
             "3",
             "--max-concurrent-requests",
             "2",
+            "--max-active-sessions",
+            "5",
             "--max-body-bytes",
             "32768",
             "--allow-origin",
@@ -5221,6 +5361,7 @@ done
             endpoint,
             max_requests,
             max_concurrent_requests,
+            max_active_sessions,
             max_body_bytes,
             allow_origins,
             auth_token_env,
@@ -5234,6 +5375,7 @@ done
         assert_eq!(endpoint, "/mcp");
         assert_eq!(max_requests, 3);
         assert_eq!(max_concurrent_requests, 2);
+        assert_eq!(max_active_sessions, 5);
         assert_eq!(max_body_bytes, 32768);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
