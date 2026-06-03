@@ -246,5 +246,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add redacted MCP HTTP gateway metrics for service supervisors.
 - [x] Require auth for MCP HTTP readiness and metrics when auth is configured.
 - [x] Use constant-time checks for MCP HTTP bearer tokens.
-- [x] Reject malformed MCP HTTP request lines and framing.
+- [x] Reject malformed MCP HTTP request/header lines and framing.
 - [ ] Build production MCP gateway transport hardening.

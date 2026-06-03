@@ -1537,33 +1537,46 @@ fn read_dashboard_http_request_with_limits(
         if line == "\r\n" || line == "\n" {
             break;
         }
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim().to_string();
-            if name == "content-length" {
-                if content_length_seen {
-                    return Err(AgentKError::InvalidMcpRequest(
-                        "HTTP content-length header must appear at most once".to_string(),
-                    ));
-                }
-                content_length_seen = true;
-                content_length = value.parse::<usize>().map_err(|_| {
-                    AgentKError::InvalidMcpRequest(
-                        "dashboard HTTP content-length is invalid".to_string(),
-                    )
-                })?;
-                if content_length > max_body_bytes {
-                    return Err(AgentKError::InvalidMcpRequest(
-                        "HTTP request body is too large".to_string(),
-                    ));
-                }
-            } else if name == "transfer-encoding" && !value.is_empty() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP header line is invalid".to_string(),
+            ));
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP header line is invalid".to_string(),
+            ));
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        if !is_valid_http_header_name(&name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP header line is invalid".to_string(),
+            ));
+        }
+        if name == "content-length" {
+            if content_length_seen {
                 return Err(AgentKError::InvalidMcpRequest(
-                    "HTTP transfer-encoding is not supported".to_string(),
+                    "HTTP content-length header must appear at most once".to_string(),
                 ));
             }
-            headers.push((name, value));
+            content_length_seen = true;
+            content_length = value.parse::<usize>().map_err(|_| {
+                AgentKError::InvalidMcpRequest(
+                    "dashboard HTTP content-length is invalid".to_string(),
+                )
+            })?;
+            if content_length > max_body_bytes {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP request body is too large".to_string(),
+                ));
+            }
+        } else if name == "transfer-encoding" && !value.is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP transfer-encoding is not supported".to_string(),
+            ));
         }
+        headers.push((name, value));
     }
 
     let mut body = vec![0u8; content_length];
@@ -1607,6 +1620,30 @@ fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String), Age
         ));
     }
     Ok((method.to_string(), target.to_string()))
+}
+
+fn is_valid_http_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -6545,6 +6582,10 @@ done
             b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nBadHeader\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
         ] {

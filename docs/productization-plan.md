@@ -223,9 +223,9 @@ The safest first productization slice is the local team sidecar path:
     bind hosts, emits browser safety headers, drains active sessions on bounded
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics
     for supervisors, uses constant-time bearer-token checks, and writes
-    trace/session evidence. The HTTP parser rejects malformed request lines,
-    duplicate `Content-Length` headers, and unsupported transfer encodings with
-    sanitized 400 responses.
+    trace/session evidence. The HTTP parser rejects malformed request/header
+    lines, duplicate `Content-Length` headers, and unsupported transfer
+    encodings with sanitized 400 responses.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
