@@ -16077,7 +16077,8 @@ their MCP client configuration supports a TCP JSONL adapter.
 the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
 direct JSON responses, Origin validation, browser CORS preflight handling,
 `MCP-Protocol-Version` enforcement, optional bearer-token auth from
-`AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
+`AGENTK_MCP_HTTP_TOKEN`, sanitized `Mcp-Session-Id` validation, and bounded
+concurrent HTTP requests. Set
 `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`,
 `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES`, and `AGENTK_MCP_HTTP_MAX_HEADER_BYTES` to tune

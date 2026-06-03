@@ -4315,6 +4315,21 @@ fn mcp_http_protocol_version_error(
     ))
 }
 
+fn mcp_http_validate_session_id(session_id: &str) -> Option<DashboardHttpResponse> {
+    if session_id.len() == 32
+        && session_id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+
+    Some(dashboard_http_text(
+        "400 Bad Request",
+        "Mcp-Session-Id must be a 32-character lowercase hex id\n",
+    ))
+}
+
 fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
     for name in [
         "accept",
@@ -4491,6 +4506,9 @@ fn mcp_http_post_response(
             "Mcp-Session-Id is required after initialize\n",
         ));
     };
+    if let Some(response) = mcp_http_validate_session_id(session_id) {
+        return Ok(response);
+    }
     let session_id = session_id.to_string();
     let mut sessions = state.sessions.lock().map_err(|_| {
         AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
@@ -4540,6 +4558,9 @@ fn mcp_http_delete_response(
             "Mcp-Session-Id is required for DELETE\n",
         ));
     };
+    if let Some(response) = mcp_http_validate_session_id(session_id) {
+        return Ok(response);
+    }
     let session_id = session_id.to_string();
     let mut sessions = state.sessions.lock().map_err(|_| {
         AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
@@ -6395,6 +6416,91 @@ done
                 .lock()
                 .expect("session lock should not be poisoned")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_malformed_session_ids_without_reflection() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        for bad_session_id in [
+            "",
+            "SESSION_SHOULD_NOT_REFLECT",
+            "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdef00",
+        ] {
+            let post = dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Mcp-Session-Id", bad_session_id),
+                ],
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            );
+            let post_response =
+                mcp_http_response(&post, &state).expect("malformed POST session id should fail");
+            assert_eq!(post_response.status, "400 Bad Request");
+            let post_body = String::from_utf8_lossy(&post_response.body);
+            assert!(post_body.contains("Mcp-Session-Id"));
+            if !bad_session_id.is_empty() {
+                assert!(!post_body.contains(bad_session_id));
+            }
+
+            let delete = dashboard_test_request_with_headers(
+                "DELETE",
+                "/mcp",
+                [("Mcp-Session-Id", bad_session_id)],
+                Vec::new(),
+            );
+            let delete_response = mcp_http_response(&delete, &state)
+                .expect("malformed DELETE session id should fail");
+            assert_eq!(delete_response.status, "400 Bad Request");
+            let delete_body = String::from_utf8_lossy(&delete_response.body);
+            assert!(delete_body.contains("Mcp-Session-Id"));
+            if !bad_session_id.is_empty() {
+                assert!(!delete_body.contains(bad_session_id));
+            }
+        }
+
+        let valid_unknown_session_id = "0123456789abcdef0123456789abcdef";
+        let valid_unknown = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", valid_unknown_session_id),
+            ],
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        );
+        let valid_unknown_response =
+            mcp_http_response(&valid_unknown, &state).expect("unknown session should be handled");
+        assert_eq!(valid_unknown_response.status, "404 Not Found");
+        assert!(
+            !String::from_utf8_lossy(&valid_unknown_response.body)
+                .contains(valid_unknown_session_id)
+        );
+        assert_eq!(
+            mcp_http_metrics_snapshot(&state)
+                .expect("metrics should snapshot")
+                .session_not_found,
+            1
         );
     }
 
