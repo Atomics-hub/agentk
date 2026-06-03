@@ -220,6 +220,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Preflight packaged dashboard service starts with the package validator.
 - [x] Add a versioned package manifest for installable sidecar inventory.
 - [x] Add package self-checks for copied/deployed sidecar artifacts.
+- [x] Preflight packaged sidecar launchers with the package validator.
 - [x] Add redacted dashboard readiness probes for service supervisors.
 - [x] Add live durable team audit and approval storage.
 - [x] Validate live durable team stores with store-check.

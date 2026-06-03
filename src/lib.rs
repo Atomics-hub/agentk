@@ -15999,11 +15999,13 @@ MCP clients stable launcher scripts in `bin/`.
 - `bin/agentk-safe-agent-demo`: runs the no-credential GitHub/Postgres/Slack/
   filesystem demo and writes a package-local trace for audit review.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
-  command/args MCP client.
+  command/args MCP client; it runs the package self-check before launch.
 - `bin/agentk-sidecar-tcp`: bounded TCP JSON-RPC gateway launcher for internal
-  clients that cannot use stdio directly.
+  clients that cannot use stdio directly; it runs the package self-check before
+  serving.
 - `bin/agentk-sidecar-http`: local Streamable HTTP MCP gateway launcher for
-  clients that support the HTTP transport.
+  clients that support the HTTP transport; it runs the package self-check before
+  serving.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-dashboard`: writes `.agentk/dashboard.html` from the package trace
@@ -16093,6 +16095,8 @@ local-only CSP headers for browser-facing deployments.
 `bin/agentk-sidecar-tcp` listens on `127.0.0.1:9797` by default, accepts the
 configured number of newline-delimited MCP JSON-RPC TCP sessions, and proxies
 each session through the same reviewed sidecar config as `bin/agentk-sidecar`.
+It runs `bin/agentk-package-check --json` before binding so edited or copied
+packages fail closed before accepting clients.
 Set `AGENTK_MCP_TCP_HOST`, `AGENTK_MCP_TCP_PORT`, and
 `AGENTK_MCP_TCP_MAX_SESSIONS` to change the bind address or total session
 count, and `AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS` to bound simultaneous
@@ -16105,7 +16109,8 @@ the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
 direct JSON responses, Origin validation, browser CORS preflight handling,
 `MCP-Protocol-Version` enforcement, optional bearer-token auth from
 `AGENTK_MCP_HTTP_TOKEN`, sanitized `Mcp-Session-Id` validation, and bounded
-concurrent HTTP requests. Set
+concurrent HTTP requests. It runs `bin/agentk-package-check --json` before
+binding so edited or copied packages fail closed before accepting clients. Set
 `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`,
 `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES`, and `AGENTK_MCP_HTTP_MAX_HEADER_BYTES` to tune
@@ -16181,8 +16186,8 @@ processes that need stable current JSON and normalized JSONL tables.
 `--dry-run`, `--database-url-env`, and `--psql`.
 
 `deploy/` contains service/container templates wired to the packaged launchers.
-The dashboard service/container path runs the package-local package check before
-serving. Treat the templates as reviewed starting points: set the real `agentk`
+The sidecar gateway and dashboard launchers run the package-local package check
+before serving. Treat the templates as reviewed starting points: set the real `agentk`
 binary path, environment variables, and downstream MCP server command before
 production use.
 
@@ -16357,6 +16362,7 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-run --root "$ROOT/sidecar"
 "#
     .to_string()
@@ -16401,6 +16407,7 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-serve-tcp --root "$ROOT/sidecar" \
   --host "${AGENTK_MCP_TCP_HOST:-127.0.0.1}" \
   --port "${AGENTK_MCP_TCP_PORT:-9797}" \
@@ -16422,6 +16429,7 @@ case "${AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND:-}" in
     ALLOW_NON_LOCAL_BIND_FLAG="--allow-non-local-bind"
     ;;
 esac
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --host "${AGENTK_MCP_HTTP_HOST:-127.0.0.1}" \
   --port "${AGENTK_MCP_HTTP_PORT:-9798}" \
@@ -16674,12 +16682,12 @@ the dashboard admin token passes. Dashboard write requests require
 `Content-Type: application/json`, and clients must choose one admin token
 carrier instead of sending both supported admin headers.
 
-The packaged dashboard launcher runs `bin/agentk-package-check --json` before
-serving. Run `bin/agentk-package-check --json` after copying the package or
-building an image to validate the package manifest, launcher modes, deploy
-templates, storage schema, and embedded sidecar bundle. Service and container
-starts fail closed when policy, permissions, secret references, or client
-snippets stop validating.
+The packaged sidecar gateway and dashboard launchers run
+`bin/agentk-package-check --json` before serving. Run
+`bin/agentk-package-check --json` after copying the package or building an image
+to validate the package manifest, launcher modes, deploy templates, storage
+schema, and embedded sidecar bundle. Service and container starts fail closed
+when policy, permissions, secret references, or client snippets stop validating.
 
 ## systemd user service
 
@@ -17711,15 +17719,18 @@ can_deny = ["*"]
             fs::read_to_string(out.join("bin/agentk-sidecar")).expect("launcher should read");
         assert!(launcher.contains("sidecar-run"));
         assert!(launcher.contains("AGENTK_BIN"));
+        assert!(launcher.contains("agentk-package-check"));
         let tcp_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-tcp"))
             .expect("tcp launcher should read");
         assert!(tcp_launcher.contains("sidecar-serve-tcp"));
+        assert!(tcp_launcher.contains("agentk-package-check"));
         assert!(tcp_launcher.contains("AGENTK_MCP_TCP_PORT"));
         assert!(tcp_launcher.contains("AGENTK_MCP_TCP_MAX_SESSIONS"));
         assert!(tcp_launcher.contains("AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS"));
         let http_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-http"))
             .expect("http launcher should read");
         assert!(http_launcher.contains("sidecar-serve-http"));
+        assert!(http_launcher.contains("agentk-package-check"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_PORT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ENDPOINT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
@@ -17740,6 +17751,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("manifest.json"));
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
+        assert!(package_readme.contains("runs the package self-check before launch"));
+        assert!(package_readme.contains("before binding"));
         assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
         assert!(package_readme.contains("sidecar/.agentk/runs/safe-agent-demo.jsonl"));
         assert!(package_readme.contains("AGENTK_TRACE"));
@@ -17979,6 +17992,7 @@ can_deny = ["*"]
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
         assert!(deploy_readme.contains("agentk-package-check --json"));
+        assert!(deploy_readme.contains("sidecar gateway and dashboard launchers"));
         assert!(!out.join("sidecar/.agentk").exists());
         let package_check_report =
             check_sidecar_package(&out).expect("package check should run on generated package");

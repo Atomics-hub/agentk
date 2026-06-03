@@ -164,7 +164,8 @@ The safest first productization slice is the local team sidecar path:
    local transports, store workflow, and deploy artifacts for support and
    inventory checks. A package-local `agentk-package-check` launcher validates
    the manifest, package artifacts, launcher modes, and embedded sidecar bundle
-   after copy/deploy/image-build steps.
+   after copy/deploy/image-build steps, and packaged stdio/TCP/HTTP/dashboard
+   launchers run that check before accepting clients.
 10. `store-export` writes normalized audit, approval, and permission JSON plus a
     Postgres schema contract, psql-loadable TSV rows, and `postgres/load.sql`
     for teams that want a shared audit store. `store-check` validates both
@@ -244,7 +245,8 @@ The safest first productization slice is the local team sidecar path:
     line protocol over a bounded local TCP listener. The packaged sidecar now
     includes `bin/agentk-sidecar-tcp`, which loads the reviewed bundle, spawns a
     fresh downstream process per session, writes trace/session reports, and
-    exits after the configured session count. The TCP gateway also has an
+    exits after the configured session count. The packaged TCP launcher runs the
+    package self-check before binding. The TCP gateway also has an
     explicit `max_concurrent_sessions` cap so an idle client cannot serialize
     every other accepted local session behind it.
 21. `mcp-proxy-http` and `sidecar-serve-http` expose the same mediated
@@ -254,7 +256,8 @@ The safest first productization slice is the local team sidecar path:
     allowed browser CORS preflights before bearer-token auth, supports an
     optional bearer token from environment, enforces HTTP protocol-version
     headers, supports env-configured additional browser origins, forwards extra
-    launcher arguments for one-off operator flags, caps active
+    launcher arguments for one-off operator flags, runs the package self-check
+    before binding, caps active
     sessions, reaps idle sessions, bounds request bodies and headers, applies
     accepted connection read/write timeouts, uses per-session runtime locks so
     one busy downstream session does not block unrelated sessions, reports local
