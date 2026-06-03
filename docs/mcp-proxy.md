@@ -122,7 +122,9 @@ active-session cap, idle timeout, request-concurrency, request body cap,
 configured allowed-origin count, and auth-required metadata without raw MCP
 payloads or raw origin values. `/metrics` exposes the same operational posture
 as redacted numeric gateway gauges plus cumulative request, rejection, and
-session lifecycle counters for service supervisors. When HTTP auth is
+session lifecycle counters for service supervisors. All MCP HTTP `HEAD`
+responses omit bodies; `HEAD` on the MCP endpoint remains an unsupported method
+response with the normal `Allow` header. When HTTP auth is
 configured, `/readyz` and `/metrics` require the same bearer token as MCP
 requests; `/healthz` remains open for minimal liveness checks.
 `--max-active-sessions` caps initialized MCP HTTP
