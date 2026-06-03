@@ -190,6 +190,10 @@ The safest first productization slice is the local team sidecar path:
     dashboard reads, `/readyz`, and `/metrics` while leaving `/healthz` open.
     Accepted dashboard connections use an operator-tunable read/write timeout via
     `--stream-timeout-ms` and packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS`.
+    Dashboard request buffering is operator-tunable via `--max-body-bytes`,
+    `--max-header-bytes`, and packaged `AGENTK_DASHBOARD_MAX_BODY_BYTES` /
+    `AGENTK_DASHBOARD_MAX_HEADER_BYTES`, with sanitized 413/431 responses for
+    oversized bodies, request lines, or headers.
     Dashboard request bodies are accepted only on approval decision endpoints,
     so review reads and probes cannot carry ignored payload bytes, and those write
     endpoints require `Content-Type: application/json`. Decision endpoint paths
