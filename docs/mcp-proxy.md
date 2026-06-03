@@ -131,7 +131,9 @@ request line plus headers before body reads; oversized headers return 431.
 Malformed request lines or header lines, duplicate `Content-Length` headers,
 and `Transfer-Encoding` requests are rejected with sanitized 400 responses
 because the adapter only accepts origin-form, fixed-length HTTP/1.x requests
-with token-shaped header names. Duplicate MCP control headers used for
+with token-shaped header names. HTTP/1.1 requests must include exactly one
+nonblank `Host` header, and duplicate `Host` headers are rejected for all
+accepted HTTP versions. Duplicate MCP control headers used for
 auth/session/protocol/origin/media negotiation are rejected with sanitized 400
 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. POSTs require an exact `application/json`

@@ -248,4 +248,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Use constant-time checks for MCP HTTP bearer tokens.
 - [x] Reject malformed MCP HTTP request/header lines and framing.
 - [x] Reject ambiguous MCP HTTP control headers and invalid JSON media types.
+- [x] Enforce MCP HTTP Host header requirements for HTTP/1.1 requests.
 - [ ] Build production MCP gateway transport hardening.
