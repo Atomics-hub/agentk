@@ -186,8 +186,9 @@ The safest first productization slice is the local team sidecar path:
     probe paths are matched exactly with query strings rejected. Dashboard
     request bodies are accepted only on approval decision endpoints, so review
     reads and probes cannot carry ignored payload bytes, and those write
-    endpoints require `Content-Type: application/json`. Dashboard decision JSON
-    object keys must be unique and limited to `id`, `reviewer`, `reason`, and
+    endpoints require `Content-Type: application/json`. Decision endpoint paths
+    are matched exactly and reject query strings. Dashboard decision JSON object
+    keys must be unique and limited to `id`, `reviewer`, `reason`, and
     `reviewer_token`. When dashboard admin auth is enabled, write clients must
     choose one admin token carrier instead of sending both `Authorization` and
     `X-AgentK-Admin-Token`, and duplicated admin token carrier headers fail

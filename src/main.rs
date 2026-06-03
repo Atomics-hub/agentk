@@ -1880,6 +1880,11 @@ fn dashboard_http_response(
             "400 Bad Request",
             "dashboard operational probes must not include query strings\n",
         )
+    } else if has_query && dashboard_http_is_decision_path(route) {
+        dashboard_http_text(
+            "400 Bad Request",
+            "dashboard decision endpoints must not include query strings\n",
+        )
     } else if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
         response
     } else {
@@ -1942,6 +1947,10 @@ fn dashboard_http_response(
 
 fn dashboard_http_is_operational_path(path: &str) -> bool {
     matches!(path, "/healthz" | "/readyz")
+}
+
+fn dashboard_http_is_decision_path(path: &str) -> bool {
+    matches!(path, "/api/approve" | "/api/deny")
 }
 
 fn dashboard_http_unexpected_body_error(
@@ -9167,6 +9176,38 @@ can_deny = []
         let invalid_media_type_body =
             String::from_utf8(invalid_media_type.body).expect("media type body should be utf8");
         assert!(invalid_media_type_body.contains("dashboard decision API"));
+
+        for target in [
+            "/api/approve?ignored=QUERY_SHOULD_NOT_REFLECT",
+            "/api/deny?ignored=QUERY_SHOULD_NOT_REFLECT",
+        ] {
+            let decision_query = dashboard_http_response(
+                &dashboard_test_request_with_headers(
+                    "POST",
+                    target,
+                    [("Content-Type", "application/json")],
+                    serde_json::json!({
+                        "id": approval_id,
+                        "reviewer": "tom",
+                        "reason": "query string should be rejected before decision parsing",
+                        "reviewer_token": "dashboard-token"
+                    })
+                    .to_string()
+                    .into_bytes(),
+                ),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                None,
+                None,
+            );
+            assert_eq!(decision_query.status, "400 Bad Request");
+            let decision_query_body =
+                String::from_utf8(decision_query.body).expect("decision query body should be utf8");
+            assert!(decision_query_body.contains("dashboard decision endpoints"));
+            assert!(decision_query_body.contains("query strings"));
+            assert!(!decision_query_body.contains("QUERY_SHOULD_NOT_REFLECT"));
+        }
 
         let duplicate_decision_key = dashboard_http_response(
             &dashboard_test_request_with_headers(
