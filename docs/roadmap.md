@@ -248,6 +248,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add configurable MCP HTTP header byte bounds.
 - [x] Drain active MCP HTTP sessions on bounded gateway shutdown.
 - [x] Add redacted MCP HTTP gateway metrics for service supervisors.
+- [x] Add cumulative MCP HTTP request and session lifecycle counters.
 - [x] Require auth for MCP HTTP readiness and metrics when auth is configured.
 - [x] Use constant-time checks for MCP HTTP bearer tokens.
 - [x] Reject malformed MCP HTTP request/header lines and framing.

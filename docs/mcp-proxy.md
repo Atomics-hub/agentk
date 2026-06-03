@@ -119,7 +119,8 @@ protocol on follow-up POST/DELETE requests. The adapter also serves local
 active-session cap, idle timeout, request-concurrency, request body cap,
 configured allowed-origin count, and auth-required metadata without raw MCP
 payloads or raw origin values. `/metrics` exposes the same operational posture
-as redacted numeric gateway gauges for service supervisors. When HTTP auth is
+as redacted numeric gateway gauges plus cumulative request, rejection, and
+session lifecycle counters for service supervisors. When HTTP auth is
 configured, `/readyz` and `/metrics` require the same bearer token as MCP
 requests; `/healthz` remains open for minimal liveness checks.
 `--max-active-sessions` caps initialized MCP HTTP
@@ -158,6 +159,9 @@ require a non-empty bearer token from `--auth-token-env`, so LAN/public exposure
 is an explicit authenticated operator choice. When a bounded HTTP gateway exits,
 it drains any still-active initialized sessions and writes their redacted
 trace/session reports using the same per-session file names as DELETE cleanup.
+The readiness and metrics probes expose only redacted numeric counters: parsed
+request totals by method, client/server error totals, auth/origin/method
+rejections, and session create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control
 plane, TLS termination, SSE streaming, or external identity integration.
 
