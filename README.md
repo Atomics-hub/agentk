@@ -318,10 +318,11 @@ values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
 ambiguity. `Connection: close` is accepted, while other `Connection` values and
 hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
 and `Trailer` are rejected. Request lines must be exactly
-space-delimited, and header names must be token-shaped without whitespace
-before `:`. HTTP/1.1 requests must include exactly one syntactically valid
-`Host` authority with no userinfo, wildcards, paths, queries, fragments,
-invalid ports, or unbracketed IPv6 literals.
+space-delimited, request targets must not contain fragments, and header names
+must be token-shaped without whitespace before `:`. HTTP/1.1 requests must
+include exactly one syntactically valid `Host` authority with no userinfo,
+wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
+literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
@@ -464,8 +465,9 @@ headers, LF-only line endings, control characters in header values, and any
 framing. Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
 Request lines must be exactly space-delimited, header names must be
-token-shaped without whitespace before `:`, and duplicate MCP control headers
-and dual token-carrier headers are rejected as ambiguous.
+token-shaped without whitespace before `:`, request targets must not contain
+fragments, and duplicate MCP control headers and dual token-carrier headers are
+rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
 that Host value must be a clean authority with no userinfo, wildcards, paths,
 queries, fragments, invalid ports, or unbracketed IPv6 literals. Truncated

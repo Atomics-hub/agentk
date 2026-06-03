@@ -1685,6 +1685,7 @@ fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, Stri
         || !target.starts_with('/')
         || method.is_empty()
         || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+        || target.contains('#')
         || target
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
@@ -7934,6 +7935,7 @@ done
             b"GET /mcp HTTP/1.1 \r\n\r\n".as_slice(),
             b"GET /\tmcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp#FRAGMENT_SHOULD_NOT_REFLECT HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: \r\n\r\n".as_slice(),
@@ -7977,6 +7979,7 @@ done
             let response = response_for(raw_request);
             assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
             assert!(response.contains("invalid MCP HTTP request"));
+            assert!(!response.contains("FRAGMENT_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)

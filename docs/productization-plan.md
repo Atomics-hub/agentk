@@ -242,12 +242,12 @@ The safest first productization slice is the local team sidecar path:
     header, expectation header, or upgrade header with sanitized 400 responses.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected. Request lines must be exactly
-    space-delimited and header names cannot carry whitespace before `:`. The
-    HTTP gateway validates configured browser origins before bind, matches
-    built-in localhost/loopback origins only with optional numeric ports,
-    rejects ambiguous duplicate MCP control headers, dual token-carrier
-    headers, and invalid JSON POST media types before spawning downstream MCP
-    work. Follow-up
+    space-delimited, request targets cannot contain fragments, and header names
+    cannot carry whitespace before `:`. The HTTP gateway validates configured
+    browser origins before bind, matches built-in localhost/loopback origins
+    only with optional numeric ports, rejects ambiguous duplicate MCP control
+    headers, dual token-carrier headers, and invalid JSON POST media types
+    before spawning downstream MCP work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. HTTP/1.1 requests
     require exactly one syntactically valid `Host` authority with no userinfo,

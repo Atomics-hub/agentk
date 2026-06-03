@@ -269,4 +269,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Validate MCP/dashboard HTTP Host and origin authority syntax.
 - [x] Reject MCP/dashboard HTTP expectation and upgrade headers.
 - [x] Reject MCP/dashboard HTTP hop-by-hop connection negotiation.
+- [x] Reject MCP/dashboard HTTP request-target fragments.
 - [ ] Build production MCP gateway transport hardening.
