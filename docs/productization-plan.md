@@ -278,7 +278,9 @@ The safest first productization slice is the local team sidecar path:
     wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
     literals, so gateway handling does not guess across ambiguous authority
     metadata. Truncated header sections and short fixed-length bodies are
-    rejected before request handling. Request
+    rejected before request handling. The configured header byte cap is enforced
+    while each request line and header line is read, so oversized unterminated
+    lines fail closed before unbounded buffering. Request
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control
     paths cannot smuggle ignored payload bytes. Browser CORS preflights are
     restricted to `POST`/`DELETE` and the known MCP HTTP header set. The MCP
