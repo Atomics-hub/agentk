@@ -37,6 +37,7 @@ const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
+const DASHBOARD_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentk")]
@@ -186,6 +187,9 @@ enum Command {
         /// Env var containing an optional dashboard write API bearer token.
         #[arg(long, default_value = "AGENTK_DASHBOARD_ADMIN_TOKEN")]
         admin_token_env: String,
+        /// Milliseconds before an accepted dashboard HTTP connection read/write operation times out.
+        #[arg(long, default_value_t = DASHBOARD_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
+        stream_timeout_ms: u64,
         /// Allow binding the dashboard server to a non-loopback host.
         #[arg(long)]
         allow_non_local_bind: bool,
@@ -754,6 +758,7 @@ fn run() -> Result<(), AgentKError> {
             host,
             port,
             admin_token_env,
+            stream_timeout_ms,
             allow_non_local_bind,
             store_root,
         } => dashboard_serve(
@@ -763,6 +768,7 @@ fn run() -> Result<(), AgentKError> {
             host,
             port,
             admin_token_env,
+            stream_timeout_ms,
             allow_non_local_bind,
             store_root,
         ),
@@ -1405,6 +1411,7 @@ fn dashboard_serve(
     host: String,
     port: u16,
     admin_token_env: String,
+    stream_timeout_ms: u64,
     allow_non_local_bind: bool,
     store_root: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
@@ -1417,6 +1424,8 @@ fn dashboard_serve(
     let admin_token = env::var(&admin_token_env)
         .ok()
         .filter(|value| !value.is_empty());
+    let stream_timeout = Duration::from_millis(stream_timeout_ms);
+    validate_dashboard_stream_timeout(stream_timeout)?;
     validate_dashboard_bind_security(&host, allow_non_local_bind, admin_token.is_some())?;
     let admin_read_required = !is_loopback_bind_host(&host);
     let bind = format!("{host}:{port}");
@@ -1425,6 +1434,7 @@ fn dashboard_serve(
     println!("url        http://{bind}/");
     println!("trace      {}", path.display());
     println!("decisions  {}", decisions.display());
+    println!("stream ms  {}", stream_timeout.as_millis());
     if let Some(path) = &store_root {
         println!("store      {}", path.display());
     }
@@ -1443,15 +1453,19 @@ fn dashboard_serve(
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_dashboard_http_stream(
-                    &mut stream,
-                    &path,
-                    &decisions,
-                    permissions.as_ref(),
-                    admin_token.as_deref(),
-                    admin_read_required,
-                    store_root.as_ref(),
-                ) {
+                let result =
+                    configure_dashboard_http_stream(&stream, stream_timeout).and_then(|_| {
+                        handle_dashboard_http_stream(
+                            &mut stream,
+                            &path,
+                            &decisions,
+                            permissions.as_ref(),
+                            admin_token.as_deref(),
+                            admin_read_required,
+                            store_root.as_ref(),
+                        )
+                    });
+                if let Err(error) = result {
                     eprintln!("dashboard request failed: {error}");
                 }
             }
@@ -1459,6 +1473,15 @@ fn dashboard_serve(
         }
     }
 
+    Ok(())
+}
+
+fn validate_dashboard_stream_timeout(stream_timeout: Duration) -> Result<(), AgentKError> {
+    if stream_timeout.is_zero() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard stream-timeout-ms must be positive".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1480,6 +1503,16 @@ fn validate_dashboard_bind_security(
             "dashboard non-loopback binds require a non-empty admin token".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn configure_dashboard_http_stream(
+    stream: &TcpStream,
+    stream_timeout: Duration,
+) -> Result<(), AgentKError> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(stream_timeout))?;
+    stream.set_write_timeout(Some(stream_timeout))?;
     Ok(())
 }
 
@@ -8250,6 +8283,29 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_timeouts_are_applied_to_accepted_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let client = TcpStream::connect(addr).expect("test client should connect");
+        let (stream, _) = listener.accept().expect("test server should accept");
+        let timeout = Duration::from_millis(1234);
+        configure_dashboard_http_stream(&stream, timeout).expect("stream should configure");
+        assert_eq!(
+            stream.read_timeout().expect("read timeout should inspect"),
+            Some(timeout)
+        );
+        assert_eq!(
+            stream
+                .write_timeout()
+                .expect("write timeout should inspect"),
+            Some(timeout)
+        );
+        drop(client);
+    }
+
+    #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let addr = listener
@@ -8563,6 +8619,8 @@ done
             "127.0.0.1",
             "--port",
             "8787",
+            "--stream-timeout-ms",
+            "12000",
             "--store-root",
             "agentk-sidecar/.agentk/team-store",
         ])
@@ -8574,6 +8632,7 @@ done
             host,
             port,
             admin_token_env,
+            stream_timeout_ms,
             allow_non_local_bind,
             store_root,
         }) = dashboard_serve.command
@@ -8591,6 +8650,7 @@ done
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 8787);
         assert_eq!(admin_token_env, "AGENTK_DASHBOARD_ADMIN_TOKEN");
+        assert_eq!(stream_timeout_ms, 12000);
         assert!(!allow_non_local_bind);
         assert_eq!(
             store_root,
@@ -8629,6 +8689,12 @@ done
         assert!(missing_admin.contains("non-empty admin token"));
         validate_dashboard_bind_security("0.0.0.0", true, true)
             .expect("non-loopback dashboard bind should allow explicit authenticated opt-in");
+        validate_dashboard_stream_timeout(Duration::from_millis(1))
+            .expect("positive dashboard stream timeout should be allowed");
+        let zero_timeout = validate_dashboard_stream_timeout(Duration::ZERO)
+            .expect_err("zero dashboard stream timeout should fail")
+            .to_string();
+        assert!(zero_timeout.contains("stream-timeout-ms"));
 
         let store_export = Cli::try_parse_from([
             "agentk",

@@ -254,6 +254,9 @@ non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
 admin token so exposing the review UI is an explicit authenticated operator
 choice. In that mode, dashboard reads and `/readyz` require the same admin
 token; `/healthz` remains open for liveness probes.
+Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
+`--stream-timeout-ms` or packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune
+deployments.
 Dashboard and MCP HTTP responses include no-store, no-sniff, no-referrer,
 anti-framing, and local-only CSP headers for browser-facing deployments.
 Reviewers can record approve/deny decisions from the browser page, and the

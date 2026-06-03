@@ -507,6 +507,9 @@ The dashboard server binds to `127.0.0.1` by default; non-loopback binds require
 review UI is an explicit authenticated operator choice. In that mode, dashboard
 reads and `/readyz` require the same admin token; `/healthz` remains open for
 liveness probes.
+Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
+`--stream-timeout-ms` or packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune
+deployments.
 Reviewers can record approve/deny decisions from the browser page, and the same
 permission-checked JSON decision API is available at
 `/api/approve` and `/api/deny`. Dashboard request bodies are accepted only on
