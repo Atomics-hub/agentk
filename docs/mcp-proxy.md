@@ -227,10 +227,12 @@ AgentK version, schema version, launchers, client snippets, local transports,
 store workflow, and deploy artifacts; `<package>/bin/agentk-package-info` prints
 that manifest for support and deployment inventory checks.
 `<package>/bin/agentk-package-check` validates the manifest, package artifacts,
-launcher modes, and embedded sidecar bundle after a copy, deploy, or image
-build. The packaged stdio, TCP, HTTP, and dashboard launchers run that package
-self-check before launching or serving, so copied or edited packages fail closed
-before accepting clients. `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
+launcher modes, launcher preflights, deploy-template hardening, and embedded
+sidecar bundle after a copy, deploy, or image build. The packaged runtime
+launchers run that package self-check before launching, serving, writing demo
+traces, rendering dashboards, or updating store artifacts, so copied or edited
+packages fail closed before teams rely on them.
+`<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Set
 `AGENTK_TRACE` to that path when running the packaged dashboard or store

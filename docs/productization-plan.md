@@ -163,9 +163,11 @@ The safest first productization slice is the local team sidecar path:
    `manifest.json` that records the AgentK version, schema version, launchers,
    local transports, store workflow, and deploy artifacts for support and
    inventory checks. A package-local `agentk-package-check` launcher validates
-   the manifest, package artifacts, launcher modes, and embedded sidecar bundle
-   after copy/deploy/image-build steps, and packaged stdio/TCP/HTTP/dashboard
-   launchers run that check before accepting clients.
+   the manifest, package artifacts, launcher modes, launcher preflights,
+   deploy-template hardening, and embedded sidecar bundle after
+   copy/deploy/image-build steps. Packaged runtime launchers run that check
+   before launching, serving, writing demo traces, rendering dashboards, or
+   updating store artifacts.
    The package includes systemd, launchd, and Docker Compose templates for both
    the MCP HTTP gateway and the dashboard. Package checks now validate baseline
    deploy-template hardening markers, including no-new-privileges systemd
