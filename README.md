@@ -399,7 +399,8 @@ bundle, binds localhost by default, answers allowed browser preflights, requires
 origin/session checks, and writes the same trace/session evidence. It serves
 local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`, and rejects
 unsupported `MCP-Protocol-Version` headers, oversized request bodies, or excess
-initialized sessions, and reaps idle sessions. Set
+initialized sessions, and reaps idle sessions. `/readyz` reports the configured
+allowed-origin count without raw origin values. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This

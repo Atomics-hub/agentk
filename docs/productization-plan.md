@@ -216,7 +216,8 @@ The safest first productization slice is the local team sidecar path:
     optional bearer token from environment, enforces HTTP protocol-version
     headers, supports env-configured additional browser origins, caps active
     sessions, reaps idle sessions, bounds request bodies, reports local
-    health/readiness for service supervisors, and writes trace/session evidence.
+    health/readiness for service supervisors with redacted origin-count
+    metadata, and writes trace/session evidence.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
