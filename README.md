@@ -469,7 +469,9 @@ dist/agentk-sidecar/bin/agentk-sidecar
 ```
 
 Packaged Claude Desktop and generic Codex/Cursor command snippets are written
-under `dist/agentk-sidecar/clients/`. The package also writes a relative-path
+under `dist/agentk-sidecar/clients/`, alongside
+`clients/http-sse-handoff.md` for teams whose MCP client explicitly supports
+Streamable HTTP plus bearer-token headers. The package also writes a relative-path
 `manifest.json` with the AgentK version, schema version, stable launchers,
 client snippets, local transports, store workflow, and deploy artifacts, plus
 `package.lock.json` with relative paths, byte counts, SHA-256 hashes, and
@@ -496,6 +498,9 @@ copying or installing the package. Run
 package lock, package artifacts, launcher modes, launcher preflights,
 deploy-template hardening, dummy deploy env examples, the configured
 `AGENTK_BIN`, and embedded sidecar bundle after a copy, deploy, or image build.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-http-handoff-check --json` to
+validate the bounded local HTTP/SSE handoff contract, including the launcher,
+env template, manifest `Last-Event-ID` resume contract, and client handoff doc.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -554,6 +559,10 @@ explicitly. Non-loopback HTTP binds fail closed unless
 non-empty `AGENTK_MCP_HTTP_TOKEN`. The packaged HTTP launcher forwards extra
 arguments to `sidecar-serve-http`, so operators can add one-off flags such as
 `--allow-origin` or `--auth-token-env` without editing the package script.
+`dist/agentk-sidecar/clients/http-sse-handoff.md` documents the finite
+authenticated buffered SSE alpha with `Accept: text/event-stream`,
+`Mcp-Session-Id`, `MCP-Protocol-Version`, and optional `Last-Event-ID` resume;
+it is a bounded local adapter, not a hosted production MCP control plane.
 Malformed request lines or header lines,
 including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any

@@ -34,8 +34,9 @@ The current v0.2 alpha draft lives in
 - [ ] `docs/mcp-proxy.md` matches the packaged stdio, TCP, and HTTP gateway
       behavior.
 - [ ] The generated sidecar package includes Claude/Codex/Cursor snippets,
-      package lock, deploy templates, durable store workflow launchers, and
-      notification bridge launchers expected for this release.
+      package lock, deploy templates, the HTTP/SSE handoff guide/check, durable
+      store workflow launchers, and notification bridge launchers expected for
+      this release.
 - [ ] Public examples use only dummy data, invalid domains, and synthetic traces.
 - [ ] No generated `.agentk/` logs, signing keys, private manifests, `.env`
       files, or local-only artifacts are tracked.
@@ -85,6 +86,7 @@ and Postgres dry-run push:
 ```sh
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 ```
 
 For manual reviewer handoff, also keep the explicit package commands available
@@ -112,6 +114,9 @@ cargo run --locked -- sidecar-package-release-manifest \
   --out dist/agentk-sidecar-release-manifest.json \
   --force \
   --json
+cargo run --locked -- sidecar-package-http-handoff-check \
+  --root installed/agentk-sidecar \
+  --json
 ```
 
 If a Homebrew tap update is part of the release, generate the formula from the
@@ -137,6 +142,7 @@ cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>
 git diff --check

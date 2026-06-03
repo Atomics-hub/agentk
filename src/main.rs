@@ -3,8 +3,9 @@ use agentk::{
     MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
     TeamPermissionsReport, Verdict, alpha_release_status_report, approval_review_jsonl,
     archive_sidecar_package, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
-    check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive, default_log_path,
-    export_audit_store, export_email_notification_payloads, export_github_notification_payloads,
+    check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive,
+    check_sidecar_package_http_handoff, default_log_path, export_audit_store,
+    export_email_notification_payloads, export_github_notification_payloads,
     export_slack_notification_payloads, fork_replay_behavior_jsonl, fork_replay_jsonl,
     generate_signing_key_file, init_sidecar_bundle, inspect_jsonl, install_sidecar_package_archive,
     mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
@@ -723,6 +724,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate the packaged local HTTP/SSE sidecar handoff contract.
+    SidecarPackageHttpHandoffCheck {
+        /// Root directory containing manifest.json, clients/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Emit the HTTP/SSE handoff report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1250,6 +1260,9 @@ fn run() -> Result<(), AgentKError> {
             json,
         } => sidecar_package(root, out, archive_out, force, json),
         Command::SidecarPackageCheck { root, json } => sidecar_package_check(root, json),
+        Command::SidecarPackageHttpHandoffCheck { root, json } => {
+            sidecar_package_http_handoff_check(root, json)
+        }
         Command::SidecarPackageArchiveCheck {
             archive,
             checksum,
@@ -7884,6 +7897,38 @@ fn sidecar_package_check(root: PathBuf, json: bool) -> Result<(), AgentKError> {
     Ok(())
 }
 
+fn sidecar_package_http_handoff_check(root: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = check_sidecar_package_http_handoff(&root)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK team sidecar HTTP/SSE handoff check");
+        println!("root      {}", report.root.display());
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package HTTP/SSE handoff check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -8535,6 +8580,13 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_step(
         &mut steps,
+        "HTTP handoff check",
+        &bin.join("agentk-sidecar-http-handoff-check"),
+        &["--json"],
+        &common_env,
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
         "safe-agent demo",
         &bin.join("agentk-safe-agent-demo"),
         &["--json"],
@@ -8731,6 +8783,11 @@ fn run_release_candidate_smoke(
         &mut artifacts,
         "codex cursor client",
         installed_package.join("clients/codex-cursor-command.txt"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "http sse handoff",
+        installed_package.join("clients/http-sse-handoff.md"),
     );
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone());
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone());
@@ -12475,6 +12532,34 @@ done
 
         let Some(Command::SidecarPackageCheck { root, json }) = cli.command else {
             panic!("expected sidecar-package-check command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_http_handoff_check_accepts_root() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-http-handoff-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_http_handoff_check_accepts_root_inner)
+            .expect("sidecar-package-http-handoff-check parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-http-handoff-check parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_http_handoff_check_accepts_root_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-http-handoff-check",
+            "--root",
+            "dist/agentk-sidecar",
+            "--json",
+        ])
+        .expect("sidecar-package-http-handoff-check should parse");
+
+        let Some(Command::SidecarPackageHttpHandoffCheck { root, json }) = cli.command else {
+            panic!("expected sidecar-package-http-handoff-check command");
         };
         assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
         assert!(json);

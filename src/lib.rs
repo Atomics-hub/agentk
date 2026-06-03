@@ -30,6 +30,7 @@ const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
 const SIDECAR_PACKAGE_SCHEMA_VERSION: u32 = 1;
 const SIDECAR_PACKAGE_LOCK_SCHEMA_VERSION: u32 = 1;
 const SIDECAR_PACKAGE_NAME: &str = "agentk-team-sidecar";
+const SIDECAR_PACKAGE_HTTP_SSE_RETAINED_EVENTS: u32 = 128;
 const SIDECAR_PACKAGE_LOCK: &str = "package.lock.json";
 const SIDECAR_PACKAGE_RUNTIME_STATE: &str = "sidecar/.agentk";
 const SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION: u32 = 1;
@@ -44,6 +45,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar",
     "bin/agentk-sidecar-tcp",
     "bin/agentk-sidecar-http",
+    "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -64,6 +66,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar",
     "bin/agentk-sidecar-tcp",
     "bin/agentk-sidecar-http",
+    "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -82,6 +85,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
 const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
     "clients/claude-desktop.mcp.json",
     "clients/codex-cursor-command.txt",
+    "clients/http-sse-handoff.md",
 ];
 const SIDECAR_PACKAGE_STORAGE_CONTRACTS: &[&str] = &["storage/postgres-schema.sql"];
 const SIDECAR_PACKAGE_DEPLOY_TEMPLATES: &[&str] = &[
@@ -15608,6 +15612,11 @@ pub fn package_sidecar_bundle(
             "bin/agentk-sidecar-http",
             &sidecar_http_launcher_script(),
         )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-http-handoff-check",
+            &sidecar_http_handoff_check_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
         write_packaged_sidecar_file(
@@ -15659,6 +15668,11 @@ pub fn package_sidecar_bundle(
             out,
             "clients/codex-cursor-command.txt",
             &sidecar_packaged_command_snippet(out),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "clients/http-sse-handoff.md",
+            &sidecar_packaged_http_sse_handoff(out),
         )?,
         write_packaged_sidecar_file(
             out,
@@ -16352,6 +16366,7 @@ pub fn check_sidecar_package(
     checks.push(check_sidecar_package_agentk_bin_guard(root));
     checks.push(check_sidecar_package_deploy_templates(root));
     checks.push(check_sidecar_package_deploy_env_examples(root));
+    checks.extend(check_sidecar_package_http_handoff_readiness(root));
     checks.push(check_sidecar_package_lock(root));
     checks.push(check_sidecar_package_sidecar_bundle(root));
 
@@ -17036,6 +17051,266 @@ fn check_sidecar_package_deploy_env_examples(root: &Path) -> ReadinessCheck {
             "{} deploy env examples contain required dummy values",
             SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES.len()
         ),
+    )
+}
+
+pub fn check_sidecar_package_http_handoff(
+    root: impl AsRef<Path>,
+) -> Result<SidecarPackageCheckReport, AgentKError> {
+    let root = root.as_ref();
+    let checks = check_sidecar_package_http_handoff_checks(root);
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(SidecarPackageCheckReport {
+        root: root.to_path_buf(),
+        passed,
+        checks,
+    })
+}
+
+fn check_sidecar_package_http_handoff_readiness(root: &Path) -> Vec<ReadinessCheck> {
+    check_sidecar_package_http_handoff_checks(root)
+}
+
+fn check_sidecar_package_http_handoff_checks(root: &Path) -> Vec<ReadinessCheck> {
+    vec![
+        check_sidecar_package_http_manifest(root),
+        check_sidecar_package_http_launcher(root),
+        check_sidecar_package_http_env(root),
+        check_sidecar_package_http_client_handoff(root),
+        check_sidecar_package_http_readme(root),
+    ]
+}
+
+fn check_sidecar_package_http_manifest(root: &Path) -> ReadinessCheck {
+    let manifest = match fs::read_to_string(root.join("manifest.json"))
+        .map_err(|error| error.to_string())
+        .and_then(|content| {
+            serde_json::from_str::<serde_json::Value>(&content).map_err(|error| error.to_string())
+        }) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return sidecar_check(
+                "package HTTP/SSE manifest",
+                ReadinessStatus::Fail,
+                format!("manifest.json did not parse: {error}"),
+            );
+        }
+    };
+    let Some(transport) = manifest
+        .get("default_transports")
+        .and_then(|value| value.as_array())
+        .and_then(|values| {
+            values.iter().find(|transport| {
+                transport.get("name").and_then(|value| value.as_str()) == Some("streamable-http")
+            })
+        })
+    else {
+        return sidecar_check(
+            "package HTTP/SSE manifest",
+            ReadinessStatus::Fail,
+            "default_transports must include streamable-http",
+        );
+    };
+    let sse_alpha = transport
+        .get("sse_alpha")
+        .unwrap_or(&serde_json::Value::Null);
+    let ok = transport.get("launcher").and_then(|value| value.as_str())
+        == Some("bin/agentk-sidecar-http")
+        && transport
+            .get("default_url")
+            .and_then(|value| value.as_str())
+            == Some("http://127.0.0.1:9798/mcp")
+        && sse_alpha.get("mode").and_then(|value| value.as_str())
+            == Some("finite-authenticated-buffered")
+        && sse_alpha
+            .get("resume_header")
+            .and_then(|value| value.as_str())
+            == Some("Last-Event-ID")
+        && sse_alpha
+            .get("retained_events_per_session")
+            .and_then(|value| value.as_u64())
+            == Some(SIDECAR_PACKAGE_HTTP_SSE_RETAINED_EVENTS as u64)
+        && sse_alpha
+            .get("hosted_control_plane")
+            .and_then(|value| value.as_bool())
+            == Some(false);
+    if ok {
+        sidecar_check(
+            "package HTTP/SSE manifest",
+            ReadinessStatus::Pass,
+            "streamable-http default transport declares bounded SSE alpha contract",
+        )
+    } else {
+        sidecar_check(
+            "package HTTP/SSE manifest",
+            ReadinessStatus::Fail,
+            "streamable-http manifest must declare launcher, loopback URL, Last-Event-ID resume, retained buffer, and no hosted control plane",
+        )
+    }
+}
+
+fn check_sidecar_package_http_launcher(root: &Path) -> ReadinessCheck {
+    let content = match fs::read_to_string(root.join("bin/agentk-sidecar-http")) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "package HTTP/SSE launcher",
+                ReadinessStatus::Fail,
+                format!("bin/agentk-sidecar-http could not be read: {error}"),
+            );
+        }
+    };
+    let requirements = [
+        "agentk-package-check",
+        "sidecar-serve-http",
+        "AGENTK_MCP_HTTP_HOST",
+        "AGENTK_MCP_HTTP_PORT",
+        "AGENTK_MCP_HTTP_ENDPOINT",
+        "AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS",
+        "AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS",
+        "AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS",
+        "AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS",
+        "AGENTK_MCP_HTTP_MAX_BODY_BYTES",
+        "AGENTK_MCP_HTTP_MAX_HEADER_BYTES",
+        "AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND",
+        "--allow-non-local-bind",
+        "\"$@\"",
+    ];
+    for requirement in requirements {
+        if !content.contains(&requirement) {
+            return sidecar_check(
+                "package HTTP/SSE launcher",
+                ReadinessStatus::Fail,
+                format!("bin/agentk-sidecar-http is missing {requirement}"),
+            );
+        }
+    }
+    sidecar_check(
+        "package HTTP/SSE launcher",
+        ReadinessStatus::Pass,
+        "HTTP launcher preflights package state and exposes bounded local env controls",
+    )
+}
+
+fn check_sidecar_package_http_env(root: &Path) -> ReadinessCheck {
+    let content = match fs::read_to_string(root.join("deploy/env/sidecar-http.env.example")) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "package HTTP/SSE env",
+                ReadinessStatus::Fail,
+                format!("deploy/env/sidecar-http.env.example could not be read: {error}"),
+            );
+        }
+    };
+    let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
+    let requirements = vec![
+        "AGENTK_MCP_HTTP_HOST=127.0.0.1".to_string(),
+        "AGENTK_MCP_HTTP_PORT=9798".to_string(),
+        "AGENTK_MCP_HTTP_ENDPOINT=/mcp".to_string(),
+        "AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0".to_string(),
+        format!("{http_token_key}=CHANGE_ME"),
+        "AGENTK_MCP_HTTP_ALLOW_ORIGINS=".to_string(),
+        "AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS=16".to_string(),
+        "AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS=32".to_string(),
+        "AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS=900000".to_string(),
+        "AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS=30000".to_string(),
+        "AGENTK_MCP_HTTP_MAX_BODY_BYTES=65536".to_string(),
+        "AGENTK_MCP_HTTP_MAX_HEADER_BYTES=16384".to_string(),
+    ];
+    for requirement in requirements {
+        if !content.contains(&requirement) {
+            return sidecar_check(
+                "package HTTP/SSE env",
+                ReadinessStatus::Fail,
+                format!("sidecar-http.env.example is missing {requirement}"),
+            );
+        }
+    }
+    sidecar_check(
+        "package HTTP/SSE env",
+        ReadinessStatus::Pass,
+        "HTTP env example keeps loopback defaults, dummy token, and bounded session knobs",
+    )
+}
+
+fn check_sidecar_package_http_client_handoff(root: &Path) -> ReadinessCheck {
+    let content = match fs::read_to_string(root.join("clients/http-sse-handoff.md")) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "package HTTP/SSE handoff",
+                ReadinessStatus::Fail,
+                format!("clients/http-sse-handoff.md could not be read: {error}"),
+            );
+        }
+    };
+    let requirements = [
+        "http://127.0.0.1:9798/mcp",
+        "Claude",
+        "Codex",
+        "Cursor",
+        "Streamable HTTP",
+        "Accept: text/event-stream",
+        "Mcp-Session-Id",
+        "MCP-Protocol-Version",
+        "Last-Event-ID",
+        "finite authenticated buffered replay",
+        "Retained events per session: 128",
+        "not a hosted production MCP control plane",
+        "GET /readyz",
+        "GET /metrics",
+    ];
+    for requirement in requirements {
+        if !content.contains(requirement) {
+            return sidecar_check(
+                "package HTTP/SSE handoff",
+                ReadinessStatus::Fail,
+                format!("clients/http-sse-handoff.md is missing {requirement}"),
+            );
+        }
+    }
+    sidecar_check(
+        "package HTTP/SSE handoff",
+        ReadinessStatus::Pass,
+        "client handoff documents stdio defaults plus bounded HTTP/SSE alpha contract",
+    )
+}
+
+fn check_sidecar_package_http_readme(root: &Path) -> ReadinessCheck {
+    let content = match fs::read_to_string(root.join("README.md")) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "package HTTP/SSE README",
+                ReadinessStatus::Fail,
+                format!("README.md could not be read: {error}"),
+            );
+        }
+    };
+    let requirements = [
+        "clients/http-sse-handoff.md",
+        "bounded authenticated event-stream",
+        "Last-Event-ID",
+        "bounded local adapter",
+        "not a hosted production",
+    ];
+    for requirement in requirements {
+        if !content.contains(requirement) {
+            return sidecar_check(
+                "package HTTP/SSE README",
+                ReadinessStatus::Fail,
+                format!("README.md is missing {requirement}"),
+            );
+        }
+    }
+    sidecar_check(
+        "package HTTP/SSE README",
+        ReadinessStatus::Pass,
+        "package README points teams at the bounded HTTP/SSE handoff",
     )
 }
 
@@ -20296,6 +20571,8 @@ checksum, and install receipt without changing the package directory.
 - `bin/agentk-sidecar-http`: local Streamable HTTP MCP gateway launcher for
   clients that support the HTTP transport; it runs the package self-check before
   serving.
+- `bin/agentk-sidecar-http-handoff-check`: validates the packaged bounded local
+  HTTP/SSE handoff contract before team review or release evidence capture.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -20338,6 +20615,7 @@ checksum, and install receipt without changing the package directory.
 ./bin/agentk-sidecar
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
+./bin/agentk-sidecar-http-handoff-check --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -20524,6 +20802,10 @@ SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
 syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol checks,
 then return a bounded authenticated event-stream snapshot from the session
 buffer with `Last-Event-ID` resume.
+Use `clients/http-sse-handoff.md` plus
+`bin/agentk-sidecar-http-handoff-check --json` for the reviewer-facing bounded
+local adapter handoff. This package documents a bounded local adapter, not a hosted production
+MCP control plane.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push` are the packaged path from local review evidence to a
@@ -20584,7 +20866,13 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             {
                 "name": "streamable-http",
                 "launcher": "bin/agentk-sidecar-http",
-                "default_url": "http://127.0.0.1:9798/mcp"
+                "default_url": "http://127.0.0.1:9798/mcp",
+                "sse_alpha": {
+                    "mode": "finite-authenticated-buffered",
+                    "resume_header": "Last-Event-ID",
+                    "retained_events_per_session": SIDECAR_PACKAGE_HTTP_SSE_RETAINED_EVENTS,
+                    "hosted_control_plane": false
+                }
             }
         ],
         "dashboard": {
@@ -20927,6 +21215,18 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}" \
   ${ALLOW_NON_LOCAL_BIND_FLAG} \
   "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_http_handoff_check_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-http-handoff-check --root "$ROOT" "$@"
 "#
     .to_string()
 }
@@ -21634,6 +21934,91 @@ AGENTK_TRACE={} {} --json
         package_root.join("bin/agentk-store-github-send").display(),
         package_root.join("bin/agentk-store-email").display(),
         package_root.join("bin/agentk-store-email-send").display()
+    )
+}
+
+fn sidecar_packaged_http_sse_handoff(package_root: &Path) -> String {
+    let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
+    let authorization_header = ["Authorization:", " Bearer $", &http_token_key].concat();
+
+    format!(
+        r#"# AgentK Streamable HTTP/SSE Handoff
+
+This package includes a bounded local MCP Streamable HTTP gateway for teams
+that need a localhost sidecar in front of an MCP server. It is an AgentK
+firewall and flight recorder surface, not a hosted production MCP control plane.
+
+Default URL:
+
+```text
+http://127.0.0.1:9798/mcp
+```
+
+Start the packaged gateway:
+
+```sh
+AGENTK_BIN=agentk \
+{http_token_key}=CHANGE_ME_MCP_HTTP_BEARER_TOKEN \
+{http_launcher}
+```
+
+The launcher runs `{package_check}` before binding, loads the reviewed
+`sidecar/agentk-sidecar.toml`, and stays on loopback unless
+`AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=1` is set with a non-empty bearer token.
+Use `deploy/env/sidecar-http.env.example` as the supervisor-owned env template;
+keep real token values outside source control.
+
+Claude, Codex, and Cursor onboarding:
+
+- Use `clients/claude-desktop.mcp.json` for Claude Desktop stdio MCP.
+- Use `clients/codex-cursor-command.txt` for Codex/Cursor-style stdio command
+  wiring.
+- Use this HTTP/SSE handoff only when the MCP client explicitly supports
+  Streamable HTTP plus bearer-token headers.
+
+HTTP/SSE alpha contract:
+
+- `POST /mcp` accepts JSON-RPC requests with bounded body and header sizes.
+- `GET /mcp` requires `Accept: text/event-stream`, a syntactically valid
+  existing `Mcp-Session-Id`, the supported `MCP-Protocol-Version`, and the
+  same auth/origin policy as POST.
+- SSE is finite authenticated buffered replay: AgentK returns already mediated
+  session responses from a capped per-session buffer, not a hosted live control
+  plane.
+- Resume uses `Last-Event-ID`; invalid values fail closed with sanitized
+  `400 Bad Request`, and ids older than the retained buffer fail with
+  sanitized `410 Gone`.
+- Retained events per session: {retained_events}.
+- Operational probes are `GET /healthz`, `GET /readyz`, and `GET /metrics`;
+  readiness and metrics are redacted and do not echo bearer tokens, origins, or
+  rejected raw values.
+
+Minimal Streamable HTTP client shape:
+
+```text
+POST /mcp
+{authorization_header}
+Content-Type: application/json
+Accept: application/json
+MCP-Protocol-Version: 2025-11-25
+
+GET /mcp
+{authorization_header}
+Accept: text/event-stream
+Mcp-Session-Id: <session id returned by initialize>
+MCP-Protocol-Version: 2025-11-25
+Last-Event-ID: <optional last received event id>
+```
+
+Keep TLS, external identity, and network policy in the deployment layer. This
+package proves a bounded local sidecar path that teams can review, install, and
+audit today.
+"#,
+        http_launcher = package_root.join("bin/agentk-sidecar-http").display(),
+        package_check = package_root.join("bin/agentk-package-check").display(),
+        http_token_key = http_token_key,
+        authorization_header = authorization_header,
+        retained_events = SIDECAR_PACKAGE_HTTP_SSE_RETAINED_EVENTS,
     )
 }
 
@@ -22550,7 +22935,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 37);
+        assert_eq!(report.files.len(), 39);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -22562,6 +22947,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar").exists());
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
+        assert!(out.join("bin/agentk-sidecar-http-handoff-check").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -22577,6 +22963,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-store-email").exists());
         assert!(out.join("bin/agentk-store-email-send").exists());
         assert!(out.join("clients/claude-desktop.mcp.json").exists());
+        assert!(out.join("clients/http-sse-handoff.md").exists());
         assert!(out.join("storage/postgres-schema.sql").exists());
         assert!(
             out.join("deploy/systemd/agentk-sidecar-http.service")
@@ -22626,6 +23013,12 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(http_launcher.contains("--allow-non-local-bind"));
         assert!(http_launcher.contains("\"$@\""));
+        let http_handoff_check =
+            fs::read_to_string(out.join("bin/agentk-sidecar-http-handoff-check"))
+                .expect("http handoff check launcher should read");
+        assert!(http_handoff_check.contains("sidecar-package-http-handoff-check"));
+        assert!(http_handoff_check.contains("agentk-package-check"));
+        assert!(http_handoff_check.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -22780,6 +23173,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("origin-form path beginning"));
         assert!(package_readme.contains("with `/`, without query strings"));
         assert!(package_readme.contains("fixed-length"));
+        assert!(package_readme.contains("clients/http-sse-handoff.md"));
+        assert!(package_readme.contains("bounded local adapter"));
+        assert!(package_readme.contains("not a hosted production"));
         let package_manifest =
             fs::read_to_string(out.join("manifest.json")).expect("manifest should read");
         let package_manifest_json: serde_json::Value =
@@ -22803,6 +23199,22 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["default_transports"][2]["default_url"],
             serde_json::json!("http://127.0.0.1:9798/mcp")
+        );
+        assert_eq!(
+            package_manifest_json["default_transports"][2]["sse_alpha"]["mode"],
+            serde_json::json!("finite-authenticated-buffered")
+        );
+        assert_eq!(
+            package_manifest_json["default_transports"][2]["sse_alpha"]["resume_header"],
+            serde_json::json!("Last-Event-ID")
+        );
+        assert_eq!(
+            package_manifest_json["default_transports"][2]["sse_alpha"]["retained_events_per_session"],
+            serde_json::json!(SIDECAR_PACKAGE_HTTP_SSE_RETAINED_EVENTS)
+        );
+        assert_eq!(
+            package_manifest_json["default_transports"][2]["sse_alpha"]["hosted_control_plane"],
+            serde_json::json!(false)
         );
         assert!(
             package_manifest_json["deploy_templates"]
@@ -23123,6 +23535,20 @@ can_deny = ["*"]
         assert!(command.contains("agentk-store-github-send"));
         assert!(command.contains("agentk-store-email"));
         assert!(command.contains("agentk-store-email-send"));
+        let http_handoff = fs::read_to_string(out.join("clients/http-sse-handoff.md"))
+            .expect("HTTP/SSE handoff should read");
+        assert!(http_handoff.contains("Claude"));
+        assert!(http_handoff.contains("Codex"));
+        assert!(http_handoff.contains("Cursor"));
+        assert!(http_handoff.contains("Streamable HTTP"));
+        assert!(http_handoff.contains("http://127.0.0.1:9798/mcp"));
+        assert!(http_handoff.contains("Accept: text/event-stream"));
+        assert!(http_handoff.contains("Mcp-Session-Id"));
+        assert!(http_handoff.contains("MCP-Protocol-Version"));
+        assert!(http_handoff.contains("Last-Event-ID"));
+        assert!(http_handoff.contains("finite authenticated buffered replay"));
+        assert!(http_handoff.contains("Retained events per session: 128"));
+        assert!(http_handoff.contains("not a hosted production MCP control plane"));
         let sidecar_http_service =
             fs::read_to_string(out.join("deploy/systemd/agentk-sidecar-http.service"))
                 .expect("sidecar HTTP service should read");
@@ -23234,8 +23660,17 @@ can_deny = ["*"]
             check.name == "package deploy env examples" && check.status == ReadinessStatus::Pass
         }));
         assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package HTTP/SSE manifest" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package HTTP/SSE handoff" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
             check.name == "package lock" && check.status == ReadinessStatus::Pass
         }));
+        let http_handoff_report =
+            check_sidecar_package_http_handoff(&out).expect("HTTP/SSE handoff check should run");
+        assert!(http_handoff_report.passed);
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
