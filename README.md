@@ -345,7 +345,7 @@ origins must be exact `scheme://authority` values or `null`, without paths,
 queries, fragments, wildcards, whitespace, invalid ports, or unbracketed IPv6;
 built-in
 localhost/loopback origins only match exact hosts with optional numeric ports.
-SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
+SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
 syntactically valid `Mcp-Session-Id`, then fail closed with sanitized 501
 responses and a redacted counter until resumable SSE support lands. It also
 serves local `GET`/`HEAD` operational probes at `/healthz`,
@@ -503,8 +503,8 @@ LAN/public exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,
 `AGENTK_MCP_HTTP_MAX_HEADER_BYTES` to bound request headers, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` to bound accepted connection reads and
-writes. SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
-syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
+writes. SSE-shaped `GET` requests require `Accept: text/event-stream` plus an
+existing, syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
 checks, then fail closed with sanitized 501 responses and a redacted
 unsupported-SSE counter until resumable SSE support lands. All MCP HTTP `HEAD`
 responses omit bodies; `HEAD` on the MCP

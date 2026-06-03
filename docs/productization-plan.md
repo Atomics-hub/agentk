@@ -305,10 +305,10 @@ The safest first productization slice is the local team sidecar path:
     an unsupported method response with the normal `Allow` header.
     Operator-configured endpoints are validated before bind and must be clean
     origin-form paths that do not overlap operational probes. SSE-shaped `GET`
-    requests require `Accept: text/event-stream` plus a syntactically valid
-    `Mcp-Session-Id`, pass the same auth/origin/protocol checks, and fail closed
-    with sanitized 501 responses plus redacted unsupported-SSE metrics until
-    resumable SSE support exists.
+    requests require `Accept: text/event-stream` plus an existing,
+    syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
+    checks, and fail closed with sanitized 501 responses plus redacted
+    unsupported-SSE metrics until resumable SSE support exists.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
