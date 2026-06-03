@@ -3741,7 +3741,12 @@ fn mcp_http_response(
 ) -> Result<DashboardHttpResponse, AgentKError> {
     let path = request.target.split('?').next().unwrap_or_default();
     if path == "/healthz" || path == "/readyz" || path == "/metrics" {
-        let mut response = mcp_http_operational_response(request, state, path)?;
+        let mut response =
+            if path != "/healthz" && !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
+                mcp_http_token_required_response()
+            } else {
+                mcp_http_operational_response(request, state, path)?
+            };
         if request.method == "HEAD" {
             response.body.clear();
         }
@@ -3779,11 +3784,7 @@ fn mcp_http_response(
         return Ok(response);
     }
     if !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
-        let mut response = dashboard_http_text("401 Unauthorized", "MCP HTTP token is required\n");
-        response.headers.push((
-            "WWW-Authenticate".to_string(),
-            "Bearer realm=\"agentk-mcp\"".to_string(),
-        ));
+        let mut response = mcp_http_token_required_response();
         if let Some(origin) = cors_origin.as_deref() {
             mcp_http_apply_cors_headers(&mut response, origin);
         }
@@ -3817,6 +3818,15 @@ fn mcp_http_response(
         mcp_http_apply_cors_headers(&mut response, origin);
     }
     Ok(response)
+}
+
+fn mcp_http_token_required_response() -> DashboardHttpResponse {
+    let mut response = dashboard_http_text("401 Unauthorized", "MCP HTTP token is required\n");
+    response.headers.push((
+        "WWW-Authenticate".to_string(),
+        "Bearer realm=\"agentk-mcp\"".to_string(),
+    ));
+    response
 }
 
 fn mcp_http_operational_response(
@@ -5879,8 +5889,24 @@ done
         assert_eq!(health.content_type, "application/json");
         assert_eq!(health.body, br#"{"ok":true}"#);
 
-        let ready = mcp_http_response(
+        let unauthorized_ready = mcp_http_response(
             &dashboard_test_request("GET", "/readyz?probe=1", Vec::new()),
+            &state,
+        )
+        .expect("readyz auth failure should respond");
+        assert_eq!(unauthorized_ready.status, "401 Unauthorized");
+        assert_eq!(
+            response_header(&unauthorized_ready, "WWW-Authenticate"),
+            Some("Bearer realm=\"agentk-mcp\"")
+        );
+
+        let ready = mcp_http_response(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/readyz?probe=1",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
             &state,
         )
         .expect("readyz should respond");
@@ -5926,8 +5952,20 @@ done
         );
         assert_eq!(ready_json["auth_required"], serde_json::json!(true));
 
-        let metrics = mcp_http_response(
+        let unauthorized_metrics = mcp_http_response(
             &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &state,
+        )
+        .expect("metrics auth failure should respond");
+        assert_eq!(unauthorized_metrics.status, "401 Unauthorized");
+
+        let metrics = mcp_http_response(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/metrics",
+                [("X-AgentK-MCP-Token", "secret")],
+                Vec::new(),
+            ),
             &state,
         )
         .expect("metrics should respond");
@@ -5948,7 +5986,12 @@ done
         );
 
         let metrics_head = mcp_http_response(
-            &dashboard_test_request("HEAD", "/metrics", Vec::new()),
+            &dashboard_test_request_with_headers(
+                "HEAD",
+                "/metrics",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
             &state,
         )
         .expect("metrics HEAD should respond");
@@ -5956,7 +5999,12 @@ done
         assert!(metrics_head.body.is_empty());
 
         let ready_head = mcp_http_response(
-            &dashboard_test_request("HEAD", "/readyz", Vec::new()),
+            &dashboard_test_request_with_headers(
+                "HEAD",
+                "/readyz",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
             &state,
         )
         .expect("readyz HEAD should respond");
@@ -5964,7 +6012,12 @@ done
         assert!(ready_head.body.is_empty());
 
         let unsupported = mcp_http_response(
-            &dashboard_test_request("POST", "/readyz", Vec::new()),
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/readyz",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
             &state,
         )
         .expect("unsupported operational method should be handled");

@@ -15564,7 +15564,9 @@ exposure an explicit operator choice, and those binds also require a non-empty
 `GET /metrics` for redacted numeric gateway gauges. The readiness summary
 includes the supported MCP protocol version, active-session cap, idle timeout,
 request body cap, request header cap, configured stream-timeout, and
-allowed-origin counts without raw origin values.
+allowed-origin counts without raw origin values. When `AGENTK_MCP_HTTP_TOKEN`
+is set, `GET /readyz` and `GET /metrics` require the same bearer token as MCP
+requests; `GET /healthz` remains open for minimal liveness checks.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
 GET/SSE streams are currently rejected with 405 until the gateway grows
@@ -17019,6 +17021,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("GET /readyz"));
         assert!(package_readme.contains("GET /metrics"));
         assert!(package_readme.contains("redacted numeric gateway gauges"));
+        assert!(package_readme.contains("same bearer token as MCP"));
+        assert!(package_readme.contains("requests; `GET /healthz` remains open"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
