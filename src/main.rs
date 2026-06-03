@@ -1719,6 +1719,10 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP expectation and upgrade headers are not supported".to_string(),
             ));
+        } else if is_unsupported_websocket_http_header(&name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP websocket headers are not supported".to_string(),
+            ));
         } else if name == "connection" {
             if !is_supported_http_connection_header(&value) {
                 return Err(AgentKError::InvalidMcpRequest(
@@ -1909,6 +1913,14 @@ fn is_supported_http_connection_header(value: &str) -> bool {
 
 fn is_untrusted_forwarded_http_header(name: &str) -> bool {
     name == "forwarded" || name.starts_with("x-forwarded-") || name == "x-real-ip"
+}
+
+fn is_unsupported_websocket_http_header(name: &str) -> bool {
+    name == "sec-websocket-key"
+        || name == "sec-websocket-accept"
+        || name == "sec-websocket-version"
+        || name == "sec-websocket-protocol"
+        || name == "sec-websocket-extensions"
 }
 
 fn is_unsupported_cookie_http_header(name: &str) -> bool {
@@ -9219,6 +9231,23 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_websocket_handshake_headers() {
+        for raw_request in [
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Key: WEBSOCKET_SECRET_SHOULD_NOT_REFLECT\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Protocol: mcp\r\n\r\n".as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(
+                raw_request,
+                DASHBOARD_HTTP_MAX_BODY_BYTES,
+                DASHBOARD_HTTP_MAX_HEADER_BYTES,
+            );
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid dashboard HTTP request"));
+            assert!(!response.contains("WEBSOCKET_SECRET_SHOULD_NOT_REFLECT"));
+        }
+    }
+
+    #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
@@ -9431,6 +9460,12 @@ done
                 .as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Key: WEBSOCKET_SECRET_SHOULD_NOT_REFLECT\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Protocol: mcp\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                .as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: close, upgrade\r\n\r\n"
@@ -9466,6 +9501,7 @@ done
             assert!(!response.contains("SPOOFED"));
             assert!(!response.contains("COOKIE_SECRET_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("CONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT"));
+            assert!(!response.contains("WEBSOCKET_SECRET_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)

@@ -317,8 +317,10 @@ non-decimal `Content-Length` headers, LF-only line endings, control characters
 in header values, ambiguous MCP control headers, any `Transfer-Encoding` or
 `Content-Encoding` header, and `Expect`/`Upgrade` headers are rejected as
 invalid framing or control ambiguity; the gateway only accepts unencoded
-fixed-length request bodies. `Connection: close` is accepted, while other
-`Connection` values and hop-by-hop negotiation headers such as
+fixed-length request bodies. WebSocket handshake headers such as
+`Sec-WebSocket-Key` and `Sec-WebSocket-Protocol` are rejected because the
+gateway is not a WebSocket transport. `Connection: close` is accepted, while
+other `Connection` values and hop-by-hop negotiation headers such as
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` are rejected, as are proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate`. Forwarded proxy metadata such
 as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
@@ -493,8 +495,11 @@ including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Content-Encoding`, `Expect`, or `Upgrade` header are
 rejected as invalid framing. Request bodies must be unencoded fixed-length
-payloads. Only `Connection: close` is accepted; other `Connection` values plus
-`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
+payloads. WebSocket handshake headers such as `Sec-WebSocket-Key` and
+`Sec-WebSocket-Protocol` are rejected because this launcher serves the
+Streamable HTTP adapter, not WebSocket. Only `Connection: close` is accepted;
+other `Connection` values plus `Proxy-Connection`, `Keep-Alive`, `TE`, and
+`Trailer` headers are rejected.
 Forwarded proxy metadata such as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
 is rejected until AgentK has an explicit trusted-proxy mode.
 Ambient cookie headers such as `Cookie` and `Set-Cookie` are rejected because

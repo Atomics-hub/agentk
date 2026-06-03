@@ -16288,7 +16288,9 @@ characters in header values, and any `Transfer-Encoding`, `Content-Encoding`,
 accepts origin-form paths beginning with exactly one `/`, fragment-free,
 CRLF-delimited, unencoded fixed-length HTTP/1.x requests with exactly
 space-delimited request lines and token-shaped header names without whitespace
-before `:`.
+before `:`. WebSocket handshake headers such as `Sec-WebSocket-Key` and
+`Sec-WebSocket-Protocol` are rejected because the launcher serves Streamable
+HTTP, not WebSocket.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as
@@ -18141,6 +18143,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("unencoded fixed-length"));
         assert!(package_readme.contains("any `Transfer-Encoding`, `Content-Encoding`,"));
         assert!(package_readme.contains("`Upgrade` header"));
+        assert!(package_readme.contains("`Sec-WebSocket-Key`"));
+        assert!(package_readme.contains("not WebSocket"));
         assert!(package_readme.contains("`Expect`, or"));
         assert!(package_readme.contains("Only `Connection: close` is accepted"));
         assert!(package_readme.contains("unsupported hop-by-hop negotiation"));
