@@ -275,4 +275,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Omit bodies from MCP HTTP HEAD responses.
 - [x] Reject dashboard operational probe query strings.
 - [x] Reject MCP/dashboard HTTP network-path request targets.
+- [x] Reject unexpected dashboard HTTP request bodies.
 - [ ] Build production MCP gateway transport hardening.
