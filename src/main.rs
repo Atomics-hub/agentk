@@ -2007,7 +2007,7 @@ fn dashboard_http_html(
     permissions_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    if let Err(error) = dashboard_scope_query_param_error(request) {
+    if let Err(error) = dashboard_read_query_param_error(request) {
         return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
     }
     let reviewer = match dashboard_query_param(&request.target, "reviewer") {
@@ -2490,7 +2490,7 @@ fn dashboard_http_json(
     permissions_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    if let Err(error) = dashboard_scope_query_param_error(request) {
+    if let Err(error) = dashboard_read_query_param_error(request) {
         return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
     }
     let reviewer = match dashboard_query_param(&request.target, "reviewer") {
@@ -2772,9 +2772,20 @@ fn dashboard_reviewer_token_carrier_error(
     Ok(())
 }
 
-fn dashboard_scope_query_param_error(request: &DashboardHttpRequest) -> Result<(), AgentKError> {
-    let reviewer_count = dashboard_query_param_count(&request.target, "reviewer")?;
-    let requester_count = dashboard_query_param_count(&request.target, "requester")?;
+fn dashboard_read_query_param_error(request: &DashboardHttpRequest) -> Result<(), AgentKError> {
+    let counts = dashboard_query_param_counts(&request.target)?;
+    for name in counts.keys() {
+        if !matches!(name.as_str(), "reviewer" | "requester" | "reviewer_token") {
+            return Err(AgentKError::InvalidMcpRequest(
+                "dashboard review query parameters must be reviewer, requester, or reviewer_token"
+                    .to_string(),
+            ));
+        }
+    }
+    let reviewer_count = *counts.get("reviewer").unwrap_or(&0);
+    let requester_count = *counts.get("requester").unwrap_or(&0);
+    let reviewer_token_query_count = *counts.get("reviewer_token").unwrap_or(&0);
+    let reviewer_token_header_count = request.header_count("x-agentk-reviewer-token");
     for (name, count) in [("reviewer", reviewer_count), ("requester", requester_count)] {
         if count > 1 {
             return Err(AgentKError::InvalidMcpRequest(format!(
@@ -2782,9 +2793,19 @@ fn dashboard_scope_query_param_error(request: &DashboardHttpRequest) -> Result<(
             )));
         }
     }
+    if reviewer_token_query_count > 1 || reviewer_token_header_count > 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard reviewer token carrier must appear at most once".to_string(),
+        ));
+    }
     if reviewer_count == 1 && requester_count == 1 {
         return Err(AgentKError::InvalidMcpRequest(
             "dashboard scope query must use either reviewer or requester, not both".to_string(),
+        ));
+    }
+    if reviewer_count == 0 && (reviewer_token_query_count > 0 || reviewer_token_header_count > 0) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard reviewer token requires reviewer scope".to_string(),
         ));
     }
     Ok(())
@@ -2816,20 +2837,24 @@ fn dashboard_query_param(target: &str, name: &str) -> Result<Option<String>, Age
 }
 
 fn dashboard_query_param_count(target: &str, name: &str) -> Result<usize, AgentKError> {
+    Ok(*dashboard_query_param_counts(target)?
+        .get(name)
+        .unwrap_or(&0))
+}
+
+fn dashboard_query_param_counts(target: &str) -> Result<BTreeMap<String, usize>, AgentKError> {
     let Some((_, query)) = target.split_once('?') else {
-        return Ok(0);
+        return Ok(BTreeMap::new());
     };
-    let mut count = 0usize;
+    let mut counts = BTreeMap::new();
     for pair in query.split('&') {
         if pair.is_empty() {
             continue;
         }
         let (raw_name, _) = pair.split_once('=').unwrap_or((pair, ""));
-        if dashboard_query_decode(raw_name)? == name {
-            count += 1;
-        }
+        *counts.entry(dashboard_query_decode(raw_name)?).or_insert(0) += 1;
     }
-    Ok(count)
+    Ok(counts)
 }
 
 fn dashboard_query_decode(value: &str) -> Result<String, AgentKError> {
@@ -8670,7 +8695,7 @@ can_deny = []
         assert!(html_body.contains("data-agentk-decision=\"deny\""));
 
         let json = dashboard_http_response(
-            &dashboard_test_request("GET", "/api/review?refresh=1", Vec::new()),
+            &dashboard_test_request("GET", "/api/review", Vec::new()),
             &trace_path,
             &decisions_path,
             None,
@@ -8806,6 +8831,66 @@ can_deny = []
             serde_json::json!(full_open)
         );
 
+        let reviewer_token_param = "reviewer_token";
+        let unsupported_query_targets = [
+            "/api/review?refresh=VALUE_SHOULD_NOT_REFLECT",
+            "/?ignored=VALUE_SHOULD_NOT_REFLECT",
+        ];
+        for target in unsupported_query_targets {
+            let unsupported_query = dashboard_http_response(
+                &dashboard_test_request("GET", target, Vec::new()),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                None,
+                None,
+            );
+            assert_eq!(unsupported_query.status, "400 Bad Request");
+            let unsupported_query_body = String::from_utf8(unsupported_query.body)
+                .expect("unsupported query body should be utf8");
+            assert!(unsupported_query_body.contains("dashboard review query parameters"));
+            assert!(!unsupported_query_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+        }
+
+        let orphan_reviewer_token = dashboard_http_response(
+            &dashboard_test_request(
+                "GET",
+                format!("/api/review?{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT").as_str(),
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(orphan_reviewer_token.status, "400 Bad Request");
+        let orphan_reviewer_token_body = String::from_utf8(orphan_reviewer_token.body)
+            .expect("orphan reviewer token body should be utf8");
+        assert!(orphan_reviewer_token_body.contains("dashboard reviewer token"));
+        assert!(orphan_reviewer_token_body.contains("reviewer scope"));
+        assert!(!orphan_reviewer_token_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+
+        let orphan_reviewer_header = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/?requester=agent%3A%2F%2Fdemo%2Fteam-sidecar",
+                [("X-AgentK-Reviewer-Token", "VALUE_SHOULD_NOT_REFLECT")],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(orphan_reviewer_header.status, "400 Bad Request");
+        let orphan_reviewer_header_body = String::from_utf8(orphan_reviewer_header.body)
+            .expect("orphan reviewer header body should be utf8");
+        assert!(orphan_reviewer_header_body.contains("dashboard reviewer token"));
+        assert!(orphan_reviewer_header_body.contains("reviewer scope"));
+        assert!(!orphan_reviewer_header_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+
         let duplicate_scope_targets = [
             "/api/review?reviewer=VALUE_SHOULD_NOT_REFLECT&reviewer=VALUE_SHOULD_NOT_REFLECT",
             "/?reviewer=VALUE_SHOULD_NOT_REFLECT&reviewer=VALUE_SHOULD_NOT_REFLECT",
@@ -8851,7 +8936,6 @@ can_deny = []
             assert!(!mixed_scope_body.contains("VALUE_SHOULD_NOT_REFLECT"));
         }
 
-        let reviewer_token_param = "reviewer_token";
         let dual_reviewer_targets = [
             format!("/api/review?reviewer=tom&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT"),
             format!("/?reviewer=tom&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT"),

@@ -285,4 +285,6 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject unsupported dashboard decision JSON keys.
 - [x] Reject duplicate dashboard scope query selectors.
 - [x] Reject mixed dashboard scope query selectors.
+- [x] Reject unsupported dashboard review query parameters.
+- [x] Reject unscoped dashboard reviewer-token carriers.
 - [ ] Build production MCP gateway transport hardening.
