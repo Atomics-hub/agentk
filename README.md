@@ -625,7 +625,8 @@ store workflow after review; packaged runtime launchers run the package
 self-check before launching, serving, writing demo traces, rendering dashboards,
 or updating store artifacts. `agentk-package-check` also verifies
 baseline deploy-template hardening markers, including no-new-privileges systemd
-services and loopback-published, capability-dropped, read-only Compose services.
+services, a non-root package Dockerfile, and loopback-published,
+capability-dropped, read-only Compose services.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.

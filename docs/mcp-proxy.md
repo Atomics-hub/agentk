@@ -250,7 +250,8 @@ the package script.
 The package also includes systemd, launchd, and Docker Compose templates for the
 MCP HTTP gateway itself, not only the review dashboard. Package checks verify
 baseline deploy-template hardening markers, including no-new-privileges systemd
-services and loopback-published, capability-dropped, read-only Compose services.
+services, a non-root package Dockerfile, and loopback-published,
+capability-dropped, read-only Compose services.
 `sidecar-run` reads `agentk-sidecar.toml`, launches the configured downstream
 MCP server, copies only the env vars named in `[downstream].allow_env`, and
 writes the configured redacted JSONL audit log plus a
