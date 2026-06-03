@@ -1517,9 +1517,10 @@ fn read_dashboard_http_request_with_limits(
             "HTTP request headers are too large".to_string(),
         ));
     }
-    let (method, target) = parse_dashboard_http_request_line(&request_line)?;
+    let (method, target, version) = parse_dashboard_http_request_line(&request_line)?;
     let mut content_length = 0usize;
     let mut content_length_seen = false;
+    let mut host_seen = false;
     let mut headers = Vec::new();
 
     loop {
@@ -1575,8 +1576,21 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP transfer-encoding is not supported".to_string(),
             ));
+        } else if name == "host" {
+            if host_seen || !is_valid_http_host_header(&value) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP host header is invalid".to_string(),
+                ));
+            }
+            host_seen = true;
         }
         headers.push((name, value));
+    }
+
+    if version == "HTTP/1.1" && !host_seen {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP host header is required".to_string(),
+        ));
     }
 
     let mut body = vec![0u8; content_length];
@@ -1592,7 +1606,7 @@ fn read_dashboard_http_request_with_limits(
     }))
 }
 
-fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String), AgentKError> {
+fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, String), AgentKError> {
     let mut parts = line.split_whitespace();
     let Some(method) = parts.next() else {
         return Err(AgentKError::InvalidMcpRequest(
@@ -1619,7 +1633,7 @@ fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String), Age
             "HTTP request line is invalid".to_string(),
         ));
     }
-    Ok((method.to_string(), target.to_string()))
+    Ok((method.to_string(), target.to_string(), version.to_string()))
 }
 
 fn is_valid_http_header_name(name: &str) -> bool {
@@ -1644,6 +1658,13 @@ fn is_valid_http_header_name(name: &str) -> bool {
                         | b'~'
                 )
         })
+}
+
+fn is_valid_http_host_header(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace())
 }
 
 #[derive(Debug, Clone)]
@@ -6820,6 +6841,10 @@ done
             b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: \r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nHost: 127.0.0.1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: bad host\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBadHeader\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
