@@ -16104,7 +16104,10 @@ origin-form path beginning with `/`, without query strings, fragments,
 whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
 `/metrics`.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
-browser adapters. Non-loopback HTTP binds fail closed unless
+browser adapters. Values must be exact `scheme://authority` origins or `null`,
+without paths, queries, fragments, wildcards, whitespace, or invalid ports;
+built-in localhost and loopback origins only match exact hosts with optional
+numeric ports. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
 exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
@@ -17685,6 +17688,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("/readyz"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
+        assert!(package_readme.contains("exact `scheme://authority`"));
+        assert!(package_readme.contains("invalid ports"));
+        assert!(package_readme.contains("numeric ports"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));

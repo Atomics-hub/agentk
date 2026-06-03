@@ -329,7 +329,10 @@ origin-form paths beginning with `/`, without query strings, fragments,
 whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
 `/metrics`.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
-to permit additional browser origins beyond the built-in local defaults.
+to permit additional browser origins beyond the built-in local defaults. Extra
+origins must be exact `scheme://authority` values or `null`, without paths,
+queries, fragments, wildcards, whitespace, or invalid ports; built-in
+localhost/loopback origins only match exact hosts with optional numeric ports.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
 local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
@@ -440,11 +443,13 @@ and rejects unsupported `MCP-Protocol-Version` headers, oversized request
 bodies, or excess initialized sessions, and reaps idle sessions. `/readyz`
 reports the configured allowed-origin count without raw origin values;
 `/metrics` reports redacted numeric gateway gauges plus cumulative request,
-rejection, and session lifecycle counters for supervisors. Non-loopback HTTP
-binds fail closed unless `--allow-non-local-bind` is passed; the packaged
-launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
-those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
-lines or header lines, including invalid UTF-8, duplicate `Content-Length`
+rejection, and session lifecycle counters for supervisors. Additional allowed
+origins must be exact `scheme://authority` values or `null`, not wildcard or
+path-bearing URL patterns. Non-loopback HTTP binds fail closed unless
+`--allow-non-local-bind` is passed; the packaged launcher only passes it when
+`AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds also require a
+non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
+including invalid UTF-8, duplicate `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding` header are rejected as invalid framing; request lines must
 be exactly space-delimited, header names must be token-shaped without

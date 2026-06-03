@@ -264,4 +264,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Require CRLF MCP HTTP request and header line framing.
 - [x] Require strict MCP HTTP request-line spacing and header-name tokens.
 - [x] Reject MCP HTTP header value controls and all transfer-encoding headers.
+- [x] Validate MCP HTTP allowed-origin syntax and local-origin ports.
 - [ ] Build production MCP gateway transport hardening.
