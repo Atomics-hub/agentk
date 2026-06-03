@@ -25,7 +25,7 @@ use std::env;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -3985,7 +3985,7 @@ struct McpHttpGatewayState {
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
     metrics: Mutex<McpHttpGatewayMetrics>,
-    sessions: Mutex<BTreeMap<String, McpHttpSession>>,
+    sessions: Mutex<BTreeMap<String, Arc<Mutex<McpHttpSession>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -4233,9 +4233,18 @@ fn mcp_http_drain_active_sessions(state: &Arc<McpHttpGatewayState>) -> Result<us
     };
     let drained = sessions.len();
     for (session_id, session) in sessions {
+        let session = mcp_http_lock_session(&session)?;
         mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     }
     Ok(drained)
+}
+
+fn mcp_http_lock_session(
+    session: &Arc<Mutex<McpHttpSession>>,
+) -> Result<MutexGuard<'_, McpHttpSession>, AgentKError> {
+    session
+        .lock()
+        .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))
 }
 
 fn configure_mcp_http_stream(
@@ -4372,13 +4381,22 @@ fn mcp_http_prune_expired_sessions(state: &Arc<McpHttpGatewayState>) -> Result<u
         let mut sessions = state.sessions.lock().map_err(|_| {
             AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
         })?;
-        let expired_ids = sessions
-            .iter()
-            .filter(|(_, session)| {
-                now.duration_since(session.last_seen) >= state.session_idle_timeout
-            })
-            .map(|(session_id, _)| session_id.clone())
-            .collect::<Vec<_>>();
+        let mut expired_ids = Vec::new();
+        for (session_id, session) in sessions.iter() {
+            match session.try_lock() {
+                Ok(session) => {
+                    if now.duration_since(session.last_seen) >= state.session_idle_timeout {
+                        expired_ids.push(session_id.clone());
+                    }
+                }
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(AgentKError::InvalidMcpRequest(
+                        "MCP HTTP session lock poisoned".to_string(),
+                    ));
+                }
+            }
+        }
         for session_id in expired_ids {
             if let Some(session) = sessions.remove(&session_id) {
                 expired.push((session_id, session));
@@ -4386,6 +4404,7 @@ fn mcp_http_prune_expired_sessions(state: &Arc<McpHttpGatewayState>) -> Result<u
         }
     }
     for (session_id, session) in &expired {
+        let session = mcp_http_lock_session(session)?;
         mcp_http_write_session_outputs(session_id, &session.proxy, state)?;
     }
     if !expired.is_empty() {
@@ -5010,11 +5029,11 @@ fn mcp_http_post_response(
                 }
                 sessions.insert(
                     session_id,
-                    McpHttpSession {
+                    Arc::new(Mutex::new(McpHttpSession {
                         proxy,
                         protocol_version,
                         last_seen: Instant::now(),
-                    },
+                    })),
                 );
                 mcp_http_update_metrics(state, |metrics| {
                     metrics.sessions_created += 1;
@@ -5043,15 +5062,19 @@ fn mcp_http_post_response(
         return Ok(response);
     }
     let session_id = session_id.to_string();
-    let mut sessions = state.sessions.lock().map_err(|_| {
-        AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
-    })?;
-    let Some(session) = sessions.get_mut(&session_id) else {
-        return Ok(dashboard_http_text(
-            "404 Not Found",
-            "MCP session not found\n",
-        ));
+    let session = {
+        let sessions = state.sessions.lock().map_err(|_| {
+            AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
+        })?;
+        let Some(session) = sessions.get(&session_id) else {
+            return Ok(dashboard_http_text(
+                "404 Not Found",
+                "MCP session not found\n",
+            ));
+        };
+        Arc::clone(session)
     };
+    let mut session = mcp_http_lock_session(&session)?;
     if let Some(response) =
         mcp_http_protocol_version_error(request, Some(session.protocol_version.as_str()))
     {
@@ -5060,7 +5083,7 @@ fn mcp_http_post_response(
     session.last_seen = Instant::now();
     let response = session.proxy.handle_json_rpc_line(&request.body, false)?;
     mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
-    drop(sessions);
+    drop(session);
 
     if let Some(response) = response {
         Ok(DashboardHttpResponse {
@@ -5095,22 +5118,30 @@ fn mcp_http_delete_response(
         return Ok(response);
     }
     let session_id = session_id.to_string();
-    let mut sessions = state.sessions.lock().map_err(|_| {
-        AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
-    })?;
-    let Some(session) = sessions.remove(&session_id) else {
+    let Some(session) = ({
+        let mut sessions = state.sessions.lock().map_err(|_| {
+            AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
+        })?;
+        sessions.remove(&session_id)
+    }) else {
         return Ok(dashboard_http_text(
             "404 Not Found",
             "MCP session not found\n",
         ));
     };
+    let session_guard = mcp_http_lock_session(&session)?;
     if let Some(response) =
-        mcp_http_protocol_version_error(request, Some(session.protocol_version.as_str()))
+        mcp_http_protocol_version_error(request, Some(session_guard.protocol_version.as_str()))
     {
+        drop(session_guard);
+        let mut sessions = state.sessions.lock().map_err(|_| {
+            AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
+        })?;
         sessions.insert(session_id, session);
         return Ok(response);
     }
-    mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
+    mcp_http_write_session_outputs(&session_id, &session_guard.proxy, state)?;
+    drop(session_guard);
     mcp_http_update_metrics(state, |metrics| {
         metrics.sessions_deleted += 1;
     })?;
@@ -6379,6 +6410,8 @@ done
             .expect("session lock should not be poisoned")
             .get(&session_id)
             .expect("session should still exist")
+            .lock()
+            .expect("session lock should not be poisoned")
             .proxy
             .session_report()
             .client_messages_seen;
@@ -7575,7 +7608,7 @@ done
             "POST",
             "/mcp",
             headers,
-            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
         );
         let second_response =
             mcp_http_response(&second_initialize, &state).expect("session cap should be handled");
@@ -7609,6 +7642,75 @@ done
         let third_response =
             mcp_http_response(&second_initialize, &state).expect("new initialize should fit");
         assert_eq!(third_response.status, "200 OK");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_session_map_stays_available_while_one_session_is_busy() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-busy-session-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: 2,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let headers = [
+            ("Accept", "application/json, text/event-stream"),
+            ("Content-Type", "application/json"),
+            ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+        ];
+        let first_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            headers,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let first_response =
+            mcp_http_response(&first_initialize, &state).expect("first initialize should run");
+        assert_eq!(first_response.status, "200 OK");
+        let first_session_id = response_header(&first_response, "Mcp-Session-Id")
+            .expect("first initialize should return session")
+            .to_string();
+        let busy_session = Arc::clone(
+            state
+                .sessions
+                .lock()
+                .expect("sessions should lock")
+                .get(&first_session_id)
+                .expect("first session should exist"),
+        );
+        let busy_guard = busy_session
+            .lock()
+            .expect("session lock should not be poisoned");
+
+        let second_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            headers,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let second_response = mcp_http_response(&second_initialize, &state)
+            .expect("second initialize should not wait on busy first session");
+        assert_eq!(second_response.status, "200 OK");
+        let second_session_id = response_header(&second_response, "Mcp-Session-Id")
+            .expect("second initialize should return session");
+        assert_ne!(second_session_id, first_session_id);
+        assert_eq!(
+            state.sessions.lock().expect("sessions should lock").len(),
+            2
+        );
+        drop(busy_guard);
     }
 
     #[cfg(unix)]
@@ -7649,10 +7751,17 @@ done
             .expect("session should be returned")
             .to_string();
         {
-            let mut sessions = state.sessions.lock().expect("sessions should lock");
-            sessions
-                .get_mut(&session_id)
-                .expect("session should exist")
+            let session = Arc::clone(
+                state
+                    .sessions
+                    .lock()
+                    .expect("sessions should lock")
+                    .get(&session_id)
+                    .expect("session should exist"),
+            );
+            session
+                .lock()
+                .expect("session lock should not be poisoned")
                 .last_seen = Instant::now() - Duration::from_secs(1);
         }
 

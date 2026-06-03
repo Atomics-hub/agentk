@@ -331,9 +331,11 @@ probes and other MCP methods reject bodies before auth or session handling.
 Unsupported preflight methods or headers return sanitized 400 responses with
 CORS visibility for allowed origins. Idle sessions are reaped
 after the configured timeout so abandoned clients do not hold downstream
-processes forever. The MCP endpoint and operational probe paths are matched
-exactly; query strings on those paths are rejected before auth, session, or
-probe handling. Configured endpoints must be clean origin-form paths beginning
+processes forever. Each initialized HTTP session has its own runtime lock, so
+one busy downstream session does not block unrelated HTTP sessions from
+initializing or progressing. The MCP endpoint and operational probe paths are
+matched exactly; query strings on those paths are rejected before auth, session,
+or probe handling. Configured endpoints must be clean origin-form paths beginning
 with `/`, without query strings, fragments, whitespace, or control characters,
 and cannot reuse `/healthz`, `/readyz`, or `/metrics`.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
