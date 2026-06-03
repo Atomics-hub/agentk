@@ -1629,13 +1629,19 @@ fn read_dashboard_http_line(
     reader: &mut impl BufRead,
     line: &mut String,
 ) -> Result<usize, AgentKError> {
-    reader.read_line(line).map_err(|error| {
+    let bytes = reader.read_line(line).map_err(|error| {
         if error.kind() == io::ErrorKind::InvalidData {
             AgentKError::InvalidMcpRequest("HTTP request line is invalid".to_string())
         } else {
             AgentKError::Io(error)
         }
-    })
+    })?;
+    if bytes > 0 && !line.ends_with("\r\n") {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP line ending is invalid".to_string(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, String), AgentKError> {
@@ -7570,6 +7576,7 @@ done
 
         for raw_request in [
             b"GET /mcp\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\n\n".as_slice(),
             b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\xff\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
@@ -7580,6 +7587,8 @@ done
             b"GET /mcp HTTP/1.1\r\nHost: bad host\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBadHeader\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\n\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),

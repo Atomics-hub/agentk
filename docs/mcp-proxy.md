@@ -132,13 +132,14 @@ downstream process/capacity. `--max-body-bytes` bounds the POST body read before
 JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
 Malformed request lines or header lines, including invalid UTF-8, duplicate
-`Content-Length` headers, and `Transfer-Encoding` requests are rejected with
-sanitized 400 responses because the adapter only accepts origin-form,
-fixed-length HTTP/1.x requests with token-shaped header names. HTTP/1.1
-requests must include exactly one nonblank `Host` header, and duplicate `Host`
-headers are rejected for all accepted HTTP versions. EOF before the blank
-header terminator or before the declared fixed-length body completes is
-rejected as invalid framing. Duplicate MCP control headers used for
+`Content-Length` headers, LF-only line endings, and `Transfer-Encoding`
+requests are rejected with sanitized 400 responses because the adapter only
+accepts origin-form, CRLF-delimited, fixed-length HTTP/1.x requests with
+token-shaped header names. HTTP/1.1 requests must include exactly one nonblank
+`Host` header, and duplicate `Host` headers are rejected for all accepted HTTP
+versions. EOF before the blank header terminator or before the declared
+fixed-length body completes is rejected as invalid framing. Duplicate MCP
+control headers used for
 auth/session/protocol/origin/media negotiation are rejected with sanitized 400
 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
