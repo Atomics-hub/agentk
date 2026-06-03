@@ -229,7 +229,8 @@ The safest first productization slice is the local team sidecar path:
     duplicate MCP control headers, dual token-carrier headers, and invalid JSON
     POST media types before spawning downstream MCP work. HTTP/1.1 requests
     require exactly one nonblank `Host` header so gateway handling does not
-    guess across ambiguous authority metadata.
+    guess across ambiguous authority metadata. Truncated header sections and
+    short fixed-length bodies are rejected before request handling.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 

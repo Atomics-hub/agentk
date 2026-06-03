@@ -312,8 +312,10 @@ sessions with 429. POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, duplicate `Content-Length` headers,
 ambiguous MCP control headers, and `Transfer-Encoding` requests are rejected as
 invalid framing or control ambiguity. HTTP/1.1 requests must include exactly
-one nonblank `Host` header. Idle sessions are reaped after the configured
-timeout so abandoned clients do not hold downstream processes forever.
+one nonblank `Host` header. Incomplete header blocks and short fixed-length
+bodies are rejected before request handling. Idle sessions are reaped after the
+configured timeout so abandoned clients do not hold downstream processes
+forever.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
@@ -415,7 +417,8 @@ those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
 lines or header lines, duplicate `Content-Length` headers, and
 `Transfer-Encoding` requests are rejected as invalid framing; duplicate MCP
 control headers and dual token-carrier headers are rejected as ambiguous.
-HTTP/1.1 requests must include exactly one nonblank `Host` header. LAN/public
+HTTP/1.1 requests must include exactly one nonblank `Host` header, and
+truncated headers or bodies are rejected before request handling. LAN/public
 exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
