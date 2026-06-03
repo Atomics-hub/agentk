@@ -503,7 +503,9 @@ sidecar check. It also serves `/healthz` and a redacted `/readyz` for service
 supervisors; dashboard probe paths are matched exactly and reject query strings.
 Reviewers can record approve/deny decisions from the browser page, and the same
 permission-checked JSON decision API is available at
-`/api/approve` and `/api/deny`. Configure the dashboard admin-token environment
+`/api/approve` and `/api/deny`. Dashboard request bodies are accepted only on
+those decision endpoints, so review reads and probes cannot smuggle ignored
+payload bytes. Configure the dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
 requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped

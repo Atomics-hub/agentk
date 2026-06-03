@@ -1817,60 +1817,63 @@ fn dashboard_http_response(
         Some((route, _)) => (route, true),
         None => (request.target.as_str(), false),
     };
-    if has_query && dashboard_http_is_operational_path(route) {
-        return dashboard_http_text(
+    let mut response = if has_query && dashboard_http_is_operational_path(route) {
+        dashboard_http_text(
             "400 Bad Request",
             "dashboard operational probes must not include query strings\n",
-        );
-    }
-    let mut response = match (request.method.as_str(), route) {
-        ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            store_root,
-        ),
-        ("GET" | "HEAD", "/api/review") => dashboard_http_json(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            store_root,
-        ),
-        ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
-            status: "200 OK",
-            content_type: "application/json",
-            headers: Vec::new(),
-            body: br#"{"ok":true}"#.to_vec(),
-        },
-        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            store_root,
-        ),
-        ("POST", "/api/approve") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            store_root,
-            ApprovalDecision::Approve,
-        ),
-        ("POST", "/api/deny") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            store_root,
-            ApprovalDecision::Deny,
-        ),
-        ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
-        _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
+        )
+    } else if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
+        response
+    } else {
+        match (request.method.as_str(), route) {
+            ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
+                request,
+                trace_path,
+                decisions_path,
+                permissions_path,
+                store_root,
+            ),
+            ("GET" | "HEAD", "/api/review") => dashboard_http_json(
+                request,
+                trace_path,
+                decisions_path,
+                permissions_path,
+                store_root,
+            ),
+            ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
+                status: "200 OK",
+                content_type: "application/json",
+                headers: Vec::new(),
+                body: br#"{"ok":true}"#.to_vec(),
+            },
+            ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
+                trace_path,
+                decisions_path,
+                permissions_path,
+                admin_token,
+                store_root,
+            ),
+            ("POST", "/api/approve") => dashboard_http_decision(
+                request,
+                trace_path,
+                decisions_path,
+                permissions_path,
+                admin_token,
+                store_root,
+                ApprovalDecision::Approve,
+            ),
+            ("POST", "/api/deny") => dashboard_http_decision(
+                request,
+                trace_path,
+                decisions_path,
+                permissions_path,
+                admin_token,
+                store_root,
+                ApprovalDecision::Deny,
+            ),
+            ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
+            _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
+        }
     };
 
     if request.method == "HEAD" {
@@ -1881,6 +1884,25 @@ fn dashboard_http_response(
 
 fn dashboard_http_is_operational_path(path: &str) -> bool {
     matches!(path, "/healthz" | "/readyz")
+}
+
+fn dashboard_http_unexpected_body_error(
+    request: &DashboardHttpRequest,
+    route: &str,
+) -> Option<DashboardHttpResponse> {
+    if request.body.is_empty()
+        || matches!(
+            (request.method.as_str(), route),
+            ("POST", "/api/approve" | "/api/deny")
+        )
+    {
+        return None;
+    }
+
+    Some(dashboard_http_text(
+        "400 Bad Request",
+        "dashboard HTTP request bodies are only accepted on approval decision endpoints\n",
+    ))
 }
 
 fn dashboard_http_ready_response(
@@ -8879,6 +8901,39 @@ can_deny = []
         );
         assert_eq!(ready_head.status, "200 OK");
         assert!(ready_head.body.is_empty());
+
+        for (method, target) in [
+            ("GET", "/"),
+            ("GET", "/api/review"),
+            ("GET", "/healthz"),
+            ("POST", "/api/review"),
+            ("POST", "/missing"),
+        ] {
+            let body_request = dashboard_http_response(
+                &dashboard_test_request(method, target, b"BODY_SHOULD_NOT_REFLECT".to_vec()),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                Some("server-admin"),
+                Some(&store_root),
+            );
+            assert_eq!(body_request.status, "400 Bad Request");
+            let body_request_body =
+                String::from_utf8(body_request.body).expect("body error should be utf8");
+            assert!(body_request_body.contains("dashboard HTTP request bodies"));
+            assert!(!body_request_body.contains("BODY_SHOULD_NOT_REFLECT"));
+        }
+
+        let head_body_request = dashboard_http_response(
+            &dashboard_test_request("HEAD", "/readyz", b"BODY_SHOULD_NOT_REFLECT".to_vec()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(head_body_request.status, "400 Bad Request");
+        assert!(head_body_request.body.is_empty());
 
         for target in [
             "/healthz?probe=QUERY_SHOULD_NOT_REFLECT",
