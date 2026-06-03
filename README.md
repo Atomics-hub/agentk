@@ -302,8 +302,9 @@ stateful MCP endpoint:
 cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-concurrent-requests 16 --server-id poisoned-demo --trace-out .agentk/runs/mcp-proxy-http-demo.jsonl --session-report-out .agentk/runs/mcp-proxy-http-demo.session.json --command sh --arg examples/mcp-poisoned-server.sh
 ```
 
-The HTTP gateway validates Origin headers, answers allowed browser CORS
-preflights for `POST`/`DELETE` plus known MCP headers without requiring auth,
+The HTTP gateway validates Origin headers, requires an allowed `Origin` for
+browser CORS preflights, answers preflights for `POST`/`DELETE` plus known MCP
+headers without requiring auth,
 supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN` with one token header per request, returns
 `Mcp-Session-Id` on initialize, accepts subsequent POSTs with that session id,
@@ -328,16 +329,17 @@ literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
-Unsupported preflight methods or headers return sanitized 400 responses with
-CORS visibility for allowed origins. Idle sessions are reaped
-after the configured timeout so abandoned clients do not hold downstream
-processes forever. Each initialized HTTP session has its own runtime lock, so
-one busy downstream session does not block unrelated HTTP sessions from
-initializing or progressing. The MCP endpoint and operational probe paths are
-matched exactly; query strings on those paths are rejected before auth, session,
-or probe handling. Configured endpoints must be clean origin-form paths beginning
-with `/`, without query strings, fragments, whitespace, or control characters,
-and cannot reuse `/healthz`, `/readyz`, or `/metrics`.
+Missing preflight origins and unsupported preflight methods or headers return
+sanitized 400 responses, with CORS visibility only for allowed origins. Idle
+sessions are reaped after the configured timeout so abandoned clients do not
+hold downstream processes forever. Each initialized HTTP session has its own
+runtime lock, so one busy downstream session does not block unrelated HTTP
+sessions from initializing or progressing. The MCP endpoint and operational
+probe paths are matched exactly; query strings on those paths are rejected
+before auth, session, or probe handling. Configured endpoints must be clean
+origin-form paths beginning with `/`, without query strings, fragments,
+whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
+`/metrics`.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults. Extra
 origins must be exact `scheme://authority` values or `null`, without paths,
@@ -481,8 +483,9 @@ queries, fragments, invalid ports, or unbracketed IPv6 literals. Truncated
 headers or bodies are rejected before request handling. The configured header
 byte cap is enforced while each request line and header line is read, so
 oversized unterminated lines fail closed before unbounded buffering. Request
-bodies are accepted only on MCP `POST`, and CORS preflights are limited to `POST`,
-`DELETE`, and known MCP HTTP headers. MCP endpoint and operational probe paths
+bodies are accepted only on MCP `POST`, and CORS preflights must include an
+allowed `Origin` and are limited to `POST`, `DELETE`, and known MCP HTTP
+headers. MCP endpoint and operational probe paths
 are matched exactly; query strings on those paths are rejected before auth,
 session, or probe handling. The configured endpoint must be a clean origin-form
 path beginning with `/`, without query strings, fragments, whitespace, or

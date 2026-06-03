@@ -16127,8 +16127,8 @@ line and header line is read, so oversized unterminated lines fail closed before
 unbounded buffering. Duplicate MCP control headers and dual token-carrier headers
 are rejected as ambiguous, and POSTs require an exact `application/json` media
 type. Request bodies are accepted only on MCP `POST`.
-Allowed browser preflights must request `POST` or `DELETE` and only known MCP
-HTTP headers.
+Allowed browser preflights must include an allowed `Origin`, request `POST` or
+`DELETE`, and only known MCP HTTP headers.
 The configured MCP endpoint and operational probe paths are matched exactly;
 query strings on those paths are rejected before auth, session, or probe
 handling. The configured endpoint must be a clean origin-form path beginning
@@ -17801,7 +17801,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("Duplicate MCP control headers"));
         assert!(package_readme.contains("`application/json` media"));
         assert!(package_readme.contains("Request bodies are accepted only"));
-        assert!(package_readme.contains("preflights must request `POST` or `DELETE`"));
+        assert!(package_readme.contains("preflights must include an allowed `Origin`"));
+        assert!(package_readme.contains("request `POST` or"));
         assert!(package_readme.contains("endpoint and operational probe paths"));
         assert!(package_readme.contains("query strings on those paths"));
         assert!(package_readme.contains("origin-form path beginning"));
