@@ -1654,6 +1654,11 @@ fn read_dashboard_http_request_with_limits(
         return Ok(None);
     }
     let (method, target, _version) = parse_dashboard_http_request_line(&request_line)?;
+    if is_unsupported_proxy_http_method(&method) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP proxy and trace methods are not supported".to_string(),
+        ));
+    }
     let mut content_length = 0usize;
     let mut content_length_seen = false;
     let mut host_seen = false;
@@ -1917,6 +1922,10 @@ fn is_supported_http_connection_header(value: &str) -> bool {
 
 fn is_untrusted_forwarded_http_header(name: &str) -> bool {
     name == "forwarded" || name.starts_with("x-forwarded-") || name == "x-real-ip"
+}
+
+fn is_unsupported_proxy_http_method(method: &str) -> bool {
+    matches!(method, "CONNECT" | "TRACE" | "TRACK")
 }
 
 fn is_unsupported_method_override_http_header(name: &str) -> bool {
@@ -9295,6 +9304,23 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_proxy_and_trace_methods() {
+        for raw_request in [
+            b"CONNECT /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            b"TRACE /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            b"TRACK /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(
+                raw_request,
+                DASHBOARD_HTTP_MAX_BODY_BYTES,
+                DASHBOARD_HTTP_MAX_HEADER_BYTES,
+            );
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid dashboard HTTP request"));
+        }
+    }
+
+    #[test]
     fn dashboard_http_stream_rejects_ambient_cookie_headers() {
         for raw_request in [
             b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nCookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n".as_slice(),
@@ -9514,6 +9540,9 @@ done
             b"GET /mcp#FRAGMENT_SHOULD_NOT_REFLECT HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"CONNECT /mcp HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            b"TRACE /mcp HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
+            b"TRACK /mcp HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: \r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nHost: 127.0.0.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: bad host\r\n\r\n".as_slice(),

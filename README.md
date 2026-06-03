@@ -328,10 +328,11 @@ explicit trusted-proxy mode, and ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
 tokens instead. Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
-intermediaries. Request lines must be exactly space-delimited, request targets
-must begin with exactly one `/` and must not contain fragments, and header names
-must be token-shaped without whitespace before `:`. All HTTP gateway requests
-must include exactly one syntactically
+intermediaries. Proxy and trace methods such as `CONNECT`, `TRACE`, and `TRACK`
+are rejected before route handling. Request lines must be exactly
+space-delimited, request targets must begin with exactly one `/` and must not
+contain fragments, and header names must be token-shaped without whitespace
+before `:`. All HTTP gateway requests must include exactly one syntactically
 valid `Host` authority with no userinfo, wildcards, paths, queries, fragments,
 invalid ports, invalid DNS labels, percent escapes, or unbracketed IPv6
 literals.
@@ -511,6 +512,8 @@ the gateway uses explicit bearer/reviewer tokens instead.
 Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
 intermediaries.
+Proxy and trace methods such as `CONNECT`, `TRACE`, and `TRACK` are rejected
+before route handling.
 Request lines must be exactly space-delimited, header names must be
 token-shaped without whitespace before `:`, request targets must begin with
 exactly one `/` and must not contain fragments, and duplicate MCP control

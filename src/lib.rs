@@ -16606,7 +16606,8 @@ explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
 tokens instead. Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
-intermediaries.
+intermediaries. Proxy and trace methods such as `CONNECT`, `TRACE`, and
+`TRACK` are rejected before route handling.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid ports,
 invalid DNS labels, percent escapes, or unbracketed IPv6 literals.
