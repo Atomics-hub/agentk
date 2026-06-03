@@ -16068,7 +16068,9 @@ also include `reviewer_token`, and reviewer-scoped reads must choose one
 reviewer token carrier instead of sending both header and query forms; the
 chosen reviewer read carrier may appear only once. Scoped `reviewer` and
 `requester` query parameters may appear only once and cannot be combined in one
-request. Decisions are appended to
+request. Dashboard review routes reject unsupported query parameters, and
+reviewer-token carriers are accepted only on reviewer-scoped reads. Decisions
+are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
 dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
 and reviewer decisions maintain the live durable team store. Dashboard and MCP
@@ -17721,6 +17723,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("reviewer token carrier"));
         assert!(package_readme.contains("may appear only once"));
         assert!(package_readme.contains("Scoped `reviewer` and"));
+        assert!(package_readme.contains("unsupported query parameters"));
+        assert!(package_readme.contains("reviewer-scoped reads"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));
