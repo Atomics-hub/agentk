@@ -310,6 +310,8 @@ subsequent POSTs with that session id, rejects unsupported
 oversized request bodies with 413 and excess initialized sessions with 429.
 Idle sessions are reaped after the configured timeout so abandoned clients do
 not hold downstream processes forever.
+Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
+to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
 local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`; `/readyz`
 reports the supported MCP protocol version plus session, idle-timeout, and
@@ -401,7 +403,9 @@ initialized sessions, and reaps idle sessions. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This
-is a bounded local adapter, not a hosted production HTTP/SSE control plane.
+is a bounded local adapter, not a hosted production HTTP/SSE control plane. Set
+comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` when an approved browser adapter
+runs from a non-local origin.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
 `/api/review` JSON endpoint on `127.0.0.1:8765` after running the packaged
 sidecar check. Reviewers can record approve/deny decisions from the browser
