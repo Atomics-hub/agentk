@@ -287,9 +287,10 @@ The safest first productization slice is the local team sidecar path:
     contain fragments, and header names cannot carry whitespace before `:`. The
     HTTP gateway validates configured
     browser origins before bind, matches built-in localhost/loopback origins
-    only with optional numeric ports, rejects ambiguous duplicate MCP control
-    headers, dual token-carrier headers, and invalid JSON POST media types
-    before spawning downstream MCP work. Follow-up
+    only with optional numeric ports and a localhost/loopback request `Host`,
+    rejects ambiguous duplicate MCP control headers, dual token-carrier
+    headers, and invalid JSON POST media types before spawning downstream MCP
+    work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. All accepted HTTP requests require exactly one
     syntactically valid `Host` authority with no userinfo, wildcards, paths,
@@ -304,9 +305,11 @@ The safest first productization slice is the local team sidecar path:
     Browser CORS preflights must
     include an allowed `Origin`, treat sandboxed/file `Origin: null` as an
     explicit opt-in rather than a built-in local origin, and are restricted to
-    `POST`/`DELETE` and the known MCP HTTP header set. The MCP endpoint and
-    operational probe paths are matched exactly, and query strings on those
-    paths are rejected before auth, session, or probe handling. MCP
+    `POST`/`DELETE` and the known MCP HTTP header set. Built-in
+    localhost/loopback origins require a localhost/loopback request `Host`, so
+    non-local gateway names need explicit allowed-origin entries. The MCP
+    endpoint and operational probe paths are matched exactly, and query strings
+    on those paths are rejected before auth, session, or probe handling. MCP
     HTTP `HEAD` responses omit bodies, while `HEAD` on the MCP endpoint remains
     an unsupported method response with the normal `Allow` header.
     Operator-configured endpoints are validated before bind and must be clean
