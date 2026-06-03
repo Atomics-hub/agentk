@@ -183,7 +183,9 @@ The safest first productization slice is the local team sidecar path:
     durable team store. The packaged dashboard server launcher runs the
     package-local package validator before serving. The server exposes
     `/healthz` and redacted `/readyz` probes for service supervisors, and those
-    probe paths are matched exactly with query strings rejected. Dashboard
+    probe paths are matched exactly with query strings rejected. Non-loopback
+    dashboard binds require explicit `--allow-non-local-bind` opt-in plus a
+    non-empty dashboard admin token. Dashboard
     request bodies are accepted only on approval decision endpoints, so review
     reads and probes cannot carry ignored payload bytes, and those write
     endpoints require `Content-Type: application/json`. Decision endpoint paths

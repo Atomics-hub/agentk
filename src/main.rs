@@ -186,6 +186,9 @@ enum Command {
         /// Env var containing an optional dashboard write API bearer token.
         #[arg(long, default_value = "AGENTK_DASHBOARD_ADMIN_TOKEN")]
         admin_token_env: String,
+        /// Allow binding the dashboard server to a non-loopback host.
+        #[arg(long)]
+        allow_non_local_bind: bool,
         /// Optional durable team store root to refresh on dashboard reads and writes.
         #[arg(long)]
         store_root: Option<PathBuf>,
@@ -751,6 +754,7 @@ fn run() -> Result<(), AgentKError> {
             host,
             port,
             admin_token_env,
+            allow_non_local_bind,
             store_root,
         } => dashboard_serve(
             path,
@@ -759,6 +763,7 @@ fn run() -> Result<(), AgentKError> {
             host,
             port,
             admin_token_env,
+            allow_non_local_bind,
             store_root,
         ),
         Command::StoreExport {
@@ -1400,6 +1405,7 @@ fn dashboard_serve(
     host: String,
     port: u16,
     admin_token_env: String,
+    allow_non_local_bind: bool,
     store_root: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
     if !is_safe_env_name(&admin_token_env) {
@@ -1411,6 +1417,7 @@ fn dashboard_serve(
     let admin_token = env::var(&admin_token_env)
         .ok()
         .filter(|value| !value.is_empty());
+    validate_dashboard_bind_security(&host, allow_non_local_bind, admin_token.is_some())?;
     let bind = format!("{host}:{port}");
     let listener = TcpListener::bind(&bind)?;
     println!("AgentK dashboard server");
@@ -1450,6 +1457,27 @@ fn dashboard_serve(
         }
     }
 
+    Ok(())
+}
+
+fn validate_dashboard_bind_security(
+    host: &str,
+    allow_non_local_bind: bool,
+    admin_configured: bool,
+) -> Result<(), AgentKError> {
+    if is_loopback_bind_host(host) {
+        return Ok(());
+    }
+    if !allow_non_local_bind {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard host must be loopback unless --allow-non-local-bind is set".to_string(),
+        ));
+    }
+    if !admin_configured {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard non-loopback binds require a non-empty admin token".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -8453,6 +8481,7 @@ done
             host,
             port,
             admin_token_env,
+            allow_non_local_bind,
             store_root,
         }) = dashboard_serve.command
         else {
@@ -8469,10 +8498,44 @@ done
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 8787);
         assert_eq!(admin_token_env, "AGENTK_DASHBOARD_ADMIN_TOKEN");
+        assert!(!allow_non_local_bind);
         assert_eq!(
             store_root,
             Some(PathBuf::from("agentk-sidecar/.agentk/team-store"))
         );
+
+        let dashboard_serve_non_local = Cli::try_parse_from([
+            "agentk",
+            "dashboard-serve",
+            "agentk-sidecar/.agentk/runs/team-sidecar.jsonl",
+            "--host",
+            "0.0.0.0",
+            "--allow-non-local-bind",
+        ])
+        .expect("dashboard server non-local opt-in should parse");
+        let Some(Command::DashboardServe {
+            allow_non_local_bind,
+            ..
+        }) = dashboard_serve_non_local.command
+        else {
+            panic!("expected dashboard-serve command");
+        };
+        assert!(allow_non_local_bind);
+
+        validate_dashboard_bind_security("127.0.0.1", false, false)
+            .expect("loopback dashboard bind should not require auth");
+        validate_dashboard_bind_security("localhost", false, false)
+            .expect("localhost dashboard bind should not require auth");
+        let missing_opt_in = validate_dashboard_bind_security("0.0.0.0", false, true)
+            .expect_err("non-loopback dashboard bind should require opt-in")
+            .to_string();
+        assert!(missing_opt_in.contains("--allow-non-local-bind"));
+        let missing_admin = validate_dashboard_bind_security("0.0.0.0", true, false)
+            .expect_err("non-loopback dashboard bind should require admin auth")
+            .to_string();
+        assert!(missing_admin.contains("non-empty admin token"));
+        validate_dashboard_bind_security("0.0.0.0", true, true)
+            .expect("non-loopback dashboard bind should allow explicit authenticated opt-in");
 
         let store_export = Cli::try_parse_from([
             "agentk",
