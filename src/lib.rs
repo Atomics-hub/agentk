@@ -16091,11 +16091,12 @@ header values, and any `Transfer-Encoding` header are rejected as invalid
 framing because the adapter only accepts origin-form, CRLF-delimited,
 fixed-length HTTP/1.x requests with exactly space-delimited request lines and
 token-shaped header names without whitespace before `:`. HTTP/1.1 requests must
-include exactly one nonblank `Host` header. Incomplete header blocks and short
-fixed-length bodies are rejected before handling. Duplicate MCP control headers
-and dual token-carrier headers are rejected as ambiguous, and POSTs require an
-exact `application/json` media type. Request bodies are accepted only on MCP
-`POST`.
+include exactly one syntactically valid `Host` authority with no userinfo,
+wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
+literals. Incomplete header blocks and short fixed-length bodies are rejected
+before handling. Duplicate MCP control headers and dual token-carrier headers
+are rejected as ambiguous, and POSTs require an exact `application/json` media
+type. Request bodies are accepted only on MCP `POST`.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers.
 The configured MCP endpoint path is matched exactly; query strings are rejected
@@ -16105,9 +16106,9 @@ whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
 `/metrics`.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Values must be exact `scheme://authority` origins or `null`,
-without paths, queries, fragments, wildcards, whitespace, or invalid ports;
-built-in localhost and loopback origins only match exact hosts with optional
-numeric ports. Non-loopback HTTP binds fail closed unless
+without paths, queries, fragments, wildcards, whitespace, invalid ports, or
+unbracketed IPv6 literals; built-in localhost and loopback origins only match
+exact hosts with optional numeric ports. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
 exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
@@ -17693,6 +17694,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("exact `scheme://authority`"));
         assert!(package_readme.contains("invalid ports"));
         assert!(package_readme.contains("numeric ports"));
+        assert!(package_readme.contains("unbracketed IPv6"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
@@ -17720,7 +17722,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("CRLF-delimited"));
         assert!(package_readme.contains("space-delimited request lines"));
         assert!(package_readme.contains("without whitespace before `:`"));
-        assert!(package_readme.contains("nonblank `Host` header"));
+        assert!(package_readme.contains("syntactically valid `Host` authority"));
+        assert!(package_readme.contains("unbracketed IPv6"));
         assert!(package_readme.contains("Incomplete header blocks"));
         assert!(package_readme.contains("Duplicate MCP control headers"));
         assert!(package_readme.contains("`application/json` media"));

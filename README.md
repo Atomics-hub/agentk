@@ -316,7 +316,9 @@ Malformed request lines or header lines, including invalid UTF-8, duplicate
 values, ambiguous MCP control headers, and any `Transfer-Encoding` header are
 rejected as invalid framing or control ambiguity. Request lines must be exactly
 space-delimited, and header names must be token-shaped without whitespace
-before `:`. HTTP/1.1 requests must include exactly one nonblank `Host` header.
+before `:`. HTTP/1.1 requests must include exactly one syntactically valid
+`Host` authority with no userinfo, wildcards, paths, queries, fragments,
+invalid ports, or unbracketed IPv6 literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
@@ -331,7 +333,8 @@ whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults. Extra
 origins must be exact `scheme://authority` values or `null`, without paths,
-queries, fragments, wildcards, whitespace, or invalid ports; built-in
+queries, fragments, wildcards, whitespace, invalid ports, or unbracketed IPv6;
+built-in
 localhost/loopback origins only match exact hosts with optional numeric ports.
 SSE-shaped `GET` requests require `Accept: text/event-stream`, then fail closed
 with sanitized 501 responses and a redacted counter until resumable SSE support
@@ -447,7 +450,8 @@ reports the configured allowed-origin count without raw origin values;
 `/metrics` reports redacted numeric gateway gauges plus cumulative request,
 rejection, and session lifecycle counters for supervisors. Additional allowed
 origins must be exact `scheme://authority` values or `null`, not wildcard or
-path-bearing URL patterns. Non-loopback HTTP binds fail closed unless
+path-bearing URL patterns, and IPv6 origins must be bracketed. Non-loopback
+HTTP binds fail closed unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes it when
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds also require a
 non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
@@ -458,8 +462,10 @@ be exactly space-delimited, header names must be token-shaped without
 whitespace before `:`, and duplicate MCP control headers and dual token-carrier
 headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
-truncated headers or bodies are rejected before request handling. Request bodies
-are accepted only on MCP `POST`, and CORS preflights are limited to `POST`,
+that Host value must be a clean authority with no userinfo, wildcards, paths,
+queries, fragments, invalid ports, or unbracketed IPv6 literals. Truncated
+headers or bodies are rejected before request handling. Request bodies are
+accepted only on MCP `POST`, and CORS preflights are limited to `POST`,
 `DELETE`, and known MCP HTTP headers. The configured endpoint must be a clean
 origin-form path beginning with `/`, without query strings, fragments,
 whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
