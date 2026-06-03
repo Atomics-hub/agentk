@@ -3864,6 +3864,12 @@ fn mcp_http_response(
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
     let path = request.target.split('?').next().unwrap_or_default();
+    if path == state.endpoint && request.target.contains('?') {
+        return Ok(dashboard_http_text(
+            "400 Bad Request",
+            "MCP HTTP endpoint must not include a query string\n",
+        ));
+    }
     if (path == state.endpoint || matches!(path, "/readyz" | "/metrics"))
         && let Some(response) = mcp_http_control_header_error(request)
     {
@@ -5993,6 +5999,70 @@ done
             let response_body = String::from_utf8_lossy(&response.body);
             assert!(response_body.contains("MCP HTTP request bodies"));
             assert!(!response_body.contains("BODY_SHOULD_NOT_REFLECT"));
+        }
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_endpoint_query_strings() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let cases = vec![
+            dashboard_test_request_with_headers(
+                "POST",
+                "/mcp?session=QUERY_SHOULD_NOT_REFLECT",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                ],
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+            ),
+            dashboard_test_request_with_headers(
+                "OPTIONS",
+                "/mcp?origin=QUERY_SHOULD_NOT_REFLECT",
+                [
+                    ("Origin", "http://localhost:5173"),
+                    ("Access-Control-Request-Method", "POST"),
+                ],
+                Vec::new(),
+            ),
+            dashboard_test_request_with_headers(
+                "DELETE",
+                "/mcp?session=QUERY_SHOULD_NOT_REFLECT",
+                [
+                    ("Authorization", "Bearer secret"),
+                    ("Mcp-Session-Id", "session-a"),
+                ],
+                Vec::new(),
+            ),
+        ];
+
+        for request in cases {
+            let response =
+                mcp_http_response(&request, &state).expect("endpoint query should fail closed");
+            assert_eq!(response.status, "400 Bad Request");
+            let response_body = String::from_utf8_lossy(&response.body);
+            assert!(response_body.contains("query string"));
+            assert!(!response_body.contains("QUERY_SHOULD_NOT_REFLECT"));
         }
         assert!(
             state

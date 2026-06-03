@@ -233,7 +233,9 @@ The safest first productization slice is the local team sidecar path:
     short fixed-length bodies are rejected before request handling. Request
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control
     paths cannot smuggle ignored payload bytes. Browser CORS preflights are
-    restricted to `POST`/`DELETE` and the known MCP HTTP header set.
+    restricted to `POST`/`DELETE` and the known MCP HTTP header set. The MCP
+    endpoint path is matched exactly and query strings are rejected before auth
+    or session handling.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
