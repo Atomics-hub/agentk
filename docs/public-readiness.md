@@ -39,6 +39,9 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run --locked -- release-candidate-smoke --json` passes and writes
       package, archive, install receipt, release manifest, demo trace, dashboard,
       durable store, notification payload, and deploy-template artifacts.
+- [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
+      dist/agentk-sidecar --json` passes and the reviewer handoff includes
+      `clients/http-sse-handoff.md` with bounded local HTTP/SSE alpha language.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] Errors do not leak sensitive syscall payloads by default.
@@ -106,6 +109,7 @@ cargo test
 cargo clippy --all-targets --all-features
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
