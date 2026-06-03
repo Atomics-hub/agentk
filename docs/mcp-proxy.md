@@ -155,7 +155,7 @@ unsupported hop-by-hop negotiation. Proxy auth headers such as
 gateway is not an HTTP proxy credential boundary.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid
-ports, or unbracketed IPv6 literals.
+ports, invalid DNS labels, percent escapes, or unbracketed IPv6 literals.
 EOF before the blank header terminator or before the declared fixed-length body
 completes is rejected as invalid framing. The configured header byte cap is
 enforced while each request line and header line is read, so oversized
@@ -170,10 +170,11 @@ preflights, DELETEs, GET/SSE placeholders, and operational probes reject bodies
 before route fallback, auth, session, or probe handling.
 Additional `--allow-origin` or `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values must be
 exact `scheme://authority` origins or `null`; paths, queries, fragments,
-wildcards, whitespace, invalid ports, invalid bracketed IP literals, and
-unbracketed IPv6 literals are rejected before bind. Built-in localhost and
-loopback origins only match exact hosts with optional numeric ports and require
-a localhost/loopback `Host` authority on the request. Sandboxed/file
+wildcards, whitespace, invalid ports, invalid bracketed IP literals, invalid
+DNS labels, percent escapes, and unbracketed IPv6 literals are rejected before
+bind. Built-in localhost and loopback origins only match exact hosts with
+optional numeric ports and require a localhost/loopback `Host` authority on the
+request. Sandboxed/file
 `Origin: null` requests are allowed only when `null` is explicitly configured.
 Browser adapters that call a non-local gateway name must be listed explicitly.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or

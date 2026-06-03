@@ -295,8 +295,9 @@ The safest first productization slice is the local team sidecar path:
     shape before lookup. All accepted HTTP requests require exactly one
     syntactically valid `Host` authority with no userinfo, wildcards, paths,
     queries, fragments, invalid ports, invalid bracketed IP literals, or
-    unbracketed IPv6 literals, so gateway handling does not guess across
-    ambiguous authority metadata. Truncated header sections and short
+    invalid DNS labels, percent escapes, or unbracketed IPv6 literals, so
+    gateway handling does not guess across ambiguous authority metadata.
+    Truncated header sections and short
     fixed-length bodies are rejected before request handling. The configured
     header byte cap is enforced
     while each request line and header line is read, so oversized unterminated

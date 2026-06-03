@@ -16295,8 +16295,9 @@ unsupported hop-by-hop negotiation. Proxy auth headers such as
 gateway is not an HTTP proxy credential boundary.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid ports,
-or unbracketed IPv6 literals. Incomplete header blocks and short fixed-length
-bodies are rejected before handling. The configured header byte cap is enforced
+invalid DNS labels, percent escapes, or unbracketed IPv6 literals.
+Incomplete header blocks and short fixed-length bodies are rejected before handling. The
+configured header byte cap is enforced
 while each request line and header line is read, so oversized unterminated lines
 fail closed before unbounded buffering. Duplicate MCP control headers and dual
 token-carrier headers are rejected as ambiguous, and POSTs require an exact
@@ -16312,9 +16313,10 @@ with `/`, without query strings, fragments, whitespace, or control characters,
 and cannot reuse `/healthz`, `/readyz`, or `/metrics`.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Values must be exact `scheme://authority` origins or `null`,
-without paths, queries, fragments, wildcards, whitespace, invalid ports, or
-unbracketed IPv6 literals; built-in localhost and loopback origins only match
-exact hosts with optional numeric ports. Non-loopback HTTP binds fail closed unless
+without paths, queries, fragments, wildcards, whitespace, invalid ports, invalid
+bracketed IP literals, invalid DNS labels, percent escapes, or unbracketed IPv6
+literals; built-in localhost and loopback origins only match exact hosts with optional numeric ports.
+Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
 exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
@@ -18088,6 +18090,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("counts without raw origin values"));
         assert!(package_readme.contains("exact `scheme://authority`"));
         assert!(package_readme.contains("invalid ports"));
+        assert!(package_readme.contains("invalid DNS labels"));
+        assert!(package_readme.contains("percent escapes"));
         assert!(package_readme.contains("numeric ports"));
         assert!(package_readme.contains("unbracketed IPv6"));
         assert!(package_readme.contains("Proxy-Authorization"));
