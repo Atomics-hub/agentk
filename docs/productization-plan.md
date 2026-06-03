@@ -211,8 +211,9 @@ The safest first productization slice is the local team sidecar path:
     The packaged sidecar now includes `bin/agentk-sidecar-http`, which loads the
     reviewed bundle, enforces local endpoint/origin/session checks, supports an
     optional bearer token from environment, enforces HTTP protocol-version
-    headers, caps active sessions, bounds request bodies, reports local
-    health/readiness for service supervisors, and writes trace/session evidence.
+    headers, caps active sessions, reaps idle sessions, bounds request bodies,
+    reports local health/readiness for service supervisors, and writes
+    trace/session evidence.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
