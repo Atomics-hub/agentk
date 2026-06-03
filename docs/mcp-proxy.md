@@ -122,7 +122,9 @@ payloads or raw origin values. `--max-active-sessions` caps initialized MCP HTTP
 sessions and excess initialize requests return 429.
 `--session-idle-timeout-ms` reaps idle initialized sessions and releases their
 downstream process/capacity. `--max-body-bytes` bounds the POST body read before
-JSON parsing; oversized requests return 413. Use `sidecar-serve-http --root
+JSON parsing; oversized requests return 413. `--stream-timeout-ms` applies
+read/write deadlines to accepted HTTP connections so stalled clients do not hold
+gateway worker threads indefinitely. Use `sidecar-serve-http --root
 <bundle>` or the packaged `bin/agentk-sidecar-http` launcher for a reviewed
 sidecar bundle. HTTP bind hosts must be loopback unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes that flag

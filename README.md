@@ -407,10 +407,11 @@ also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. LAN/public exposure is
 therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
-`AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior. This
-is a bounded local adapter, not a hosted production HTTP/SSE control plane. Set
-comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` when an approved browser adapter
-runs from a non-local origin.
+`AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior, and
+`AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` to bound accepted connection reads and
+writes. This is a bounded local adapter, not a hosted production HTTP/SSE
+control plane. Set comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` when an
+approved browser adapter runs from a non-local origin.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
 `/api/review` JSON endpoint on `127.0.0.1:8765` after running the packaged
 sidecar check. It also serves `/healthz` and a redacted `/readyz` for service

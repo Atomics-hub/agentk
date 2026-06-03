@@ -15552,6 +15552,8 @@ direct JSON responses, Origin validation, browser CORS preflight handling,
 `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
+`AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
+operations.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
@@ -15559,8 +15561,8 @@ exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
 `GET /healthz` for liveness and `GET /readyz` for a redacted readiness summary
 that includes the supported MCP protocol version, active-session cap, idle
-timeout, request body cap, and configured allowed-origin count without raw
-origin values.
+timeout, request body cap, configured stream-timeout, and allowed-origin counts
+without raw origin values.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 
@@ -15747,6 +15749,7 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --max-body-bytes "${AGENTK_MCP_HTTP_MAX_BODY_BYTES:-65536}" \
   --max-active-sessions "${AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS:-32}" \
   --session-idle-timeout-ms "${AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS:-900000}" \
+  --stream-timeout-ms "${AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS:-30000}" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}" \
   ${ALLOW_NON_LOCAL_BIND_FLAG}
 "#
@@ -16981,6 +16984,7 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_BODY_BYTES"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(http_launcher.contains("--allow-non-local-bind"));
@@ -16994,7 +16998,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
-        assert!(package_readme.contains("configured allowed-origin count"));
+        assert!(package_readme.contains("allowed-origin counts"));
+        assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
+        assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
