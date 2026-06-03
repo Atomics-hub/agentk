@@ -1519,7 +1519,7 @@ fn read_dashboard_http_request_with_limits(
 ) -> Result<Option<DashboardHttpRequest>, AgentKError> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
-    let mut bytes = reader.read_line(&mut request_line)?;
+    let mut bytes = read_dashboard_http_line(&mut reader, &mut request_line)?;
     if bytes == 0 {
         return Ok(None);
     }
@@ -1536,7 +1536,7 @@ fn read_dashboard_http_request_with_limits(
 
     loop {
         let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
+        let read = read_dashboard_http_line(&mut reader, &mut line)?;
         if read == 0 {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP header block is incomplete".to_string(),
@@ -1623,6 +1623,19 @@ fn read_dashboard_http_request_with_limits(
         headers,
         body,
     }))
+}
+
+fn read_dashboard_http_line(
+    reader: &mut impl BufRead,
+    line: &mut String,
+) -> Result<usize, AgentKError> {
+    reader.read_line(line).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            AgentKError::InvalidMcpRequest("HTTP request line is invalid".to_string())
+        } else {
+            AgentKError::Io(error)
+        }
+    })
 }
 
 fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, String), AgentKError> {
@@ -7558,6 +7571,7 @@ done
         for raw_request in [
             b"GET /mcp\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\xff\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\n\r\n".as_slice(),
@@ -7569,6 +7583,7 @@ done
             b"POST /mcp HTTP/1.1\r\n Folded: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\n: nope\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBad Name: nope\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: \xff\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),

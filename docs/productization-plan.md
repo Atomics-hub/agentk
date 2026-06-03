@@ -236,11 +236,11 @@ The safest first productization slice is the local team sidecar path:
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics
     for supervisors, tracks redacted cumulative request/rejection/session
     lifecycle counters, uses constant-time bearer-token checks, and writes
-    trace/session evidence. The HTTP parser rejects malformed request/header
-    lines, duplicate `Content-Length` headers, and unsupported transfer
-    encodings with sanitized 400 responses. The HTTP gateway rejects ambiguous
-    duplicate MCP control headers, dual token-carrier headers, and invalid JSON
-    POST media types before spawning downstream MCP work. Follow-up
+    trace/session evidence. The HTTP parser rejects malformed or non-UTF-8
+    request/header lines, duplicate `Content-Length` headers, and unsupported
+    transfer encodings with sanitized 400 responses. The HTTP gateway rejects
+    ambiguous duplicate MCP control headers, dual token-carrier headers, and
+    invalid JSON POST media types before spawning downstream MCP work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. HTTP/1.1 requests
     require exactly one nonblank `Host` header so gateway handling does not
