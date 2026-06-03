@@ -248,9 +248,11 @@ The safest first productization slice is the local team sidecar path:
     work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. HTTP/1.1 requests
-    require exactly one nonblank `Host` header so gateway handling does not
-    guess across ambiguous authority metadata. Truncated header sections and
-    short fixed-length bodies are rejected before request handling. Request
+    require exactly one syntactically valid `Host` authority with no userinfo,
+    wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
+    literals, so gateway handling does not guess across ambiguous authority
+    metadata. Truncated header sections and short fixed-length bodies are
+    rejected before request handling. Request
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control
     paths cannot smuggle ignored payload bytes. Browser CORS preflights are
     restricted to `POST`/`DELETE` and the known MCP HTTP header set. The MCP

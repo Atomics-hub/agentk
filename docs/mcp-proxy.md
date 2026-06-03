@@ -141,10 +141,11 @@ values, and any `Transfer-Encoding` header are rejected with sanitized 400
 responses because the adapter only accepts origin-form, CRLF-delimited,
 fixed-length HTTP/1.x requests with exactly space-delimited request lines and
 token-shaped header names without whitespace before `:`. HTTP/1.1 requests must
-include exactly one nonblank `Host` header, and duplicate `Host` headers are
-rejected for all accepted HTTP versions. EOF before the blank header terminator
-or before the declared fixed-length body completes is rejected as invalid
-framing. Duplicate MCP control headers used for
+include exactly one syntactically valid `Host` authority with no userinfo,
+wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
+literals; duplicate `Host` headers are rejected for all accepted HTTP versions.
+EOF before the blank header terminator or before the declared fixed-length body
+completes is rejected as invalid framing. Duplicate MCP control headers used for
 auth/session/protocol/origin/media negotiation are rejected with sanitized 400
 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
@@ -155,9 +156,9 @@ accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
 operational probes reject bodies before auth, session, or probe handling.
 Additional `--allow-origin` or `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values must be
 exact `scheme://authority` origins or `null`; paths, queries, fragments,
-wildcards, whitespace, and invalid ports are rejected before bind. Built-in
-localhost and loopback origins only match exact hosts with optional numeric
-ports.
+wildcards, whitespace, invalid ports, and unbracketed IPv6 literals are
+rejected before bind. Built-in localhost and loopback origins only match exact
+hosts with optional numeric ports.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers; unsupported requested methods or headers return sanitized 400
 responses with CORS visibility for allowed origins. The configured MCP endpoint

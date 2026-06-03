@@ -266,4 +266,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject MCP HTTP header value controls and all transfer-encoding headers.
 - [x] Validate MCP HTTP allowed-origin syntax and local-origin ports.
 - [x] Fail closed and count unsupported MCP HTTP SSE GET requests.
+- [x] Validate MCP/dashboard HTTP Host and origin authority syntax.
 - [ ] Build production MCP gateway transport hardening.
