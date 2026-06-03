@@ -9652,7 +9652,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         ),
         alpha_release_source_surface(
             root,
-            "production MCP gateway adapters",
+            "bounded local MCP gateway adapters",
             "stdio, TCP, and local Streamable HTTP sidecar launchers are present",
             &[
                 ("src/main.rs", "sidecar-serve-tcp"),
@@ -17452,12 +17452,12 @@ fn parse_sidecar_package_archive_checksum(
     if file_name.contains('/') || file_name.contains('\\') {
         return Err("checksum filename must not contain path separators".to_string());
     }
-    if let Some(expected_file_name) = archive_file_name {
-        if file_name != expected_file_name {
-            return Err(format!(
-                "checksum filename must be {expected_file_name}, got {file_name}"
-            ));
-        }
+    if let Some(expected_file_name) = archive_file_name
+        && file_name != expected_file_name
+    {
+        return Err(format!(
+            "checksum filename must be {expected_file_name}, got {file_name}"
+        ));
     }
     Ok(sha256.to_ascii_lowercase())
 }
@@ -17843,13 +17843,13 @@ fn write_ustar_header<W: Write>(
 }
 
 fn ustar_split_path(path: &str) -> Result<(&str, &str), AgentKError> {
-    if path.as_bytes().len() <= 100 {
+    if path.len() <= 100 {
         return Ok(("", path));
     }
     for (index, _) in path.match_indices('/').rev() {
         let prefix = &path[..index];
         let name = &path[index + 1..];
-        if !name.is_empty() && prefix.as_bytes().len() <= 155 && name.as_bytes().len() <= 100 {
+        if !name.is_empty() && prefix.len() <= 155 && name.len() <= 100 {
             return Ok((prefix, name));
         }
     }
@@ -20522,8 +20522,8 @@ When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
 SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
 syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol checks,
-then fail closed with sanitized 501 responses and a redacted unsupported-SSE
-counter until the gateway grows resumable SSE support.
+then return a bounded authenticated event-stream snapshot from the session
+buffer with `Last-Event-ID` resume.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push` are the packaged path from local review evidence to a
@@ -22735,9 +22735,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("Accept: text/event-stream"));
         assert!(package_readme.contains("existing,"));
         assert!(package_readme.contains("syntactically valid `Mcp-Session-Id`"));
-        assert!(package_readme.contains("sanitized 501"));
-        assert!(package_readme.contains("unsupported-SSE"));
-        assert!(package_readme.contains("counter until"));
+        assert!(package_readme.contains("bounded authenticated event-stream"));
+        assert!(package_readme.contains("Last-Event-ID"));
+        assert!(package_readme.contains("event-stream snapshot"));
         assert!(package_readme.contains("Malformed request lines or header lines"));
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));
@@ -23280,7 +23280,7 @@ can_deny = ["*"]
                     8,
                 )
                 .expect("tar size should be octal");
-                let padded_size = ((size + 511) / 512) * 512;
+                let padded_size = size.div_ceil(512) * 512;
                 offset += 512 + padded_size as usize;
             }
             names
@@ -29819,7 +29819,7 @@ reviewer = "tom"
             report
                 .shipped_surfaces
                 .iter()
-                .any(|item| item.name == "production MCP gateway adapters")
+                .any(|item| item.name == "bounded local MCP gateway adapters")
         );
         assert!(
             report

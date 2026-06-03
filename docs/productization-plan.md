@@ -418,8 +418,9 @@ The safest first productization slice is the local team sidecar path:
     origin-form paths that do not overlap operational probes. SSE-shaped `GET`
     requests require `Accept: text/event-stream` plus an existing,
     syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
-    checks, and fail closed with sanitized 501 responses plus redacted
-    unsupported-SSE metrics until resumable SSE support exists.
+    checks. The bounded local alpha serves already mediated session responses
+    from a capped per-session buffer and supports `Last-Event-ID` resume while
+    keeping metrics redacted.
     Full hosted HTTP/SSE transport, TLS, and live external identity verification
     remain future production-gateway work.
 

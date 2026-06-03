@@ -23,7 +23,7 @@ use agentk::{
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -39,6 +39,7 @@ const MCP_HTTP_DEFAULT_MAX_HEADER_BYTES: usize = 16 * 1024;
 const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
+const MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION: usize = 128;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
@@ -1008,7 +1009,7 @@ fn run() -> Result<(), AgentKError> {
             max_header_bytes,
             allow_non_local_bind,
             store_root,
-        } => dashboard_serve(
+        } => dashboard_serve(DashboardServeOptions {
             path,
             decisions,
             permissions,
@@ -1021,7 +1022,7 @@ fn run() -> Result<(), AgentKError> {
             max_header_bytes,
             allow_non_local_bind,
             store_root,
-        ),
+        }),
         Command::StoreExport {
             path,
             decisions,
@@ -1787,7 +1788,7 @@ fn dashboard(
     Ok(())
 }
 
-fn dashboard_serve(
+struct DashboardServeOptions {
     path: PathBuf,
     decisions: Option<PathBuf>,
     permissions: Option<PathBuf>,
@@ -1800,7 +1801,35 @@ fn dashboard_serve(
     max_header_bytes: usize,
     allow_non_local_bind: bool,
     store_root: Option<PathBuf>,
-) -> Result<(), AgentKError> {
+}
+
+struct DashboardHttpContext<'a> {
+    trace_path: &'a PathBuf,
+    decisions_path: &'a PathBuf,
+    permissions_path: Option<&'a PathBuf>,
+    identity_path: Option<&'a PathBuf>,
+    admin_token: Option<&'a str>,
+    admin_read_required: bool,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
+    store_root: Option<&'a PathBuf>,
+}
+
+fn dashboard_serve(options: DashboardServeOptions) -> Result<(), AgentKError> {
+    let DashboardServeOptions {
+        path,
+        decisions,
+        permissions,
+        identity,
+        host,
+        port,
+        admin_token_env,
+        stream_timeout_ms,
+        max_body_bytes,
+        max_header_bytes,
+        allow_non_local_bind,
+        store_root,
+    } = options;
     if !is_safe_env_name(&admin_token_env) {
         return Err(AgentKError::InvalidMcpRequest(
             "admin-token-env must be a safe environment variable name".to_string(),
@@ -1845,21 +1874,19 @@ fn dashboard_serve(
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let result =
-                    configure_dashboard_http_stream(&stream, stream_timeout).and_then(|_| {
-                        handle_dashboard_http_stream(
-                            &mut stream,
-                            &path,
-                            &decisions,
-                            permissions.as_ref(),
-                            identity.as_ref(),
-                            admin_token.as_deref(),
-                            admin_read_required,
-                            max_body_bytes,
-                            max_header_bytes,
-                            store_root.as_ref(),
-                        )
-                    });
+                let context = DashboardHttpContext {
+                    trace_path: &path,
+                    decisions_path: &decisions,
+                    permissions_path: permissions.as_ref(),
+                    identity_path: identity.as_ref(),
+                    admin_token: admin_token.as_deref(),
+                    admin_read_required,
+                    max_body_bytes,
+                    max_header_bytes,
+                    store_root: store_root.as_ref(),
+                };
+                let result = configure_dashboard_http_stream(&stream, stream_timeout)
+                    .and_then(|_| handle_dashboard_http_stream(&mut stream, &context));
                 if let Err(error) = result {
                     eprintln!("dashboard request failed: {error}");
                 }
@@ -1930,54 +1957,38 @@ fn configure_dashboard_http_stream(
 
 fn handle_dashboard_http_stream(
     stream: &mut TcpStream,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    admin_read_required: bool,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> Result<(), AgentKError> {
-    let request =
-        match read_dashboard_http_request_with_limits(stream, max_body_bytes, max_header_bytes) {
-            Ok(Some(request)) => request,
-            Ok(None) => return Ok(()),
-            Err(AgentKError::InvalidMcpRequest(message))
-                if message == "HTTP request headers are too large" =>
-            {
-                let response = dashboard_http_headers_too_large_response(max_header_bytes);
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(AgentKError::InvalidMcpRequest(message))
-                if message == "HTTP request body is too large" =>
-            {
-                let response = dashboard_http_payload_too_large_response(max_body_bytes);
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(AgentKError::InvalidMcpRequest(_)) => {
-                let response =
-                    dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-    let response = dashboard_http_response_with_read_auth_and_limits(
-        &request,
-        trace_path,
-        decisions_path,
-        permissions_path,
-        identity_path,
-        admin_token,
-        admin_read_required,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+    let request = match read_dashboard_http_request_with_limits(
+        stream,
+        context.max_body_bytes,
+        context.max_header_bytes,
+    ) {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(()),
+        Err(AgentKError::InvalidMcpRequest(message))
+            if message == "HTTP request headers are too large" =>
+        {
+            let response = dashboard_http_headers_too_large_response(context.max_header_bytes);
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(AgentKError::InvalidMcpRequest(message))
+            if message == "HTTP request body is too large" =>
+        {
+            let response = dashboard_http_payload_too_large_response(context.max_body_bytes);
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(AgentKError::InvalidMcpRequest(_)) => {
+            let response =
+                dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let response = dashboard_http_response_with_read_auth_and_limits(&request, context);
     write_dashboard_http_response(stream, &response)?;
     Ok(())
 }
@@ -2452,18 +2463,18 @@ fn dashboard_http_response(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    dashboard_http_response_with_read_auth_and_limits(
-        request,
+    let context = DashboardHttpContext {
         trace_path,
         decisions_path,
         permissions_path,
-        None,
+        identity_path: None,
         admin_token,
-        false,
-        DASHBOARD_HTTP_MAX_BODY_BYTES,
-        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        admin_read_required: false,
+        max_body_bytes: DASHBOARD_HTTP_MAX_BODY_BYTES,
+        max_header_bytes: DASHBOARD_HTTP_MAX_HEADER_BYTES,
         store_root,
-    )
+    };
+    dashboard_http_response_with_read_auth_and_limits(request, &context)
 }
 
 #[cfg(test)]
@@ -2476,31 +2487,23 @@ fn dashboard_http_response_with_read_auth(
     admin_read_required: bool,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    dashboard_http_response_with_read_auth_and_limits(
-        request,
+    let context = DashboardHttpContext {
         trace_path,
         decisions_path,
         permissions_path,
-        None,
+        identity_path: None,
         admin_token,
         admin_read_required,
-        DASHBOARD_HTTP_MAX_BODY_BYTES,
-        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        max_body_bytes: DASHBOARD_HTTP_MAX_BODY_BYTES,
+        max_header_bytes: DASHBOARD_HTTP_MAX_HEADER_BYTES,
         store_root,
-    )
+    };
+    dashboard_http_response_with_read_auth_and_limits(request, &context)
 }
 
 fn dashboard_http_response_with_read_auth_and_limits(
     request: &DashboardHttpRequest,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    admin_read_required: bool,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> DashboardHttpResponse {
     let (route, has_query) = match request.target.split_once('?') {
         Some((route, _)) => (route, true),
@@ -2516,28 +2519,17 @@ fn dashboard_http_response_with_read_auth_and_limits(
             "400 Bad Request",
             "dashboard decision endpoints must not include query strings\n",
         )
-    } else if admin_read_required && dashboard_http_requires_admin_read(route) {
+    } else if context.admin_read_required && dashboard_http_requires_admin_read(route) {
         match dashboard_verify_admin_token_for_request(
             request,
-            admin_token,
+            context.admin_token,
             "dashboard admin token is required for read requests",
         ) {
             Ok(()) => {
                 if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
                     response
                 } else {
-                    dashboard_http_route_response(
-                        request,
-                        route,
-                        trace_path,
-                        decisions_path,
-                        permissions_path,
-                        identity_path,
-                        admin_token,
-                        max_body_bytes,
-                        max_header_bytes,
-                        store_root,
-                    )
+                    dashboard_http_route_response(request, route, context)
                 }
             }
             Err((status, error)) => dashboard_http_text(status, &format!("{error}\n")),
@@ -2545,18 +2537,7 @@ fn dashboard_http_response_with_read_auth_and_limits(
     } else if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
         response
     } else {
-        dashboard_http_route_response(
-            request,
-            route,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            identity_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        )
+        dashboard_http_route_response(request, route, context)
     };
 
     if request.method == "HEAD" {
@@ -2568,31 +2549,24 @@ fn dashboard_http_response_with_read_auth_and_limits(
 fn dashboard_http_route_response(
     request: &DashboardHttpRequest,
     route: &str,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> DashboardHttpResponse {
     match (request.method.as_str(), route) {
         ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
             request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            identity_path,
-            store_root,
+            context.trace_path,
+            context.decisions_path,
+            context.permissions_path,
+            context.identity_path,
+            context.store_root,
         ),
         ("GET" | "HEAD", "/api/review") => dashboard_http_json(
             request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            identity_path,
-            store_root,
+            context.trace_path,
+            context.decisions_path,
+            context.permissions_path,
+            context.identity_path,
+            context.store_root,
         ),
         ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
             status: "200 OK",
@@ -2600,46 +2574,12 @@ fn dashboard_http_route_response(
             headers: Vec::new(),
             body: br#"{"ok":true}"#.to_vec(),
         },
-        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
-            trace_path,
-            decisions_path,
-            permissions_path,
-            identity_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        ),
-        ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(
-            trace_path,
-            decisions_path,
-            permissions_path,
-            identity_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        ),
-        ("POST", "/api/approve") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            identity_path,
-            store_root,
-            ApprovalDecision::Approve,
-        ),
-        ("POST", "/api/deny") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            identity_path,
-            store_root,
-            ApprovalDecision::Deny,
-        ),
+        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(context),
+        ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(context),
+        ("POST", "/api/approve") => {
+            dashboard_http_decision(request, context, ApprovalDecision::Approve)
+        }
+        ("POST", "/api/deny") => dashboard_http_decision(request, context, ApprovalDecision::Deny),
         ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
         _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
     }
@@ -2679,26 +2619,8 @@ fn dashboard_http_unexpected_body_error(
     ))
 }
 
-fn dashboard_http_ready_response(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardHttpResponse {
-    let state = dashboard_operational_state(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        identity_path,
-        admin_token,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+fn dashboard_http_ready_response(context: &DashboardHttpContext<'_>) -> DashboardHttpResponse {
+    let state = dashboard_operational_state(context);
     match serde_json::to_vec(&serde_json::json!({
         "ready": state.ready,
         "trace_present": state.trace_present,
@@ -2729,26 +2651,8 @@ fn dashboard_http_ready_response(
     }
 }
 
-fn dashboard_http_metrics_response(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardHttpResponse {
-    let state = dashboard_operational_state(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        identity_path,
-        admin_token,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+fn dashboard_http_metrics_response(context: &DashboardHttpContext<'_>) -> DashboardHttpResponse {
+    let state = dashboard_operational_state(context);
     DashboardHttpResponse {
         status: "200 OK",
         content_type: "text/plain; version=0.0.4; charset=utf-8",
@@ -2757,26 +2661,17 @@ fn dashboard_http_metrics_response(
     }
 }
 
-fn dashboard_operational_state(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    identity_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardOperationalState {
-    let trace_present = trace_path.exists();
-    let decision_log_present = decisions_path.exists();
-    let permissions_configured = permissions_path.is_some();
-    let permissions_present = permissions_path.is_some_and(|path| path.exists());
+fn dashboard_operational_state(context: &DashboardHttpContext<'_>) -> DashboardOperationalState {
+    let trace_present = context.trace_path.exists();
+    let decision_log_present = context.decisions_path.exists();
+    let permissions_configured = context.permissions_path.is_some();
+    let permissions_present = context.permissions_path.is_some_and(|path| path.exists());
     let permissions_ready = !permissions_configured || permissions_present;
-    let identity_configured = identity_path.is_some();
-    let identity_present = identity_path.is_some_and(|path| path.exists());
+    let identity_configured = context.identity_path.is_some();
+    let identity_present = context.identity_path.is_some_and(|path| path.exists());
     let identity_ready = !identity_configured || identity_present;
-    let store_root_configured = store_root.is_some();
-    let store_root_present = store_root.is_some_and(|path| path.exists());
+    let store_root_configured = context.store_root.is_some();
+    let store_root_present = context.store_root.is_some_and(|path| path.exists());
     DashboardOperationalState {
         ready: trace_present && permissions_ready && identity_ready,
         trace_present,
@@ -2789,9 +2684,9 @@ fn dashboard_operational_state(
         identity_ready,
         store_root_configured,
         store_root_present,
-        admin_required: admin_token.is_some(),
-        max_body_bytes,
-        max_header_bytes,
+        admin_required: context.admin_token.is_some(),
+        max_body_bytes: context.max_body_bytes,
+        max_header_bytes: context.max_header_bytes,
     }
 }
 
@@ -3568,31 +3463,26 @@ fn dashboard_scope_review_for_requester(
 
 fn dashboard_http_decision(
     request: &DashboardHttpRequest,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    identity_path: Option<&PathBuf>,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
     decision: ApprovalDecision,
 ) -> DashboardHttpResponse {
-    if admin_token.is_some()
+    if context.admin_token.is_some()
         && let Err(error) = dashboard_admin_token_carrier_error(request)
     {
         return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
     }
-    if let Err(error) = dashboard_verify_admin_token(request, admin_token) {
+    if let Err(error) = dashboard_verify_admin_token(request, context.admin_token) {
         return dashboard_http_text("401 Unauthorized", &format!("{error}\n"));
     }
     if let Some(response) = dashboard_http_json_content_type_error(request) {
         return response;
     }
     match dashboard_record_decision(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        identity_path,
-        store_root,
+        context.trace_path,
+        context.decisions_path,
+        context.permissions_path,
+        context.identity_path,
+        context.store_root,
         decision,
         &request.body,
     ) {
@@ -5948,7 +5838,11 @@ struct McpHttpGatewayMetrics {
     origin_rejections: usize,
     method_rejections: usize,
     preflight_rejections: usize,
-    sse_unsupported_requests: usize,
+    sse_stream_requests: usize,
+    sse_resume_requests: usize,
+    sse_invalid_resume_requests: usize,
+    sse_evicted_resume_requests: usize,
+    sse_events_returned: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
     body_too_large_responses: usize,
@@ -5962,6 +5856,14 @@ struct McpHttpSession {
     proxy: McpSubprocessProxy,
     protocol_version: String,
     last_seen: Instant,
+    next_sse_event_id: u64,
+    sse_events: VecDeque<McpHttpSseEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct McpHttpSseEvent {
+    id: u64,
+    data: Vec<u8>,
 }
 
 fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentKError> {
@@ -6309,11 +6211,11 @@ fn mcp_http_preflight_response(origin: &str) -> DashboardHttpResponse {
     mcp_http_apply_cors_headers(&mut response, origin);
     response.headers.push((
         "Access-Control-Allow-Methods".to_string(),
-        "POST, DELETE, OPTIONS".to_string(),
+        "POST, GET, DELETE, OPTIONS".to_string(),
     ));
     response.headers.push((
         "Access-Control-Allow-Headers".to_string(),
-        "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version"
+        "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID"
             .to_string(),
     ));
     response
@@ -6332,7 +6234,7 @@ fn mcp_http_apply_cors_headers(response: &mut DashboardHttpResponse, origin: &st
         .push(("Vary".to_string(), "Origin".to_string()));
     response.headers.push((
         "Access-Control-Expose-Headers".to_string(),
-        "Mcp-Session-Id, WWW-Authenticate".to_string(),
+        "Mcp-Session-Id, Last-Event-ID, WWW-Authenticate".to_string(),
     ));
 }
 
@@ -6459,9 +6361,10 @@ fn mcp_http_response_inner(
         _ => {
             let mut response =
                 dashboard_http_text("405 Method Not Allowed", "method not allowed\n");
-            response
-                .headers
-                .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
+            response.headers.push((
+                "Allow".to_string(),
+                "POST, GET, DELETE, OPTIONS".to_string(),
+            ));
             Ok(response)
         }
     }?;
@@ -6499,12 +6402,6 @@ fn mcp_http_record_response_metrics(
             "401 Unauthorized" => metrics.auth_rejections += 1,
             "403 Forbidden" => metrics.origin_rejections += 1,
             "405 Method Not Allowed" => metrics.method_rejections += 1,
-            "501 Not Implemented"
-                if request.method == "GET"
-                    && request.target.split('?').next() == Some(state.endpoint.as_str()) =>
-            {
-                metrics.sse_unsupported_requests += 1;
-            }
             "404 Not Found"
                 if request.target.split('?').next() == Some(state.endpoint.as_str()) =>
             {
@@ -6555,7 +6452,7 @@ fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardH
             "MCP HTTP CORS preflight method is required\n",
         ));
     };
-    if !matches!(requested_method, "POST" | "DELETE") {
+    if !matches!(requested_method, "POST" | "GET" | "DELETE") {
         return Some(dashboard_http_text(
             "400 Bad Request",
             "MCP HTTP CORS preflight method is not allowed\n",
@@ -6581,6 +6478,7 @@ fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardH
                     "accept"
                         | "authorization"
                         | "content-type"
+                        | "last-event-id"
                         | "mcp-protocol-version"
                         | "mcp-session-id"
                         | "x-agentk-mcp-token"
@@ -6674,7 +6572,11 @@ fn mcp_http_operational_response(
             "origin_rejections": metrics.origin_rejections,
             "method_rejections": metrics.method_rejections,
             "preflight_rejections": metrics.preflight_rejections,
-            "sse_unsupported_requests": metrics.sse_unsupported_requests,
+            "sse_stream_requests": metrics.sse_stream_requests,
+            "sse_resume_requests": metrics.sse_resume_requests,
+            "sse_invalid_resume_requests": metrics.sse_invalid_resume_requests,
+            "sse_evicted_resume_requests": metrics.sse_evicted_resume_requests,
+            "sse_events_returned": metrics.sse_events_returned,
             "invalid_framing_responses": metrics.invalid_framing_responses,
             "header_too_large_responses": metrics.header_too_large_responses,
             "body_too_large_responses": metrics.body_too_large_responses,
@@ -6762,9 +6664,21 @@ agentk_mcp_http_method_rejections_total {method_rejections}\n\
 # HELP agentk_mcp_http_preflight_rejections_total CORS preflight requests rejected by MCP HTTP validation.\n\
 # TYPE agentk_mcp_http_preflight_rejections_total counter\n\
 agentk_mcp_http_preflight_rejections_total {preflight_rejections}\n\
-# HELP agentk_mcp_http_sse_unsupported_requests_total GET requests shaped like MCP SSE streams while SSE is not implemented.\n\
-# TYPE agentk_mcp_http_sse_unsupported_requests_total counter\n\
-agentk_mcp_http_sse_unsupported_requests_total {sse_unsupported_requests}\n\
+# HELP agentk_mcp_http_sse_stream_requests_total Authenticated MCP SSE stream reads served from bounded session buffers.\n\
+# TYPE agentk_mcp_http_sse_stream_requests_total counter\n\
+agentk_mcp_http_sse_stream_requests_total {sse_stream_requests}\n\
+# HELP agentk_mcp_http_sse_resume_requests_total MCP SSE stream reads using Last-Event-ID resume.\n\
+# TYPE agentk_mcp_http_sse_resume_requests_total counter\n\
+agentk_mcp_http_sse_resume_requests_total {sse_resume_requests}\n\
+# HELP agentk_mcp_http_sse_invalid_resume_requests_total MCP SSE stream reads rejected for invalid Last-Event-ID values.\n\
+# TYPE agentk_mcp_http_sse_invalid_resume_requests_total counter\n\
+agentk_mcp_http_sse_invalid_resume_requests_total {sse_invalid_resume_requests}\n\
+# HELP agentk_mcp_http_sse_evicted_resume_requests_total MCP SSE resume reads rejected because Last-Event-ID is older than the retained buffer.\n\
+# TYPE agentk_mcp_http_sse_evicted_resume_requests_total counter\n\
+agentk_mcp_http_sse_evicted_resume_requests_total {sse_evicted_resume_requests}\n\
+# HELP agentk_mcp_http_sse_events_returned_total Buffered MCP SSE events returned to clients.\n\
+# TYPE agentk_mcp_http_sse_events_returned_total counter\n\
+agentk_mcp_http_sse_events_returned_total {sse_events_returned}\n\
 # HELP agentk_mcp_http_invalid_framing_responses_total Requests rejected before parsing due to invalid HTTP framing.\n\
 # TYPE agentk_mcp_http_invalid_framing_responses_total counter\n\
 agentk_mcp_http_invalid_framing_responses_total {invalid_framing_responses}\n\
@@ -6806,7 +6720,11 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         origin_rejections = metrics.origin_rejections,
         method_rejections = metrics.method_rejections,
         preflight_rejections = metrics.preflight_rejections,
-        sse_unsupported_requests = metrics.sse_unsupported_requests,
+        sse_stream_requests = metrics.sse_stream_requests,
+        sse_resume_requests = metrics.sse_resume_requests,
+        sse_invalid_resume_requests = metrics.sse_invalid_resume_requests,
+        sse_evicted_resume_requests = metrics.sse_evicted_resume_requests,
+        sse_events_returned = metrics.sse_events_returned,
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
         body_too_large_responses = metrics.body_too_large_responses,
@@ -6856,6 +6774,7 @@ fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<Dashb
         "access-control-request-method",
         "authorization",
         "content-type",
+        "last-event-id",
         "mcp-protocol-version",
         "mcp-session-id",
         "origin",
@@ -6939,17 +6858,127 @@ fn mcp_http_sse_response(
     {
         return Ok(response);
     }
+    let last_event_id = match mcp_http_last_event_id(request) {
+        Ok(last_event_id) => last_event_id,
+        Err(response) => {
+            mcp_http_update_metrics(state, |metrics| {
+                metrics.sse_invalid_resume_requests += 1;
+            })?;
+            return Ok(response);
+        }
+    };
+    if mcp_http_sse_resume_evicted(&session, last_event_id) {
+        mcp_http_update_metrics(state, |metrics| {
+            metrics.sse_evicted_resume_requests += 1;
+        })?;
+        return Ok(dashboard_http_text(
+            "410 Gone",
+            "Last-Event-ID is older than the retained MCP HTTP SSE buffer\n",
+        ));
+    }
+    let events = session
+        .sse_events
+        .iter()
+        .filter(|event| last_event_id.is_none_or(|last_event_id| event.id > last_event_id))
+        .cloned()
+        .collect::<Vec<_>>();
     session.last_seen = Instant::now();
     drop(session);
 
-    let mut response = dashboard_http_text(
-        "501 Not Implemented",
-        "MCP HTTP SSE streams are not implemented for this AgentK gateway yet\n",
-    );
-    response
-        .headers
-        .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
-    Ok(response)
+    mcp_http_update_metrics(state, |metrics| {
+        metrics.sse_stream_requests += 1;
+        metrics.sse_events_returned += events.len();
+        if last_event_id.is_some() {
+            metrics.sse_resume_requests += 1;
+        }
+    })?;
+    let mut headers = vec![("X-Accel-Buffering".to_string(), "no".to_string())];
+    if let Some(last_event) = events.last().map(|event| event.id).or(last_event_id) {
+        headers.push(("Last-Event-ID".to_string(), last_event.to_string()));
+    }
+    Ok(DashboardHttpResponse {
+        status: "200 OK",
+        content_type: "text/event-stream",
+        headers,
+        body: mcp_http_sse_body(&events),
+    })
+}
+
+fn mcp_http_last_event_id(
+    request: &DashboardHttpRequest,
+) -> Result<Option<u64>, DashboardHttpResponse> {
+    let Some(value) = request.header("last-event-id") else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.trim() != value || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(dashboard_http_text(
+            "400 Bad Request",
+            "Last-Event-ID must be an unsigned decimal event id\n",
+        ));
+    }
+    value.parse::<u64>().map(Some).map_err(|_| {
+        dashboard_http_text(
+            "400 Bad Request",
+            "Last-Event-ID must be an unsigned decimal event id\n",
+        )
+    })
+}
+
+fn mcp_http_sse_resume_evicted(session: &McpHttpSession, last_event_id: Option<u64>) -> bool {
+    mcp_http_sse_resume_evicted_for_events(&session.sse_events, last_event_id)
+}
+
+fn mcp_http_sse_resume_evicted_for_events(
+    events: &VecDeque<McpHttpSseEvent>,
+    last_event_id: Option<u64>,
+) -> bool {
+    let Some(last_event_id) = last_event_id else {
+        return false;
+    };
+    let Some(first_event_id) = events.front().map(|event| event.id) else {
+        return false;
+    };
+    last_event_id.saturating_add(1) < first_event_id
+}
+
+fn mcp_http_sse_body(events: &[McpHttpSseEvent]) -> Vec<u8> {
+    if events.is_empty() {
+        return b": agentk no buffered events\n\n".to_vec();
+    }
+
+    let mut body = Vec::new();
+    for event in events {
+        body.extend_from_slice(format!("id: {}\nevent: message\n", event.id).as_bytes());
+        let data = String::from_utf8_lossy(&event.data);
+        if data.is_empty() {
+            body.extend_from_slice(b"data:\n");
+        } else {
+            for line in data.lines() {
+                body.extend_from_slice(b"data: ");
+                body.extend_from_slice(line.as_bytes());
+                body.extend_from_slice(b"\n");
+            }
+        }
+        body.extend_from_slice(b"\n");
+    }
+    body
+}
+
+fn mcp_http_push_sse_event(
+    events: &mut VecDeque<McpHttpSseEvent>,
+    next_event_id: &mut u64,
+    data: &[u8],
+) {
+    let id = *next_event_id;
+    *next_event_id = (*next_event_id).saturating_add(1);
+    events.push_back(McpHttpSseEvent {
+        id,
+        data: data.to_vec(),
+    });
+    while events.len() > MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION {
+        events.pop_front();
+    }
 }
 
 fn mcp_http_post_response(
@@ -7041,14 +7070,22 @@ fn mcp_http_post_response(
                         state.max_active_sessions,
                     ));
                 }
-                sessions.insert(
-                    session_id,
-                    Arc::new(Mutex::new(McpHttpSession {
-                        proxy,
-                        protocol_version,
-                        last_seen: Instant::now(),
-                    })),
-                );
+                let mut session = McpHttpSession {
+                    proxy,
+                    protocol_version,
+                    last_seen: Instant::now(),
+                    next_sse_event_id: 1,
+                    sse_events: VecDeque::new(),
+                };
+                {
+                    let McpHttpSession {
+                        sse_events,
+                        next_sse_event_id,
+                        ..
+                    } = &mut session;
+                    mcp_http_push_sse_event(sse_events, next_sse_event_id, &body);
+                }
+                sessions.insert(session_id, Arc::new(Mutex::new(session)));
                 mcp_http_update_metrics(state, |metrics| {
                     metrics.sessions_created += 1;
                 })?;
@@ -7096,15 +7133,24 @@ fn mcp_http_post_response(
     }
     session.last_seen = Instant::now();
     let response = session.proxy.handle_json_rpc_line(&request.body, false)?;
+    let response_body = response.as_ref().map(serde_json::to_vec).transpose()?;
+    if let Some(body) = response_body.as_deref() {
+        let McpHttpSession {
+            sse_events,
+            next_sse_event_id,
+            ..
+        } = &mut *session;
+        mcp_http_push_sse_event(sse_events, next_sse_event_id, body);
+    }
     mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     drop(session);
 
-    if let Some(response) = response {
+    if let Some(body) = response_body {
         Ok(DashboardHttpResponse {
             status: "200 OK",
             content_type: "application/json",
             headers: Vec::new(),
-            body: serde_json::to_vec(&response)?,
+            body,
         })
     } else if is_notification_or_response {
         Ok(DashboardHttpResponse {
@@ -9291,7 +9337,7 @@ done
         );
         assert_eq!(
             response_header(&initialize_response, "Access-Control-Expose-Headers"),
-            Some("Mcp-Session-Id, WWW-Authenticate")
+            Some("Mcp-Session-Id, Last-Event-ID, WWW-Authenticate")
         );
         let session_id = response_header(&initialize_response, "Mcp-Session-Id")
             .expect("initialize should return session id")
@@ -9319,7 +9365,51 @@ done
         assert_eq!(initialized_response.status, "202 Accepted");
         assert!(initialized_response.body.is_empty());
 
-        let unsupported_sse = dashboard_test_request_with_headers(
+        let bad_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "BAD_RESUME_SHOULD_NOT_REFLECT"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let bad_resume_response =
+            mcp_http_response(&bad_resume, &state).expect("bad SSE resume should fail closed");
+        assert_eq!(bad_resume_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_resume_response.body)
+                .contains("BAD_RESUME_SHOULD_NOT_REFLECT")
+        );
+
+        let overflow_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "999999999999999999999999999999999999999"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let overflow_resume_response =
+            mcp_http_response(&overflow_resume, &state).expect("overflow resume should fail");
+        assert_eq!(overflow_resume_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&overflow_resume_response.body)
+                .contains("Last-Event-ID must be an unsigned decimal event id")
+        );
+        assert!(
+            !String::from_utf8_lossy(&overflow_resume_response.body)
+                .contains("999999999999999999999999999999999999999")
+        );
+
+        let initial_sse = dashboard_test_request_with_headers(
             "GET",
             "/mcp",
             [
@@ -9330,21 +9420,24 @@ done
             ],
             Vec::new(),
         );
-        let unsupported_sse_response =
-            mcp_http_response(&unsupported_sse, &state).expect("SSE should fail closed");
-        assert_eq!(unsupported_sse_response.status, "501 Not Implemented");
+        let initial_sse_response =
+            mcp_http_response(&initial_sse, &state).expect("SSE should return buffered events");
+        assert_eq!(initial_sse_response.status, "200 OK");
+        assert_eq!(initial_sse_response.content_type, "text/event-stream");
         assert_eq!(
-            response_header(&unsupported_sse_response, "Allow"),
-            Some("POST, DELETE, OPTIONS")
+            response_header(&initial_sse_response, "Last-Event-ID"),
+            Some("1")
         );
         assert_eq!(
-            response_header(&unsupported_sse_response, "Access-Control-Allow-Origin"),
+            response_header(&initial_sse_response, "Access-Control-Allow-Origin"),
             Some("http://127.0.0.1:3000")
         );
-        assert!(
-            String::from_utf8_lossy(&unsupported_sse_response.body)
-                .contains("SSE streams are not implemented")
-        );
+        let initial_sse_body = String::from_utf8_lossy(&initial_sse_response.body);
+        assert!(initial_sse_body.contains("id: 1\n"));
+        assert!(initial_sse_body.contains("event: message\n"));
+        assert!(initial_sse_body.contains("data: {"));
+        assert!(initial_sse_body.contains("\"jsonrpc\":\"2.0\""));
+        assert!(initial_sse_body.contains("\"protocolVersion\":\"2025-11-25\""));
         assert_eq!(
             state.sessions.lock().expect("sessions should lock").len(),
             1
@@ -9402,6 +9495,88 @@ done
             serde_json::from_slice(&tools_response.body).expect("tools response should be json");
         assert!(tools_json["result"]["tools"].is_array());
 
+        let resumed_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "1"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let resumed_sse_response =
+            mcp_http_response(&resumed_sse, &state).expect("SSE resume should return new events");
+        assert_eq!(resumed_sse_response.status, "200 OK");
+        assert_eq!(
+            response_header(&resumed_sse_response, "Last-Event-ID"),
+            Some("2")
+        );
+        let resumed_sse_body = String::from_utf8_lossy(&resumed_sse_response.body);
+        assert!(!resumed_sse_body.contains("id: 1\n"));
+        assert!(resumed_sse_body.contains("id: 2\n"));
+        assert!(resumed_sse_body.contains("\"tools\""));
+
+        let current_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "2"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let current_sse_response =
+            mcp_http_response(&current_sse, &state).expect("current SSE resume should heartbeat");
+        assert_eq!(current_sse_response.status, "200 OK");
+        assert_eq!(
+            response_header(&current_sse_response, "Last-Event-ID"),
+            Some("2")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&current_sse_response.body),
+            ": agentk no buffered events\n\n"
+        );
+
+        {
+            let session = Arc::clone(
+                state
+                    .sessions
+                    .lock()
+                    .expect("sessions should lock")
+                    .get(&session_id)
+                    .expect("session should still exist"),
+            );
+            let mut session = session.lock().expect("session should lock");
+            while session.sse_events.front().is_some_and(|event| event.id < 2) {
+                session.sse_events.pop_front();
+            }
+        }
+        let evicted_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "0"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let evicted_sse_response =
+            mcp_http_response(&evicted_sse, &state).expect("evicted SSE resume should fail");
+        assert_eq!(evicted_sse_response.status, "410 Gone");
+        assert!(
+            String::from_utf8_lossy(&evicted_sse_response.body)
+                .contains("older than the retained MCP HTTP SSE buffer")
+        );
+
         let delete = dashboard_test_request_with_headers(
             "DELETE",
             "/mcp",
@@ -9415,14 +9590,34 @@ done
             mcp_http_response(&delete, &state).expect("delete should be accepted");
         assert_eq!(delete_response.status, "202 Accepted");
 
+        let post_delete_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let post_delete_sse_response = mcp_http_response(&post_delete_sse, &state)
+            .expect("deleted session SSE should be gone");
+        assert_eq!(post_delete_sse_response.status, "404 Not Found");
+
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.requests_total, 12);
         assert_eq!(metrics.post_requests, 4);
-        assert_eq!(metrics.get_requests, 1);
+        assert_eq!(metrics.get_requests, 7);
         assert_eq!(metrics.delete_requests, 1);
-        assert_eq!(metrics.client_error_responses, 1);
-        assert_eq!(metrics.server_error_responses, 1);
-        assert_eq!(metrics.sse_unsupported_requests, 1);
+        assert_eq!(metrics.client_error_responses, 5);
+        assert_eq!(metrics.server_error_responses, 0);
+        assert_eq!(metrics.sse_stream_requests, 3);
+        assert_eq!(metrics.sse_resume_requests, 2);
+        assert_eq!(metrics.sse_invalid_resume_requests, 2);
+        assert_eq!(metrics.sse_evicted_resume_requests, 1);
+        assert_eq!(metrics.sse_events_returned, 2);
+        assert_eq!(metrics.session_not_found, 1);
         assert_eq!(metrics.sessions_created, 1);
         assert_eq!(metrics.sessions_deleted, 1);
     }
@@ -9469,12 +9664,17 @@ done
         assert_eq!(response_header(&response, "Vary"), Some("Origin"));
         assert_eq!(
             response_header(&response, "Access-Control-Allow-Methods"),
-            Some("POST, DELETE, OPTIONS")
+            Some("POST, GET, DELETE, OPTIONS")
         );
         assert!(
             response_header(&response, "Access-Control-Allow-Headers")
                 .expect("preflight should list allowed headers")
                 .contains("MCP-Protocol-Version")
+        );
+        assert!(
+            response_header(&response, "Access-Control-Allow-Headers")
+                .expect("preflight should list allowed headers")
+                .contains("Last-Event-ID")
         );
         assert_eq!(response_header(&response, "WWW-Authenticate"), None);
 
@@ -9997,6 +10197,26 @@ done
                 .contains("MCP session not found")
         );
 
+        let duplicate_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("Mcp-Session-Id", "0123456789abcdef0123456789abcdef"),
+                ("Last-Event-ID", "1"),
+                ("Last-Event-ID", "2"),
+            ],
+            Vec::new(),
+        );
+        let duplicate_resume_response =
+            mcp_http_response(&duplicate_resume, &state).expect("duplicate resume should fail");
+        assert_eq!(duplicate_resume_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&duplicate_resume_response.body).contains("control header")
+        );
+        assert!(!String::from_utf8_lossy(&duplicate_resume_response.body).contains("2"));
+
         assert!(
             state
                 .sessions
@@ -10005,12 +10225,36 @@ done
                 .is_empty()
         );
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.requests_total, 5);
-        assert_eq!(metrics.get_requests, 5);
+        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.get_requests, 6);
         assert_eq!(metrics.auth_rejections, 1);
-        assert_eq!(metrics.sse_unsupported_requests, 0);
         assert_eq!(metrics.session_not_found, 1);
         assert_eq!(metrics.sessions_created, 0);
+    }
+
+    #[test]
+    fn mcp_http_sse_buffer_bounds_events_and_detects_evicted_resume() {
+        let mut events = VecDeque::new();
+        let mut next_event_id = 1;
+        for index in 0..(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION + 2) {
+            mcp_http_push_sse_event(
+                &mut events,
+                &mut next_event_id,
+                format!("event-{index}").as_bytes(),
+            );
+        }
+
+        assert_eq!(events.len(), MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION);
+        assert_eq!(events.front().expect("front event").id, 3);
+        assert_eq!(events.back().expect("back event").id, 130);
+        assert_eq!(next_event_id, 131);
+        let ids = events.iter().map(|event| event.id).collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), events.len());
+        assert!(mcp_http_sse_resume_evicted_for_events(&events, Some(0)));
+        assert!(mcp_http_sse_resume_evicted_for_events(&events, Some(1)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(2)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(129)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(130)));
     }
 
     #[test]
@@ -11166,7 +11410,17 @@ done
         assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
         assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
         assert_eq!(ready_json["preflight_rejections"], serde_json::json!(0));
-        assert_eq!(ready_json["sse_unsupported_requests"], serde_json::json!(0));
+        assert_eq!(ready_json["sse_stream_requests"], serde_json::json!(0));
+        assert_eq!(ready_json["sse_resume_requests"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["sse_invalid_resume_requests"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            ready_json["sse_evicted_resume_requests"],
+            serde_json::json!(0)
+        );
+        assert_eq!(ready_json["sse_events_returned"], serde_json::json!(0));
         assert_eq!(
             ready_json["invalid_framing_responses"],
             serde_json::json!(0)
@@ -11225,7 +11479,11 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 3\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_preflight_rejections_total 1\n"));
-        assert!(metrics_body.contains("agentk_mcp_http_sse_unsupported_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_stream_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_invalid_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_evicted_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_events_returned_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_body_too_large_responses_total 0\n"));
@@ -11275,7 +11533,7 @@ done
         assert_eq!(unsupported_endpoint_head.status, "405 Method Not Allowed");
         assert_eq!(
             response_header(&unsupported_endpoint_head, "Allow"),
-            Some("POST, DELETE, OPTIONS")
+            Some("POST, GET, DELETE, OPTIONS")
         );
         assert!(unsupported_endpoint_head.body.is_empty());
 
@@ -11689,19 +11947,19 @@ done
             let trace_path = PathBuf::from("dashboard-stream-trace.jsonl");
             let decisions_path = PathBuf::from("dashboard-stream-approvals.jsonl");
             let (mut stream, _) = listener.accept().expect("test client should connect");
-            handle_dashboard_http_stream(
-                &mut stream,
-                &trace_path,
-                &decisions_path,
-                None,
-                None,
-                None,
-                false,
+            let context = DashboardHttpContext {
+                trace_path: &trace_path,
+                decisions_path: &decisions_path,
+                permissions_path: None,
+                identity_path: None,
+                admin_token: None,
+                admin_read_required: false,
                 max_body_bytes,
                 max_header_bytes,
-                None,
-            )
-            .expect("dashboard stream response should write");
+                store_root: None,
+            };
+            handle_dashboard_http_stream(&mut stream, &context)
+                .expect("dashboard stream response should write");
         });
         let mut client = TcpStream::connect(addr).expect("test client should connect");
         client

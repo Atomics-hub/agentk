@@ -325,4 +325,4 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject MCP/dashboard HTTP WebSocket handshake headers.
 - [x] Preflight packaged AgentK binary resolution before launcher work.
 - [x] Embed redacted trace-inspect evidence in the safe-agent demo report.
-- [ ] Build production MCP gateway transport hardening.
+- [ ] Continue bounded local MCP gateway transport hardening.

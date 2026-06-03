@@ -387,8 +387,8 @@ and require a localhost/loopback `Host` authority on the request.
 Sandboxed/file `Origin: null` requests are allowed only when `null` is
 explicitly configured.
 SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
-syntactically valid `Mcp-Session-Id`, then fail closed with sanitized 501
-responses and a redacted counter until resumable SSE support lands. It also
+syntactically valid `Mcp-Session-Id`, then return a bounded authenticated
+event-stream snapshot from the session buffer with `Last-Event-ID` resume. It also
 serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
@@ -602,9 +602,8 @@ LAN/public exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` to bound accepted connection reads and
 writes. SSE-shaped `GET` requests require `Accept: text/event-stream` plus an
 existing, syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
-checks, then fail closed with sanitized 501 responses and a redacted
-unsupported-SSE counter until resumable SSE support lands. All MCP HTTP `HEAD`
-responses omit bodies; `HEAD` on the MCP
+checks, and return bounded buffered events with `Last-Event-ID` resume. All MCP
+HTTP `HEAD` responses omit bodies; `HEAD` on the MCP
 endpoint remains an unsupported method response with the normal `Allow` header.
 This is a bounded local adapter, not a hosted production
 HTTP/SSE control plane. Set comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS`
