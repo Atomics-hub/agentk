@@ -137,9 +137,9 @@ JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
 SSE-shaped `GET` requests to the MCP endpoint require `Accept:
 text/event-stream` plus an existing, syntactically valid `Mcp-Session-Id`, pass
-the same auth/origin/protocol checks, and then fail closed with sanitized 501
-responses plus a redacted unsupported-SSE counter until resumable SSE support
-lands.
+the same auth/origin/protocol checks. The bounded local alpha returns already
+mediated session responses from a per-session event buffer and supports
+`Last-Event-ID` resume without exposing raw payloads in metrics.
 Malformed request lines or header lines, including invalid UTF-8, duplicate or
 non-decimal `Content-Length` headers, LF-only line endings, control characters
 in header values, and any `Transfer-Encoding`, `Content-Encoding`, `Expect`, or
@@ -209,11 +209,11 @@ it drains any still-active initialized sessions and writes their redacted
 trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
-rejections, CORS preflight validation rejections, unsupported-SSE totals,
+rejections, CORS preflight validation rejections, SSE stream/resume totals,
 invalid-framing/header-too-large/body-too-large stream rejections, and session
 create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control
-plane, TLS termination, SSE streaming, or external identity integration.
+plane, TLS termination, hosted SSE streaming, or live external identity verification.
 
 When the client closes stdin, AgentK closes the downstream server's stdin first
 and gives the child a short grace period to exit cleanly. If the child keeps
@@ -233,21 +233,42 @@ Cursor, or another MCP client at `agentk sidecar-run --root <bundle>`.
 command snippet shape without spawning downstream tools or touching
 credentials.
 For a more stable local deployment folder, run `agentk sidecar-package --root
-<bundle> --out <package>` and point clients at `<package>/bin/agentk-sidecar`
-or the generated snippets under `<package>/clients/`. After editing a packaged
-bundle, run `<package>/bin/agentk-sidecar-check` to validate it without spawning
-downstream tools. The package writes a relative-path `manifest.json` with the
+<bundle> --out <package> --archive-out <package>.tar` and point clients at
+`<package>/bin/agentk-sidecar` or the generated snippets under
+`<package>/clients/`. The optional uncompressed tar is written only after the
+package self-check passes; `<package>.tar.sha256` is written beside it, and the
+archive SHA-256 plus checksum path are included in JSON output. After editing a
+packaged bundle or receiving a tar handoff, run
+`agentk sidecar-package-archive-check --archive <package>.tar` before unpacking
+or `agentk sidecar-package-install --archive <package>.tar --out <install-dir>`
+to verify, safely unpack, run the package self-check, and write
+`<install-dir>/sidecar/.agentk/install-receipt.json` with the archive filename,
+checksum filename, SHA-256, AgentK version, and installed file count. Then run
+`agentk sidecar-package-release-manifest --package <install-dir> --archive <package>.tar --out <handoff>.json`
+to write a machine-readable release handoff that binds the installed package,
+package lock, archive checksum, and install receipt without changing the
+package directory. After
+manual unpacking, run `<package>/bin/agentk-sidecar-check` to validate it
+without spawning downstream tools. The package writes a relative-path
+`manifest.json` with the
 AgentK version, schema version, launchers, client snippets, local transports,
-store workflow, and deploy artifacts; `<package>/bin/agentk-package-info` prints
-that manifest for support and deployment inventory checks.
-`<package>/bin/agentk-package-check` validates the manifest, package artifacts,
-launcher modes, launcher preflights, deploy-template hardening, the configured
-`AGENTK_BIN`, and embedded sidecar bundle after a copy, deploy, or image build.
+store workflow, and deploy artifacts, plus `package.lock.json` with relative
+paths, byte counts, SHA-256 hashes, and executable-bit expectations for every
+packaged install file while excluding runtime state under `sidecar/.agentk`;
+`<package>/bin/agentk-package-info` prints the manifest for support and
+deployment inventory checks. `<package>/bin/agentk-package-check`
+validates the manifest, package lock, package artifacts, launcher modes,
+launcher preflights, deploy-template hardening, dummy deploy env examples, the
+configured `AGENTK_BIN`, and embedded sidecar bundle after a copy, deploy, or
+image build.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
-the service account's `PATH`. The packaged runtime launchers run that package
-self-check before launching, serving, writing demo traces, rendering dashboards,
-or updating store artifacts, so copied or edited packages fail closed before
-teams rely on them.
+the service account's `PATH`. The package includes
+`deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
+and local Slack/GitHub/email payload exporters; package checks verify those examples
+keep required variables and dummy `CHANGE_ME` credentials. The packaged runtime
+launchers run that package self-check before launching, serving, writing demo
+traces, rendering dashboards, or updating store artifacts, so copied or edited
+packages fail closed before teams rely on them.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its
@@ -256,6 +277,10 @@ evidence-ref summary, and blocked policy rules that `trace-inspect` would show
 separately. Set `AGENTK_TRACE` to that path when running the packaged dashboard
 or store launchers to review/sync/export the demo evidence instead of the
 default team-sidecar trace.
+Secret-reference manifests validate local env refs plus production-shaped AWS
+Secrets Manager, GCP Secret Manager, Azure Key Vault, Vault, and 1Password refs
+without fetching secret bytes or printing raw refs; see
+`examples/secret-refs-production.toml` for the supported handoff shapes.
 Internal adapters can run `<package>/bin/agentk-sidecar-tcp`
 for a local bounded TCP JSONL gateway; Claude, Codex, and Cursor should keep
 using the stdio launcher unless their MCP client configuration supports that
@@ -269,18 +294,24 @@ The package also includes systemd, launchd, and Docker Compose templates for the
 MCP HTTP gateway itself, not only the review dashboard. Package checks verify
 baseline deploy-template hardening markers, including no-new-privileges systemd
 services, a non-root package Dockerfile, and loopback-published,
-capability-dropped, read-only Compose services.
+capability-dropped, read-only Compose services, plus dummy env examples with no
+real-looking credentials.
 `sidecar-run` reads `agentk-sidecar.toml`, launches the configured downstream
 MCP server, copies only the env vars named in `[downstream].allow_env`, and
 writes the configured redacted JSONL audit log plus a
 `*.session.json` summary beside it. Reviewers can run
-`agentk permissions --path <bundle>/team-permissions.toml`, then append local
-approve/deny decisions with `--permissions` so reviewer authority is checked
-before the signed trace is reconciled. `agentk dashboard <trace> --permissions
+`agentk permissions --path <bundle>/team-permissions.toml`, and operators can
+run `agentk identity-check --identity <bundle>/team-identity.toml --permissions
+<bundle>/team-permissions.toml` to verify that external IdP groups map to
+configured local reviewers without printing issuers, groups, or claim values.
+Reviewers then append local approve/deny decisions with `--permissions` so
+reviewer authority is checked before the signed trace is reconciled.
+`agentk dashboard <trace> --permissions
 <bundle>/team-permissions.toml` writes a local HTML review surface for the same
 evidence, `agentk dashboard-serve <trace> --permissions
-<bundle>/team-permissions.toml --store-root <bundle>/.agentk/team-store` serves
-an interactive local review UI and `/api/review` JSON endpoint on localhost.
+<bundle>/team-permissions.toml --identity <bundle>/team-identity.toml
+--store-root <bundle>/.agentk/team-store` serves an interactive local review UI
+and `/api/review` JSON endpoint on localhost.
 It also exposes `/healthz`, a redacted `/readyz` readiness response, and
 redacted `/metrics` gauges that report trace, decision-log, permissions, store,
 and admin-auth posture without local paths or approval payloads. Dashboard probe
@@ -318,16 +349,32 @@ chosen carrier may appear only once.
 Reviewers can set `token_env` in `team-permissions.toml`; those users must
 include `X-AgentK-Reviewer-Token` for scoped `/api/review?reviewer=<id>` reads
 and matching `reviewer_token` values in dashboard write requests. `agentk
-store-sync <trace> --permissions <bundle>/team-permissions.toml --root
-<bundle>/.agentk/team-store` can also refresh the same live local durable store
-with current redacted JSON snapshots, normalized JSONL tables, and a
-credential-free notification outbox at `tables/notifications.jsonl` for pending
-approval requests and recorded decisions. The store also writes normalized
-blocked-rule, syscall, and evidence-ref summary rows for dashboard and reporting
-queries. `agentk store-export
-<trace> --permissions <bundle>/team-permissions.toml` writes normalized JSON
-plus a Postgres schema contract, TSV rows, and `postgres/load.sql` for a shared
-audit store, including the same summary tables.
+store-sync <trace> --permissions <bundle>/team-permissions.toml --identity
+<bundle>/team-identity.toml --root <bundle>/.agentk/team-store` can also
+refresh the same live local durable store with current redacted JSON snapshots,
+normalized JSONL tables, and a credential-free notification outbox at
+`tables/notifications.jsonl` for pending approval requests and recorded
+decisions. The store also writes normalized blocked-rule, syscall,
+evidence-ref, reviewer, and identity-mapping rows that omit issuer, audience,
+and claim values for dashboard and reporting queries. `agentk store-slack --root
+<bundle>/.agentk/team-store --out <bundle>/.agentk/slack` exports Slack-ready
+JSON payloads from that outbox without reading Slack tokens, and `agentk
+store-slack-send --payload-root <bundle>/.agentk/slack --webhook-url-env
+AGENTK_SLACK_WEBHOOK_URL` can deliver them through `curl` while keeping the
+webhook URL out of AgentK files and command output. `agentk store-github --root
+<bundle>/.agentk/team-store --out <bundle>/.agentk/github --repository
+owner/repo` exports GitHub issue-ready JSON payloads from the same outbox, and
+`agentk store-github-send --payload-root <bundle>/.agentk/github
+--github-token-env GITHUB_TOKEN` can deliver them through `gh` while keeping the
+token out of AgentK files and command output. `agentk store-email --root
+<bundle>/.agentk/team-store --out <bundle>/.agentk/email --to
+agentk-alerts@example.com` exports sendmail-ready payloads from the same
+outbox, and `agentk store-email-send --payload-root <bundle>/.agentk/email`
+can deliver them through a local `sendmail`-compatible relay. `agentk store-export
+<trace> --permissions <bundle>/team-permissions.toml --identity
+<bundle>/team-identity.toml` writes normalized JSON plus a Postgres schema
+contract, TSV rows, and `postgres/load.sql` for a shared audit store, including
+the same summary and identity-mapping tables.
 The served browser dashboard includes a reviewer view that calls the same
 scoped review API and redraws the approval and decision tables with only the
 items that reviewer is authorized to see. Direct scoped HTML views are also
@@ -536,7 +583,7 @@ command directly, plus bounded localhost TCP JSONL and Streamable HTTP POST
 adapters for internal integrations. It is suitable for local review,
 release-audit smoke coverage, and integration experiments. A complete
 production MCP transport still needs a hardened server packaging story, SSE
-streaming, deployment guidance, external identity/auth integration, TLS
+streaming, hosted deployment guidance, live external identity/auth integration, TLS
 termination, and operational key management. The current boundary mediates tool
 listing/calls, resource
 listing/reads, and prompt listing/gets; child stderr is suppressed rather than

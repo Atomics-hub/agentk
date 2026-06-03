@@ -1,39 +1,45 @@
 use agentk::{
     AgentKError, ApprovalDecision, ApprovalDecisionRecord, ApprovalReviewReport, AuditApprovalItem,
     MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
-    TeamPermissionsReport, Verdict, approval_review_jsonl, audit_inbox_jsonl, check_audit_store,
-    check_audit_store_export, check_sidecar_bundle, check_sidecar_package, default_log_path,
-    export_audit_store, fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file,
-    init_sidecar_bundle, inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream,
-    mcp_subprocess_proxy_json_stream, mediate_mcp_json_reader, mediate_mcp_json_stream,
-    package_sidecar_bundle, readiness_report, record_approval_decision_jsonl,
-    record_approval_decision_jsonl_with_permissions, release_audit_report, replay_jsonl,
-    rotate_signing_key_file, run_mcp_killer_demo, run_mcp_security_shim_eval,
-    run_poisoned_webpage_demo, run_safe_agent_demo, scope_approval_review_for_reviewer,
-    secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
-    sidecar_run_config, signing_key_status, sync_durable_audit_store,
-    team_permissions_report_from_path, trusted_signing_key_manifest_keys_from_path,
-    trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
-    verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
-    verify_team_reviewer_token, write_approval_dashboard_html, write_events_jsonl,
-    write_latest_copy,
+    TeamPermissionsReport, Verdict, alpha_release_status_report, approval_review_jsonl,
+    archive_sidecar_package, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
+    check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive, default_log_path,
+    export_audit_store, export_email_notification_payloads, export_github_notification_payloads,
+    export_slack_notification_payloads, fork_replay_behavior_jsonl, fork_replay_jsonl,
+    generate_signing_key_file, init_sidecar_bundle, inspect_jsonl, install_sidecar_package_archive,
+    mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
+    mediate_mcp_json_reader, mediate_mcp_json_stream, package_sidecar_bundle, readiness_report,
+    record_approval_decision_jsonl, record_approval_decision_jsonl_with_permissions,
+    release_audit_report, replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo,
+    run_mcp_security_shim_eval, run_poisoned_webpage_demo, run_safe_agent_demo,
+    scope_approval_review_for_reviewer, secret_reference_env_store_report_from_path,
+    secret_reference_manifest_report_from_path, sidecar_run_config, signing_key_status,
+    sync_durable_audit_store, team_identity_report_from_path, team_permissions_report_from_path,
+    trusted_signing_key_manifest_keys_from_path, trusted_signing_key_manifest_report_from_path,
+    verify_jsonl, verify_signatures_jsonl, verify_signatures_jsonl_with_trusted_keys,
+    verify_signing_key_rotation_manifest_file, verify_team_reviewer_token,
+    write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
+    write_sidecar_package_release_manifest,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MCP_HTTP_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 const MCP_HTTP_DEFAULT_MAX_HEADER_BYTES: usize = 16 * 1024;
 const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
+const MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION: usize = 128;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
@@ -151,6 +157,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect external identity-to-reviewer mappings without printing groups or token claims.
+    IdentityCheck {
+        /// Path to team-identity.toml.
+        #[arg(long, default_value = "agentk-sidecar/team-identity.toml")]
+        identity: PathBuf,
+        /// Optional team permissions manifest used to verify mapped reviewers.
+        #[arg(long)]
+        permissions: Option<PathBuf>,
+        /// Emit the redacted identity mapping report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a local HTML approval and audit dashboard.
     Dashboard {
         /// Path to a JSONL flight log.
@@ -178,6 +196,9 @@ enum Command {
         /// Optional team permissions manifest to summarize reviewers.
         #[arg(long)]
         permissions: Option<PathBuf>,
+        /// Optional external identity mapping manifest to sync with the durable team store.
+        #[arg(long)]
+        identity: Option<PathBuf>,
         /// Bind host for the local dashboard server.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -213,6 +234,9 @@ enum Command {
         /// Optional team permissions manifest to export as reviewer metadata.
         #[arg(long)]
         permissions: Option<PathBuf>,
+        /// Optional external identity mapping manifest to export as reviewer metadata.
+        #[arg(long)]
+        identity: Option<PathBuf>,
         /// Output directory for normalized JSON and the Postgres schema contract.
         #[arg(long, default_value = ".agentk/store")]
         out: PathBuf,
@@ -239,10 +263,112 @@ enum Command {
         /// Optional team permissions manifest to sync as reviewer metadata.
         #[arg(long)]
         permissions: Option<PathBuf>,
+        /// Optional external identity mapping manifest to sync as reviewer metadata.
+        #[arg(long)]
+        identity: Option<PathBuf>,
         /// Durable team store root.
         #[arg(long, default_value = ".agentk/team-store")]
         root: PathBuf,
         /// Emit the sync report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export durable notification outbox rows as Slack-ready JSON payloads.
+    StoreSlack {
+        /// Durable team store root produced by `agentk store-sync`.
+        #[arg(long, default_value = ".agentk/team-store")]
+        root: PathBuf,
+        /// Output directory for Slack payload manifest and JSONL payloads.
+        #[arg(long, default_value = ".agentk/slack")]
+        out: PathBuf,
+        /// Optional Slack channel id/name to include in each payload.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Emit the Slack payload export report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deliver exported Slack payloads with a webhook URL read from environment.
+    StoreSlackSend {
+        /// Root directory produced by `agentk store-slack`.
+        #[arg(long, default_value = ".agentk/slack")]
+        payload_root: PathBuf,
+        /// Environment variable containing the Slack webhook URL.
+        #[arg(long, default_value = "AGENTK_SLACK_WEBHOOK_URL")]
+        webhook_url_env: String,
+        /// curl executable to run for delivery.
+        #[arg(long, default_value = "curl")]
+        curl: String,
+        /// Print the redacted delivery plan without invoking curl.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the Slack delivery report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export durable notification outbox rows as GitHub issue-ready JSON payloads.
+    StoreGithub {
+        /// Durable team store root produced by `agentk store-sync`.
+        #[arg(long, default_value = ".agentk/team-store")]
+        root: PathBuf,
+        /// Output directory for GitHub payload manifest and JSONL payloads.
+        #[arg(long, default_value = ".agentk/github")]
+        out: PathBuf,
+        /// Optional GitHub owner/repo to include in each payload.
+        #[arg(long)]
+        repository: Option<String>,
+        /// GitHub label to include in each issue payload. Repeat for multiple labels.
+        #[arg(long)]
+        label: Vec<String>,
+        /// Emit the GitHub payload export report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deliver exported GitHub issue payloads with gh and a token read from environment.
+    StoreGithubSend {
+        /// Root directory produced by `agentk store-github`.
+        #[arg(long, default_value = ".agentk/github")]
+        payload_root: PathBuf,
+        /// Environment variable containing the GitHub token for gh.
+        #[arg(long, default_value = "GITHUB_TOKEN")]
+        github_token_env: String,
+        /// gh executable to run for delivery.
+        #[arg(long, default_value = "gh")]
+        gh: String,
+        /// Print the redacted delivery plan without invoking gh.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the GitHub delivery report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export durable notification outbox rows as sendmail-ready email payloads.
+    StoreEmail {
+        /// Durable team store root produced by `agentk store-sync`.
+        #[arg(long, default_value = ".agentk/team-store")]
+        root: PathBuf,
+        /// Output directory for email payload manifest and JSONL messages.
+        #[arg(long, default_value = ".agentk/email")]
+        out: PathBuf,
+        /// Email recipient to include in each message. Repeat for multiple recipients.
+        #[arg(long)]
+        to: Vec<String>,
+        /// Emit the email payload export report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deliver exported email payloads through local sendmail.
+    StoreEmailSend {
+        /// Root directory produced by `agentk store-email`.
+        #[arg(long, default_value = ".agentk/email")]
+        payload_root: PathBuf,
+        /// sendmail executable to run for delivery.
+        #[arg(long, default_value = "sendmail")]
+        sendmail: String,
+        /// Print the redacted delivery plan without invoking sendmail.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the email delivery report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -578,6 +704,9 @@ enum Command {
         /// Output directory for the packaged sidecar.
         #[arg(long, default_value = "agentk-sidecar-package")]
         out: PathBuf,
+        /// Optional tar archive path to write after package validation.
+        #[arg(long)]
+        archive_out: Option<PathBuf>,
         /// Overwrite an existing package directory.
         #[arg(long)]
         force: bool,
@@ -591,6 +720,60 @@ enum Command {
         #[arg(long, default_value = "agentk-sidecar-package")]
         root: PathBuf,
         /// Emit the package check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a packaged sidecar tar against its checksum file.
+    SidecarPackageArchiveCheck {
+        /// Tar archive written by sidecar-package --archive-out.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Optional checksum path. Defaults to <archive>.sha256.
+        #[arg(long)]
+        checksum: Option<PathBuf>,
+        /// Emit the archive check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify and install a packaged sidecar tar into a directory.
+    SidecarPackageInstall {
+        /// Tar archive written by sidecar-package --archive-out.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Output directory for the installed package.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        out: PathBuf,
+        /// Optional checksum path. Defaults to <archive>.sha256.
+        #[arg(long)]
+        checksum: Option<PathBuf>,
+        /// Overwrite an existing output directory.
+        #[arg(long)]
+        force: bool,
+        /// Emit the install report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a verified package/archive/install handoff manifest.
+    SidecarPackageReleaseManifest {
+        /// Installed package directory containing manifest.json and sidecar/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        package: PathBuf,
+        /// Tar archive written by sidecar-package --archive-out.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Optional checksum path. Defaults to <archive>.sha256.
+        #[arg(long)]
+        checksum: Option<PathBuf>,
+        /// Optional install receipt path. Defaults to <package>/sidecar/.agentk/install-receipt.json.
+        #[arg(long)]
+        install_receipt: Option<PathBuf>,
+        /// Output JSON release handoff manifest path.
+        #[arg(long, default_value = "agentk-sidecar-release-manifest.json")]
+        out: PathBuf,
+        /// Overwrite an existing output manifest.
+        #[arg(long)]
+        force: bool,
+        /// Emit the release handoff manifest as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -649,7 +832,7 @@ enum Command {
         /// Path to an AgentK secret-reference TOML manifest.
         #[arg(long, default_value = "examples/secret-refs.toml")]
         manifest: PathBuf,
-        /// Emit only version and count as JSON.
+        /// Emit only redacted metadata counts as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -685,6 +868,57 @@ enum Command {
         /// Treat warnings as blocking failures for final pre-push review.
         #[arg(long)]
         strict: bool,
+    },
+    /// Summarize the v0.2 alpha release train status without running heavy gates.
+    ReleaseStatus {
+        /// Emit the full release train status report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run an end-to-end local packaged sidecar release-candidate smoke test.
+    ReleaseCandidateSmoke {
+        /// Temporary root for the generated bundle and package.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Replace an existing --root directory before running.
+        #[arg(long)]
+        force: bool,
+        /// Keep the auto-created temporary root after a successful run.
+        #[arg(long)]
+        keep_root: bool,
+        /// Emit the full smoke report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a Homebrew formula for a reviewed AgentK source release tarball.
+    ReleaseHomebrewFormula {
+        /// HTTPS source release tarball URL for the formula.
+        #[arg(long)]
+        source_url: String,
+        /// Expected SHA-256 for the source release tarball.
+        #[arg(long)]
+        sha256: Option<String>,
+        /// Optional local source tarball to compute or verify the SHA-256.
+        #[arg(long)]
+        source_archive: Option<PathBuf>,
+        /// Output Ruby formula path.
+        #[arg(long, default_value = "dist/homebrew/agentk.rb")]
+        out: PathBuf,
+        /// Formula version. Defaults to the current Cargo package version.
+        #[arg(long)]
+        version: Option<String>,
+        /// Formula homepage HTTPS URL.
+        #[arg(long, default_value = "https://github.com/agentk/agentk")]
+        homepage: String,
+        /// Ruby formula class name.
+        #[arg(long, default_value = "Agentk")]
+        class_name: String,
+        /// Replace an existing formula file.
+        #[arg(long)]
+        force: bool,
+        /// Emit the formula write report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -750,6 +984,11 @@ fn run() -> Result<(), AgentKError> {
             json,
         ),
         Command::Permissions { path, json } => permissions(path, json),
+        Command::IdentityCheck {
+            identity,
+            permissions,
+            json,
+        } => identity_check(identity, permissions, json),
         Command::Dashboard {
             path,
             decisions,
@@ -761,6 +1000,7 @@ fn run() -> Result<(), AgentKError> {
             path,
             decisions,
             permissions,
+            identity,
             host,
             port,
             admin_token_env,
@@ -769,10 +1009,11 @@ fn run() -> Result<(), AgentKError> {
             max_header_bytes,
             allow_non_local_bind,
             store_root,
-        } => dashboard_serve(
+        } => dashboard_serve(DashboardServeOptions {
             path,
             decisions,
             permissions,
+            identity,
             host,
             port,
             admin_token_env,
@@ -781,22 +1022,63 @@ fn run() -> Result<(), AgentKError> {
             max_header_bytes,
             allow_non_local_bind,
             store_root,
-        ),
+        }),
         Command::StoreExport {
             path,
             decisions,
             permissions,
+            identity,
             out,
             json,
-        } => store_export(path, decisions, permissions, out, json),
+        } => store_export(path, decisions, permissions, identity, out, json),
         Command::StoreCheck { root, json } => store_check(root, json),
         Command::StoreSync {
             path,
             decisions,
             permissions,
+            identity,
             root,
             json,
-        } => store_sync(path, decisions, permissions, root, json),
+        } => store_sync(path, decisions, permissions, identity, root, json),
+        Command::StoreSlack {
+            root,
+            out,
+            channel,
+            json,
+        } => store_slack(root, out, channel, json),
+        Command::StoreSlackSend {
+            payload_root,
+            webhook_url_env,
+            curl,
+            dry_run,
+            json,
+        } => store_slack_send(payload_root, webhook_url_env, curl, dry_run, json),
+        Command::StoreGithub {
+            root,
+            out,
+            repository,
+            label,
+            json,
+        } => store_github(root, out, repository, label, json),
+        Command::StoreGithubSend {
+            payload_root,
+            github_token_env,
+            gh,
+            dry_run,
+            json,
+        } => store_github_send(payload_root, github_token_env, gh, dry_run, json),
+        Command::StoreEmail {
+            root,
+            out,
+            to,
+            json,
+        } => store_email(root, out, to, json),
+        Command::StoreEmailSend {
+            payload_root,
+            sendmail,
+            dry_run,
+            json,
+        } => store_email_send(payload_root, sendmail, dry_run, json),
         Command::StorePush {
             root,
             database_url_env,
@@ -963,10 +1245,40 @@ fn run() -> Result<(), AgentKError> {
         Command::SidecarPackage {
             root,
             out,
+            archive_out,
             force,
             json,
-        } => sidecar_package(root, out, force, json),
+        } => sidecar_package(root, out, archive_out, force, json),
         Command::SidecarPackageCheck { root, json } => sidecar_package_check(root, json),
+        Command::SidecarPackageArchiveCheck {
+            archive,
+            checksum,
+            json,
+        } => sidecar_package_archive_check(archive, checksum, json),
+        Command::SidecarPackageInstall {
+            archive,
+            out,
+            checksum,
+            force,
+            json,
+        } => sidecar_package_install(archive, out, checksum, force, json),
+        Command::SidecarPackageReleaseManifest {
+            package,
+            archive,
+            checksum,
+            install_receipt,
+            out,
+            force,
+            json,
+        } => sidecar_package_release_manifest(
+            package,
+            archive,
+            checksum,
+            install_receipt,
+            out,
+            force,
+            json,
+        ),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -983,6 +1295,34 @@ fn run() -> Result<(), AgentKError> {
         Command::TrustedSignersCheck { manifest, json } => trusted_signers_check(manifest, json),
         Command::Readiness { json } => readiness(json),
         Command::ReleaseAudit { json, strict } => release_audit(json, strict),
+        Command::ReleaseStatus { json } => release_status(json),
+        Command::ReleaseCandidateSmoke {
+            root,
+            force,
+            keep_root,
+            json,
+        } => release_candidate_smoke(root, force, keep_root, json),
+        Command::ReleaseHomebrewFormula {
+            source_url,
+            sha256,
+            source_archive,
+            out,
+            version,
+            homepage,
+            class_name,
+            force,
+            json,
+        } => release_homebrew_formula(
+            source_url,
+            sha256,
+            source_archive,
+            out,
+            version,
+            homepage,
+            class_name,
+            force,
+            json,
+        ),
     }
 }
 
@@ -1378,6 +1718,40 @@ fn permissions(path: PathBuf, json: bool) -> Result<(), AgentKError> {
     Ok(())
 }
 
+fn identity_check(
+    identity: PathBuf,
+    permissions: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = team_identity_report_from_path(&identity, permissions.as_deref())?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK team identity mappings");
+    println!("identity    {}", report.path.display());
+    if let Some(path) = &report.permissions_path {
+        println!("permissions {}", path.display());
+    }
+    println!("version     {}", report.version);
+    println!("providers   {}", report.providers);
+    println!("mappings    {}", report.mappings);
+    println!("reviewers   {}", report.mapped_reviewers);
+    if let Some(permission_reviewers) = report.permission_reviewers {
+        println!("permission reviewers {}", permission_reviewers);
+    }
+    if let Some(covered) = report.covered_permission_reviewers {
+        println!("covered permission reviewers {}", covered);
+    }
+    if let Some(token_protected) = report.token_protected_reviewers {
+        println!("token-protected reviewers {}", token_protected);
+    }
+    println!("redacted    issuers, groups, and claim values were not printed");
+    Ok(())
+}
+
 fn dashboard(
     path: PathBuf,
     decisions: Option<PathBuf>,
@@ -1414,10 +1788,11 @@ fn dashboard(
     Ok(())
 }
 
-fn dashboard_serve(
+struct DashboardServeOptions {
     path: PathBuf,
     decisions: Option<PathBuf>,
     permissions: Option<PathBuf>,
+    identity: Option<PathBuf>,
     host: String,
     port: u16,
     admin_token_env: String,
@@ -1426,7 +1801,35 @@ fn dashboard_serve(
     max_header_bytes: usize,
     allow_non_local_bind: bool,
     store_root: Option<PathBuf>,
-) -> Result<(), AgentKError> {
+}
+
+struct DashboardHttpContext<'a> {
+    trace_path: &'a PathBuf,
+    decisions_path: &'a PathBuf,
+    permissions_path: Option<&'a PathBuf>,
+    identity_path: Option<&'a PathBuf>,
+    admin_token: Option<&'a str>,
+    admin_read_required: bool,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
+    store_root: Option<&'a PathBuf>,
+}
+
+fn dashboard_serve(options: DashboardServeOptions) -> Result<(), AgentKError> {
+    let DashboardServeOptions {
+        path,
+        decisions,
+        permissions,
+        identity,
+        host,
+        port,
+        admin_token_env,
+        stream_timeout_ms,
+        max_body_bytes,
+        max_header_bytes,
+        allow_non_local_bind,
+        store_root,
+    } = options;
     if !is_safe_env_name(&admin_token_env) {
         return Err(AgentKError::InvalidMcpRequest(
             "admin-token-env must be a safe environment variable name".to_string(),
@@ -1464,24 +1867,26 @@ fn dashboard_serve(
     if let Some(path) = &permissions {
         println!("permissions {}", path.display());
     }
+    if let Some(path) = &identity {
+        println!("identity   {}", path.display());
+    }
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let result =
-                    configure_dashboard_http_stream(&stream, stream_timeout).and_then(|_| {
-                        handle_dashboard_http_stream(
-                            &mut stream,
-                            &path,
-                            &decisions,
-                            permissions.as_ref(),
-                            admin_token.as_deref(),
-                            admin_read_required,
-                            max_body_bytes,
-                            max_header_bytes,
-                            store_root.as_ref(),
-                        )
-                    });
+                let context = DashboardHttpContext {
+                    trace_path: &path,
+                    decisions_path: &decisions,
+                    permissions_path: permissions.as_ref(),
+                    identity_path: identity.as_ref(),
+                    admin_token: admin_token.as_deref(),
+                    admin_read_required,
+                    max_body_bytes,
+                    max_header_bytes,
+                    store_root: store_root.as_ref(),
+                };
+                let result = configure_dashboard_http_stream(&stream, stream_timeout)
+                    .and_then(|_| handle_dashboard_http_stream(&mut stream, &context));
                 if let Err(error) = result {
                     eprintln!("dashboard request failed: {error}");
                 }
@@ -1552,52 +1957,38 @@ fn configure_dashboard_http_stream(
 
 fn handle_dashboard_http_stream(
     stream: &mut TcpStream,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    admin_read_required: bool,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> Result<(), AgentKError> {
-    let request =
-        match read_dashboard_http_request_with_limits(stream, max_body_bytes, max_header_bytes) {
-            Ok(Some(request)) => request,
-            Ok(None) => return Ok(()),
-            Err(AgentKError::InvalidMcpRequest(message))
-                if message == "HTTP request headers are too large" =>
-            {
-                let response = dashboard_http_headers_too_large_response(max_header_bytes);
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(AgentKError::InvalidMcpRequest(message))
-                if message == "HTTP request body is too large" =>
-            {
-                let response = dashboard_http_payload_too_large_response(max_body_bytes);
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(AgentKError::InvalidMcpRequest(_)) => {
-                let response =
-                    dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
-                write_dashboard_http_response(stream, &response)?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-    let response = dashboard_http_response_with_read_auth_and_limits(
-        &request,
-        trace_path,
-        decisions_path,
-        permissions_path,
-        admin_token,
-        admin_read_required,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+    let request = match read_dashboard_http_request_with_limits(
+        stream,
+        context.max_body_bytes,
+        context.max_header_bytes,
+    ) {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(()),
+        Err(AgentKError::InvalidMcpRequest(message))
+            if message == "HTTP request headers are too large" =>
+        {
+            let response = dashboard_http_headers_too_large_response(context.max_header_bytes);
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(AgentKError::InvalidMcpRequest(message))
+            if message == "HTTP request body is too large" =>
+        {
+            let response = dashboard_http_payload_too_large_response(context.max_body_bytes);
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(AgentKError::InvalidMcpRequest(_)) => {
+            let response =
+                dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let response = dashboard_http_response_with_read_auth_and_limits(&request, context);
     write_dashboard_http_response(stream, &response)?;
     Ok(())
 }
@@ -2053,6 +2444,9 @@ struct DashboardOperationalState {
     permissions_configured: bool,
     permissions_present: bool,
     permissions_ready: bool,
+    identity_configured: bool,
+    identity_present: bool,
+    identity_ready: bool,
     store_root_configured: bool,
     store_root_present: bool,
     admin_required: bool,
@@ -2069,17 +2463,18 @@ fn dashboard_http_response(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    dashboard_http_response_with_read_auth_and_limits(
-        request,
+    let context = DashboardHttpContext {
         trace_path,
         decisions_path,
         permissions_path,
+        identity_path: None,
         admin_token,
-        false,
-        DASHBOARD_HTTP_MAX_BODY_BYTES,
-        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        admin_read_required: false,
+        max_body_bytes: DASHBOARD_HTTP_MAX_BODY_BYTES,
+        max_header_bytes: DASHBOARD_HTTP_MAX_HEADER_BYTES,
         store_root,
-    )
+    };
+    dashboard_http_response_with_read_auth_and_limits(request, &context)
 }
 
 #[cfg(test)]
@@ -2092,29 +2487,23 @@ fn dashboard_http_response_with_read_auth(
     admin_read_required: bool,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    dashboard_http_response_with_read_auth_and_limits(
-        request,
+    let context = DashboardHttpContext {
         trace_path,
         decisions_path,
         permissions_path,
+        identity_path: None,
         admin_token,
         admin_read_required,
-        DASHBOARD_HTTP_MAX_BODY_BYTES,
-        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        max_body_bytes: DASHBOARD_HTTP_MAX_BODY_BYTES,
+        max_header_bytes: DASHBOARD_HTTP_MAX_HEADER_BYTES,
         store_root,
-    )
+    };
+    dashboard_http_response_with_read_auth_and_limits(request, &context)
 }
 
 fn dashboard_http_response_with_read_auth_and_limits(
     request: &DashboardHttpRequest,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    admin_read_required: bool,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> DashboardHttpResponse {
     let (route, has_query) = match request.target.split_once('?') {
         Some((route, _)) => (route, true),
@@ -2130,27 +2519,17 @@ fn dashboard_http_response_with_read_auth_and_limits(
             "400 Bad Request",
             "dashboard decision endpoints must not include query strings\n",
         )
-    } else if admin_read_required && dashboard_http_requires_admin_read(route) {
+    } else if context.admin_read_required && dashboard_http_requires_admin_read(route) {
         match dashboard_verify_admin_token_for_request(
             request,
-            admin_token,
+            context.admin_token,
             "dashboard admin token is required for read requests",
         ) {
             Ok(()) => {
                 if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
                     response
                 } else {
-                    dashboard_http_route_response(
-                        request,
-                        route,
-                        trace_path,
-                        decisions_path,
-                        permissions_path,
-                        admin_token,
-                        max_body_bytes,
-                        max_header_bytes,
-                        store_root,
-                    )
+                    dashboard_http_route_response(request, route, context)
                 }
             }
             Err((status, error)) => dashboard_http_text(status, &format!("{error}\n")),
@@ -2158,17 +2537,7 @@ fn dashboard_http_response_with_read_auth_and_limits(
     } else if let Some(response) = dashboard_http_unexpected_body_error(request, route) {
         response
     } else {
-        dashboard_http_route_response(
-            request,
-            route,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        )
+        dashboard_http_route_response(request, route, context)
     };
 
     if request.method == "HEAD" {
@@ -2180,28 +2549,24 @@ fn dashboard_http_response_with_read_auth_and_limits(
 fn dashboard_http_route_response(
     request: &DashboardHttpRequest,
     route: &str,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
 ) -> DashboardHttpResponse {
     match (request.method.as_str(), route) {
         ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
             request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            store_root,
+            context.trace_path,
+            context.decisions_path,
+            context.permissions_path,
+            context.identity_path,
+            context.store_root,
         ),
         ("GET" | "HEAD", "/api/review") => dashboard_http_json(
             request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            store_root,
+            context.trace_path,
+            context.decisions_path,
+            context.permissions_path,
+            context.identity_path,
+            context.store_root,
         ),
         ("GET" | "HEAD", "/healthz") => DashboardHttpResponse {
             status: "200 OK",
@@ -2209,42 +2574,12 @@ fn dashboard_http_route_response(
             headers: Vec::new(),
             body: br#"{"ok":true}"#.to_vec(),
         },
-        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        ),
-        ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            max_body_bytes,
-            max_header_bytes,
-            store_root,
-        ),
-        ("POST", "/api/approve") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            store_root,
-            ApprovalDecision::Approve,
-        ),
-        ("POST", "/api/deny") => dashboard_http_decision(
-            request,
-            trace_path,
-            decisions_path,
-            permissions_path,
-            admin_token,
-            store_root,
-            ApprovalDecision::Deny,
-        ),
+        ("GET" | "HEAD", "/readyz") => dashboard_http_ready_response(context),
+        ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(context),
+        ("POST", "/api/approve") => {
+            dashboard_http_decision(request, context, ApprovalDecision::Approve)
+        }
+        ("POST", "/api/deny") => dashboard_http_decision(request, context, ApprovalDecision::Deny),
         ("GET" | "HEAD" | "POST", _) => dashboard_http_text("404 Not Found", "not found\n"),
         _ => dashboard_http_text("405 Method Not Allowed", "method not allowed\n"),
     }
@@ -2284,30 +2619,18 @@ fn dashboard_http_unexpected_body_error(
     ))
 }
 
-fn dashboard_http_ready_response(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardHttpResponse {
-    let state = dashboard_operational_state(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        admin_token,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+fn dashboard_http_ready_response(context: &DashboardHttpContext<'_>) -> DashboardHttpResponse {
+    let state = dashboard_operational_state(context);
     match serde_json::to_vec(&serde_json::json!({
         "ready": state.ready,
         "trace_present": state.trace_present,
         "decision_log_present": state.decision_log_present,
         "permissions_configured": state.permissions_configured,
         "permissions_present": state.permissions_present,
+        "permissions_ready": state.permissions_ready,
+        "identity_configured": state.identity_configured,
+        "identity_present": state.identity_present,
+        "identity_ready": state.identity_ready,
         "store_root_configured": state.store_root_configured,
         "store_root_present": state.store_root_present,
         "admin_required": state.admin_required,
@@ -2328,24 +2651,8 @@ fn dashboard_http_ready_response(
     }
 }
 
-fn dashboard_http_metrics_response(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardHttpResponse {
-    let state = dashboard_operational_state(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        admin_token,
-        max_body_bytes,
-        max_header_bytes,
-        store_root,
-    );
+fn dashboard_http_metrics_response(context: &DashboardHttpContext<'_>) -> DashboardHttpResponse {
+    let state = dashboard_operational_state(context);
     DashboardHttpResponse {
         status: "200 OK",
         content_type: "text/plain; version=0.0.4; charset=utf-8",
@@ -2354,34 +2661,32 @@ fn dashboard_http_metrics_response(
     }
 }
 
-fn dashboard_operational_state(
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    max_body_bytes: usize,
-    max_header_bytes: usize,
-    store_root: Option<&PathBuf>,
-) -> DashboardOperationalState {
-    let trace_present = trace_path.exists();
-    let decision_log_present = decisions_path.exists();
-    let permissions_configured = permissions_path.is_some();
-    let permissions_present = permissions_path.is_some_and(|path| path.exists());
+fn dashboard_operational_state(context: &DashboardHttpContext<'_>) -> DashboardOperationalState {
+    let trace_present = context.trace_path.exists();
+    let decision_log_present = context.decisions_path.exists();
+    let permissions_configured = context.permissions_path.is_some();
+    let permissions_present = context.permissions_path.is_some_and(|path| path.exists());
     let permissions_ready = !permissions_configured || permissions_present;
-    let store_root_configured = store_root.is_some();
-    let store_root_present = store_root.is_some_and(|path| path.exists());
+    let identity_configured = context.identity_path.is_some();
+    let identity_present = context.identity_path.is_some_and(|path| path.exists());
+    let identity_ready = !identity_configured || identity_present;
+    let store_root_configured = context.store_root.is_some();
+    let store_root_present = context.store_root.is_some_and(|path| path.exists());
     DashboardOperationalState {
-        ready: trace_present && permissions_ready,
+        ready: trace_present && permissions_ready && identity_ready,
         trace_present,
         decision_log_present,
         permissions_configured,
         permissions_present,
         permissions_ready,
+        identity_configured,
+        identity_present,
+        identity_ready,
         store_root_configured,
         store_root_present,
-        admin_required: admin_token.is_some(),
-        max_body_bytes,
-        max_header_bytes,
+        admin_required: context.admin_token.is_some(),
+        max_body_bytes: context.max_body_bytes,
+        max_header_bytes: context.max_header_bytes,
     }
 }
 
@@ -2405,6 +2710,15 @@ agentk_dashboard_permissions_present {permissions_present}\n\
 # HELP agentk_dashboard_permissions_ready Whether dashboard permissions are absent or present.\n\
 # TYPE agentk_dashboard_permissions_ready gauge\n\
 agentk_dashboard_permissions_ready {permissions_ready}\n\
+# HELP agentk_dashboard_identity_configured Whether dashboard identity mappings were configured.\n\
+# TYPE agentk_dashboard_identity_configured gauge\n\
+agentk_dashboard_identity_configured {identity_configured}\n\
+# HELP agentk_dashboard_identity_present Whether the configured dashboard identity mapping file exists.\n\
+# TYPE agentk_dashboard_identity_present gauge\n\
+agentk_dashboard_identity_present {identity_present}\n\
+# HELP agentk_dashboard_identity_ready Whether dashboard identity mappings are absent or present.\n\
+# TYPE agentk_dashboard_identity_ready gauge\n\
+agentk_dashboard_identity_ready {identity_ready}\n\
 # HELP agentk_dashboard_store_root_configured Whether dashboard durable store sync is configured.\n\
 # TYPE agentk_dashboard_store_root_configured gauge\n\
 agentk_dashboard_store_root_configured {store_root_configured}\n\
@@ -2426,6 +2740,9 @@ agentk_dashboard_max_header_bytes {max_header_bytes}\n",
         permissions_configured = usize::from(state.permissions_configured),
         permissions_present = usize::from(state.permissions_present),
         permissions_ready = usize::from(state.permissions_ready),
+        identity_configured = usize::from(state.identity_configured),
+        identity_present = usize::from(state.identity_present),
+        identity_ready = usize::from(state.identity_ready),
         store_root_configured = usize::from(state.store_root_configured),
         store_root_present = usize::from(state.store_root_present),
         admin_required = usize::from(state.admin_required),
@@ -2439,6 +2756,7 @@ fn dashboard_http_html(
     trace_path: &PathBuf,
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
+    identity_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     if let Err(error) = dashboard_read_query_param_error(request) {
@@ -2470,29 +2788,35 @@ fn dashboard_http_html(
         }
     }
 
-    match dashboard_sync_store(trace_path, decisions_path, permissions_path, store_root)
-        .and_then(|_| dashboard_review(trace_path, decisions_path, permissions_path))
-        .and_then(|(review, permissions)| {
-            let (review, viewer) = if let Some(reviewer) = reviewer.as_deref() {
-                let Some(permissions_path) = permissions_path else {
-                    return Err(AgentKError::InvalidMcpRequest(
-                        "reviewer-scoped dashboard views require --permissions".to_string(),
-                    ));
-                };
-                let (review, viewer) =
-                    dashboard_scope_review_for_reviewer(review, permissions_path, reviewer)?;
-                (review, Some(viewer))
-            } else {
-                (review, None)
+    match dashboard_sync_store(
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        store_root,
+    )
+    .and_then(|_| dashboard_review(trace_path, decisions_path, permissions_path))
+    .and_then(|(review, permissions)| {
+        let (review, viewer) = if let Some(reviewer) = reviewer.as_deref() {
+            let Some(permissions_path) = permissions_path else {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "reviewer-scoped dashboard views require --permissions".to_string(),
+                ));
             };
-            let (review, requester) = if let Some(requester) = requester.as_deref() {
-                let (review, requester) = dashboard_scope_review_for_requester(review, requester)?;
-                (review, Some(requester))
-            } else {
-                (review, None)
-            };
-            Ok((review, permissions, viewer, requester))
-        }) {
+            let (review, viewer) =
+                dashboard_scope_review_for_reviewer(review, permissions_path, reviewer)?;
+            (review, Some(viewer))
+        } else {
+            (review, None)
+        };
+        let (review, requester) = if let Some(requester) = requester.as_deref() {
+            let (review, requester) = dashboard_scope_review_for_requester(review, requester)?;
+            (review, Some(requester))
+        } else {
+            (review, None)
+        };
+        Ok((review, permissions, viewer, requester))
+    }) {
         Ok((review, permissions, viewer, requester)) => DashboardHttpResponse {
             status: "200 OK",
             content_type: "text/html; charset=utf-8",
@@ -2979,6 +3303,7 @@ fn dashboard_http_json(
     trace_path: &PathBuf,
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
+    identity_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     if let Err(error) = dashboard_read_query_param_error(request) {
@@ -3010,39 +3335,45 @@ fn dashboard_http_json(
         }
     }
 
-    match dashboard_sync_store(trace_path, decisions_path, permissions_path, store_root)
-        .and_then(|_| dashboard_review(trace_path, decisions_path, permissions_path))
-        .and_then(|(review, permissions)| {
-            let open_before = review.open_approvals.len();
-            let decided_before = review.decided_approvals.len();
-            let (review, viewer) = if let Some(reviewer) = reviewer.as_deref() {
-                let Some(permissions_path) = permissions_path else {
-                    return Err(AgentKError::InvalidMcpRequest(
-                        "reviewer-scoped dashboard reads require --permissions".to_string(),
-                    ));
-                };
-                let (review, mut viewer) =
-                    dashboard_scope_review_for_reviewer(review, permissions_path, reviewer)?;
-                viewer.open_before = open_before;
-                viewer.decided_before = decided_before;
-                (review, Some(viewer))
-            } else {
-                (review, None)
+    match dashboard_sync_store(
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        store_root,
+    )
+    .and_then(|_| dashboard_review(trace_path, decisions_path, permissions_path))
+    .and_then(|(review, permissions)| {
+        let open_before = review.open_approvals.len();
+        let decided_before = review.decided_approvals.len();
+        let (review, viewer) = if let Some(reviewer) = reviewer.as_deref() {
+            let Some(permissions_path) = permissions_path else {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "reviewer-scoped dashboard reads require --permissions".to_string(),
+                ));
             };
-            let (review, requester) = if let Some(requester) = requester.as_deref() {
-                let (review, requester) = dashboard_scope_review_for_requester(review, requester)?;
-                (review, Some(requester))
-            } else {
-                (review, None)
-            };
-            serde_json::to_vec_pretty(&DashboardApiResponse {
-                review: &review,
-                permissions: permissions.as_ref(),
-                viewer,
-                requester,
-            })
-            .map_err(AgentKError::from)
-        }) {
+            let (review, mut viewer) =
+                dashboard_scope_review_for_reviewer(review, permissions_path, reviewer)?;
+            viewer.open_before = open_before;
+            viewer.decided_before = decided_before;
+            (review, Some(viewer))
+        } else {
+            (review, None)
+        };
+        let (review, requester) = if let Some(requester) = requester.as_deref() {
+            let (review, requester) = dashboard_scope_review_for_requester(review, requester)?;
+            (review, Some(requester))
+        } else {
+            (review, None)
+        };
+        serde_json::to_vec_pretty(&DashboardApiResponse {
+            review: &review,
+            permissions: permissions.as_ref(),
+            viewer,
+            requester,
+        })
+        .map_err(AgentKError::from)
+    }) {
         Ok(body) => DashboardHttpResponse {
             status: "200 OK",
             content_type: "application/json",
@@ -3132,29 +3463,26 @@ fn dashboard_scope_review_for_requester(
 
 fn dashboard_http_decision(
     request: &DashboardHttpRequest,
-    trace_path: &PathBuf,
-    decisions_path: &PathBuf,
-    permissions_path: Option<&PathBuf>,
-    admin_token: Option<&str>,
-    store_root: Option<&PathBuf>,
+    context: &DashboardHttpContext<'_>,
     decision: ApprovalDecision,
 ) -> DashboardHttpResponse {
-    if admin_token.is_some()
+    if context.admin_token.is_some()
         && let Err(error) = dashboard_admin_token_carrier_error(request)
     {
         return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
     }
-    if let Err(error) = dashboard_verify_admin_token(request, admin_token) {
+    if let Err(error) = dashboard_verify_admin_token(request, context.admin_token) {
         return dashboard_http_text("401 Unauthorized", &format!("{error}\n"));
     }
     if let Some(response) = dashboard_http_json_content_type_error(request) {
         return response;
     }
     match dashboard_record_decision(
-        trace_path,
-        decisions_path,
-        permissions_path,
-        store_root,
+        context.trace_path,
+        context.decisions_path,
+        context.permissions_path,
+        context.identity_path,
+        context.store_root,
         decision,
         &request.body,
     ) {
@@ -3437,6 +3765,7 @@ fn dashboard_record_decision(
     trace_path: &PathBuf,
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
+    identity_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
     decision: ApprovalDecision,
     body: &[u8],
@@ -3470,7 +3799,13 @@ fn dashboard_record_decision(
             &request.reason,
         )?
     };
-    dashboard_sync_store(trace_path, decisions_path, permissions_path, store_root)?;
+    dashboard_sync_store(
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        store_root,
+    )?;
     let review = approval_review_jsonl(trace_path, decisions_path)?;
     serde_json::to_vec_pretty(&DashboardDecisionResponse {
         decision: &record,
@@ -3493,6 +3828,7 @@ fn dashboard_sync_store(
     trace_path: &PathBuf,
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
+    identity_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> Result<(), AgentKError> {
     if let Some(root) = store_root {
@@ -3500,6 +3836,7 @@ fn dashboard_sync_store(
             trace_path,
             decisions_path,
             permissions_path.map(|path| path.as_path()),
+            identity_path.map(|path| path.as_path()),
             root,
         )?;
     }
@@ -3552,11 +3889,18 @@ fn store_export(
     path: PathBuf,
     decisions: Option<PathBuf>,
     permissions: Option<PathBuf>,
+    identity: Option<PathBuf>,
     out: PathBuf,
     json: bool,
 ) -> Result<(), AgentKError> {
     let decisions = approval_decisions_path(&path, decisions);
-    let report = export_audit_store(&path, &decisions, permissions.as_deref(), &out)?;
+    let report = export_audit_store(
+        &path,
+        &decisions,
+        permissions.as_deref(),
+        identity.as_deref(),
+        &out,
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3571,12 +3915,16 @@ fn store_export(
     if let Some(path) = &report.permissions_path {
         println!("permissions {}", path.display());
     }
+    if let Some(path) = &report.identity_path {
+        println!("identity   {}", path.display());
+    }
     println!("events     {}", report.events_checked);
     println!("signatures {}", report.signatures_ok);
     println!("open       {}", report.open);
     println!("approved   {}", report.approved);
     println!("denied     {}", report.denied);
     println!("stale      {}", report.stale);
+    println!("mappings   {}", report.identity_mappings);
 
     if !report.signatures_ok {
         std::process::exit(2);
@@ -3621,11 +3969,18 @@ fn store_sync(
     path: PathBuf,
     decisions: Option<PathBuf>,
     permissions: Option<PathBuf>,
+    identity: Option<PathBuf>,
     root: PathBuf,
     json: bool,
 ) -> Result<(), AgentKError> {
     let decisions = approval_decisions_path(&path, decisions);
-    let report = sync_durable_audit_store(&path, &decisions, permissions.as_deref(), &root)?;
+    let report = sync_durable_audit_store(
+        &path,
+        &decisions,
+        permissions.as_deref(),
+        identity.as_deref(),
+        &root,
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3640,6 +3995,9 @@ fn store_sync(
     if let Some(path) = &report.permissions_path {
         println!("permissions {}", path.display());
     }
+    if let Some(path) = &report.identity_path {
+        println!("identity   {}", path.display());
+    }
     println!("files      {}", report.files.len());
     println!("events     {}", report.audit_events);
     println!("signatures {}", report.signatures_ok);
@@ -3648,6 +4006,7 @@ fn store_sync(
     println!("denied     {}", report.denied);
     println!("stale      {}", report.stale);
     println!("reviewers  {}", report.reviewers);
+    println!("mappings   {}", report.identity_mappings);
     println!("notifications {}", report.notifications);
 
     if !report.signatures_ok {
@@ -3655,6 +4014,1130 @@ fn store_sync(
     }
 
     Ok(())
+}
+
+fn store_slack(
+    root: PathBuf,
+    out: PathBuf,
+    channel: Option<String>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = export_slack_notification_payloads(&root, &out, channel.as_deref())?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK Slack notification payloads exported");
+    println!("root       {}", report.root.display());
+    println!("out        {}", report.out.display());
+    if let Some(channel) = &report.channel {
+        println!("channel    {channel}");
+    }
+    println!("files      {}", report.files.len());
+    println!("payloads   {}", report.payloads);
+    println!("pending    {}", report.pending);
+    println!("decided    {}", report.decided);
+    println!("warning    payloads are local JSON only; AgentK did not send Slack messages");
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackPayloadManifest {
+    schema: String,
+    payloads: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackDeliveryAttempt {
+    index: usize,
+    delivered: bool,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreSlackSendReport {
+    payload_root: PathBuf,
+    payloads_path: PathBuf,
+    webhook_url_env: String,
+    webhook_url_present: bool,
+    curl: String,
+    dry_run: bool,
+    command: Vec<String>,
+    payloads: usize,
+    delivered: usize,
+    failed: usize,
+    attempts: Vec<SlackDeliveryAttempt>,
+}
+
+fn store_slack_send(
+    payload_root: PathBuf,
+    webhook_url_env: String,
+    curl: String,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_store_slack_send(payload_root, webhook_url_env, curl, dry_run)?;
+    let failed = !report.dry_run && report.failed > 0;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK Slack notification delivery");
+        println!("payloads  {}", report.payloads_path.display());
+        println!("webhook   ${}", report.webhook_url_env);
+        println!("curl      {}", report.curl);
+        println!("dry-run   {}", report.dry_run);
+        println!("payloads  {}", report.payloads);
+        println!("delivered {}", report.delivered);
+        println!("failed    {}", report.failed);
+        println!("command   {}", report.command.join(" "));
+        println!(
+            "verdict   {}",
+            if report.dry_run {
+                "ready"
+            } else if report.failed == 0 {
+                "delivered"
+            } else {
+                "blocked"
+            }
+        );
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Slack notification delivery failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn run_store_slack_send(
+    payload_root: PathBuf,
+    webhook_url_env: String,
+    curl: String,
+    dry_run: bool,
+) -> Result<StoreSlackSendReport, AgentKError> {
+    if !is_safe_env_name(&webhook_url_env) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "webhook-url-env must be a safe environment variable name".to_string(),
+        ));
+    }
+    if curl.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "curl executable must be non-empty".to_string(),
+        ));
+    }
+
+    let manifest_path = payload_root.join("manifest.json");
+    let manifest: SlackPayloadManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)
+        .map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!("Slack payload manifest did not parse: {error}"))
+        })?;
+    if manifest.schema != "agentk.slack_notification_payloads" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-slack-send requires a Slack payload export from store-slack".to_string(),
+        ));
+    }
+    if manifest.payloads != "payloads.jsonl" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Slack payload manifest must reference payloads.jsonl".to_string(),
+        ));
+    }
+
+    let payloads_path = payload_root.join(&manifest.payloads);
+    let payloads = read_slack_payload_export(&payloads_path)?;
+    let webhook_url = env::var(&webhook_url_env).ok();
+    let webhook_url_present = webhook_url
+        .as_deref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if !dry_run {
+        let webhook_url = webhook_url.as_deref().unwrap_or_default();
+        if webhook_url.is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "environment variable {webhook_url_env} must be set before store-slack-send"
+            )));
+        }
+        validate_slack_webhook_url(webhook_url)?;
+    }
+
+    let command = vec![curl.clone(), "--config".to_string(), "-".to_string()];
+    if dry_run {
+        return Ok(StoreSlackSendReport {
+            payload_root,
+            payloads_path,
+            webhook_url_env,
+            webhook_url_present,
+            curl,
+            dry_run,
+            command,
+            payloads: payloads.len(),
+            delivered: 0,
+            failed: 0,
+            attempts: Vec::new(),
+        });
+    }
+
+    let webhook_url = webhook_url.unwrap_or_default();
+    let mut attempts = Vec::new();
+    let mut delivered = 0usize;
+    let mut failed = 0usize;
+    for (index, payload) in payloads.iter().enumerate() {
+        let status = send_slack_payload_with_curl(&curl, &webhook_url, payload, index)?;
+        let ok = status.success();
+        if ok {
+            delivered += 1;
+        } else {
+            failed += 1;
+        }
+        attempts.push(SlackDeliveryAttempt {
+            index,
+            delivered: ok,
+            exit_code: status.code(),
+        });
+    }
+
+    Ok(StoreSlackSendReport {
+        payload_root,
+        payloads_path,
+        webhook_url_env,
+        webhook_url_present,
+        curl,
+        dry_run,
+        command,
+        payloads: payloads.len(),
+        delivered,
+        failed,
+        attempts,
+    })
+}
+
+fn read_slack_payload_export(path: &Path) -> Result<Vec<serde_json::Value>, AgentKError> {
+    let content = fs::read_to_string(path)?;
+    let mut payloads = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "Slack payload export line {} did not parse: {error}",
+                index + 1
+            ))
+        })?;
+        if !payload.is_object()
+            || payload
+                .get("text")
+                .and_then(|value| value.as_str())
+                .is_none()
+        {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "Slack payload export line {} is missing text",
+                index + 1
+            )));
+        }
+        payloads.push(payload);
+    }
+    Ok(payloads)
+}
+
+fn validate_slack_webhook_url(url: &str) -> Result<(), AgentKError> {
+    if !url.starts_with("https://") || url.chars().any(char::is_control) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Slack webhook URL must be an HTTPS URL without control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn send_slack_payload_with_curl(
+    curl: &str,
+    webhook_url: &str,
+    payload: &serde_json::Value,
+    index: usize,
+) -> Result<std::process::ExitStatus, AgentKError> {
+    let payload_path = write_temp_slack_payload(payload, index)?;
+    let result = (|| {
+        let payload_path_string = payload_path.display().to_string();
+        let config = format!(
+            "url = \"{}\"\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\nfail\nsilent\nshow-error\n",
+            curl_config_value(webhook_url)?,
+            curl_config_value(&payload_path_string)?,
+        );
+        let mut child = ProcessCommand::new(curl)
+            .arg("--config")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        {
+            let Some(mut stdin) = child.stdin.take() else {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "curl stdin was not available".to_string(),
+                ));
+            };
+            stdin.write_all(config.as_bytes())?;
+        }
+        Ok(child.wait()?)
+    })();
+    fs::remove_file(&payload_path).ok();
+    result
+}
+
+fn write_temp_slack_payload(
+    payload: &serde_json::Value,
+    index: usize,
+) -> Result<PathBuf, AgentKError> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "agentk-slack-payload-{}-{index}-{nonce}.json",
+        std::process::id()
+    ));
+    fs::write(&path, serde_json::to_vec(payload)?)?;
+    Ok(path)
+}
+
+fn curl_config_value(value: &str) -> Result<String, AgentKError> {
+    if value.chars().any(|ch| ch.is_control()) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "curl config values must not contain control characters".to_string(),
+        ));
+    }
+    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn store_github(
+    root: PathBuf,
+    out: PathBuf,
+    repository: Option<String>,
+    labels: Vec<String>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = export_github_notification_payloads(&root, &out, repository.as_deref(), &labels)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK GitHub notification payloads exported");
+    println!("root       {}", report.root.display());
+    println!("out        {}", report.out.display());
+    if let Some(repository) = &report.repository {
+        println!("repository {repository}");
+    }
+    println!("labels     {}", report.labels.join(","));
+    println!("files      {}", report.files.len());
+    println!("payloads   {}", report.payloads);
+    println!("pending    {}", report.pending);
+    println!("decided    {}", report.decided);
+    println!("warning    payloads are local JSON only; AgentK did not call the GitHub API");
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPayloadManifest {
+    schema: String,
+    payloads: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GitHubDeliveryAttempt {
+    index: usize,
+    repository: String,
+    operation: String,
+    delivered: bool,
+    issue_number: Option<u64>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreGithubSendReport {
+    payload_root: PathBuf,
+    payloads_path: PathBuf,
+    github_token_env: String,
+    github_token_present: bool,
+    gh: String,
+    dry_run: bool,
+    command: Vec<String>,
+    payloads: usize,
+    delivered: usize,
+    failed: usize,
+    attempts: Vec<GitHubDeliveryAttempt>,
+}
+
+struct GitHubSendResult {
+    operation: String,
+    delivered: bool,
+    issue_number: Option<u64>,
+    exit_code: Option<i32>,
+}
+
+fn store_github_send(
+    payload_root: PathBuf,
+    github_token_env: String,
+    gh: String,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_store_github_send(payload_root, github_token_env, gh, dry_run)?;
+    let failed = !report.dry_run && report.failed > 0;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK GitHub notification delivery");
+        println!("payloads  {}", report.payloads_path.display());
+        println!("token     ${}", report.github_token_env);
+        println!("gh        {}", report.gh);
+        println!("dry-run   {}", report.dry_run);
+        println!("payloads  {}", report.payloads);
+        println!("delivered {}", report.delivered);
+        println!("failed    {}", report.failed);
+        println!("command   {}", report.command.join(" "));
+        println!(
+            "verdict   {}",
+            if report.dry_run {
+                "ready"
+            } else if report.failed == 0 {
+                "delivered"
+            } else {
+                "blocked"
+            }
+        );
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub notification delivery failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn run_store_github_send(
+    payload_root: PathBuf,
+    github_token_env: String,
+    gh: String,
+    dry_run: bool,
+) -> Result<StoreGithubSendReport, AgentKError> {
+    if !is_safe_env_name(&github_token_env) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "github-token-env must be a safe environment variable name".to_string(),
+        ));
+    }
+    if gh.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "gh executable must be non-empty".to_string(),
+        ));
+    }
+
+    let manifest_path = payload_root.join("manifest.json");
+    let manifest: GitHubPayloadManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path)?).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "GitHub payload manifest did not parse: {error}"
+            ))
+        })?;
+    if manifest.schema != "agentk.github_notification_payloads" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-github-send requires a GitHub payload export from store-github".to_string(),
+        ));
+    }
+    if manifest.payloads != "payloads.jsonl" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub payload manifest must reference payloads.jsonl".to_string(),
+        ));
+    }
+
+    let payloads_path = payload_root.join(&manifest.payloads);
+    let payloads = read_github_payload_export(&payloads_path)?;
+    let token = env::var(&github_token_env).ok();
+    let github_token_present = token
+        .as_deref()
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if !dry_run && token.as_deref().unwrap_or_default().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "environment variable {github_token_env} must be set before store-github-send"
+        )));
+    }
+
+    let command = vec![
+        gh.clone(),
+        "api".to_string(),
+        "repos/<payload-repository>/issues".to_string(),
+    ];
+    if dry_run {
+        return Ok(StoreGithubSendReport {
+            payload_root,
+            payloads_path,
+            github_token_env,
+            github_token_present,
+            gh,
+            dry_run,
+            command,
+            payloads: payloads.len(),
+            delivered: 0,
+            failed: 0,
+            attempts: Vec::new(),
+        });
+    }
+
+    let token = token.unwrap_or_default();
+    let mut attempts = Vec::new();
+    let mut delivered = 0usize;
+    let mut failed = 0usize;
+    for (index, payload) in payloads.iter().enumerate() {
+        let repository = github_payload_repository(payload)?;
+        let result = send_github_payload_with_gh(&gh, &token, payload, index)?;
+        if result.delivered {
+            delivered += 1;
+        } else {
+            failed += 1;
+        }
+        attempts.push(GitHubDeliveryAttempt {
+            index,
+            repository,
+            operation: result.operation,
+            delivered: result.delivered,
+            issue_number: result.issue_number,
+            exit_code: result.exit_code,
+        });
+    }
+
+    Ok(StoreGithubSendReport {
+        payload_root,
+        payloads_path,
+        github_token_env,
+        github_token_present,
+        gh,
+        dry_run,
+        command,
+        payloads: payloads.len(),
+        delivered,
+        failed,
+        attempts,
+    })
+}
+
+fn read_github_payload_export(path: &Path) -> Result<Vec<serde_json::Value>, AgentKError> {
+    let content = fs::read_to_string(path)?;
+    let mut payloads = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "GitHub payload export line {} did not parse: {error}",
+                index + 1
+            ))
+        })?;
+        if payload.get("operation").and_then(|value| value.as_str()) != Some("upsert_issue") {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "GitHub payload export line {} has unsupported operation",
+                index + 1
+            )));
+        }
+        github_payload_repository(&payload)?;
+        github_payload_issue_title(&payload)?;
+        github_payload_issue_body(&payload)?;
+        github_payload_dedupe_key(&payload)?;
+        payloads.push(payload);
+    }
+    Ok(payloads)
+}
+
+fn send_github_payload_with_gh(
+    gh: &str,
+    token: &str,
+    payload: &serde_json::Value,
+    index: usize,
+) -> Result<GitHubSendResult, AgentKError> {
+    let repository = github_payload_repository(payload)?;
+    let dedupe_key = github_payload_dedupe_key(payload)?;
+    let title = github_payload_issue_title(payload)?;
+    let body = github_payload_issue_body(payload)?;
+    let labels = github_payload_labels(payload)?;
+    let desired_state = github_payload_desired_state(payload)?;
+    let comment_body = github_payload_comment_body(payload)?;
+    let existing = github_find_existing_issue_number(gh, token, &repository, &dedupe_key)?;
+
+    let issue_body = format!("{body}\n\n<!-- agentk-dedupe: {dedupe_key} -->\n");
+    let issue_path = write_temp_github_json(
+        &serde_json::json!({
+            "title": title,
+            "body": issue_body,
+            "labels": labels
+        }),
+        "issue",
+        index,
+    )?;
+    let mut temp_paths = vec![issue_path.clone()];
+
+    let result = (|| {
+        let (operation, issue_number, output) = if let Some(number) = existing {
+            let output = run_gh_api(
+                gh,
+                token,
+                &[
+                    "api",
+                    "-X",
+                    "PATCH",
+                    &format!("repos/{repository}/issues/{number}"),
+                    "--input",
+                    issue_path.to_str().unwrap_or_default(),
+                ],
+            )?;
+            ("updated".to_string(), Some(number), output)
+        } else {
+            let output = run_gh_api(
+                gh,
+                token,
+                &[
+                    "api",
+                    "-X",
+                    "POST",
+                    &format!("repos/{repository}/issues"),
+                    "--input",
+                    issue_path.to_str().unwrap_or_default(),
+                ],
+            )?;
+            let number = if output.status.success() {
+                github_issue_number_from_create_output(&output.stdout)?
+            } else {
+                None
+            };
+            ("created".to_string(), number, output)
+        };
+        if !output.status.success() {
+            return Ok(GitHubSendResult {
+                operation,
+                delivered: false,
+                issue_number,
+                exit_code: output.status.code(),
+            });
+        }
+
+        if let (Some(number), Some(comment)) = (issue_number, comment_body.as_deref()) {
+            let comment_path =
+                write_temp_github_json(&serde_json::json!({ "body": comment }), "comment", index)?;
+            temp_paths.push(comment_path.clone());
+            let output = run_gh_api(
+                gh,
+                token,
+                &[
+                    "api",
+                    "-X",
+                    "POST",
+                    &format!("repos/{repository}/issues/{number}/comments"),
+                    "--input",
+                    comment_path.to_str().unwrap_or_default(),
+                ],
+            )?;
+            if !output.status.success() {
+                return Ok(GitHubSendResult {
+                    operation: format!("{operation}+comment"),
+                    delivered: false,
+                    issue_number,
+                    exit_code: output.status.code(),
+                });
+            }
+        }
+
+        if desired_state.as_deref() == Some("closed") {
+            let Some(number) = issue_number else {
+                return Ok(GitHubSendResult {
+                    operation: format!("{operation}+close"),
+                    delivered: false,
+                    issue_number,
+                    exit_code: None,
+                });
+            };
+            let close_path =
+                write_temp_github_json(&serde_json::json!({ "state": "closed" }), "close", index)?;
+            temp_paths.push(close_path.clone());
+            let output = run_gh_api(
+                gh,
+                token,
+                &[
+                    "api",
+                    "-X",
+                    "PATCH",
+                    &format!("repos/{repository}/issues/{number}"),
+                    "--input",
+                    close_path.to_str().unwrap_or_default(),
+                ],
+            )?;
+            if !output.status.success() {
+                return Ok(GitHubSendResult {
+                    operation: format!("{operation}+close"),
+                    delivered: false,
+                    issue_number,
+                    exit_code: output.status.code(),
+                });
+            }
+        }
+
+        Ok(GitHubSendResult {
+            operation,
+            delivered: true,
+            issue_number,
+            exit_code: Some(0),
+        })
+    })();
+
+    for path in temp_paths {
+        fs::remove_file(path).ok();
+    }
+    result
+}
+
+fn github_find_existing_issue_number(
+    gh: &str,
+    token: &str,
+    repository: &str,
+    dedupe_key: &str,
+) -> Result<Option<u64>, AgentKError> {
+    let query = format!("repo:{repository} {dedupe_key} in:body");
+    let output = run_gh_api(
+        gh,
+        token,
+        &[
+            "api",
+            "search/issues",
+            "-f",
+            &format!("q={query}"),
+            "--jq",
+            ".items[0].number // empty",
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub issue search failed".to_string(),
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value.parse::<u64>().map(Some).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "GitHub issue search returned a non-numeric issue number: {error}"
+            ))
+        })
+    }
+}
+
+fn run_gh_api(gh: &str, token: &str, args: &[&str]) -> Result<std::process::Output, AgentKError> {
+    Ok(ProcessCommand::new(gh)
+        .args(args)
+        .env("GH_TOKEN", token)
+        .env("GITHUB_TOKEN", token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?)
+}
+
+fn github_issue_number_from_create_output(output: &[u8]) -> Result<Option<u64>, AgentKError> {
+    let value: serde_json::Value = serde_json::from_slice(output).map_err(|error| {
+        AgentKError::InvalidMcpRequest(format!(
+            "GitHub issue create response did not parse: {error}"
+        ))
+    })?;
+    Ok(value.get("number").and_then(|number| number.as_u64()))
+}
+
+fn github_payload_repository(payload: &serde_json::Value) -> Result<String, AgentKError> {
+    let repository = payload
+        .get("repository")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "GitHub delivery requires each payload to include repository".to_string(),
+            )
+        })?;
+    if !is_valid_github_repository_for_send(repository) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub payload repository must look like owner/name".to_string(),
+        ));
+    }
+    Ok(repository.to_string())
+}
+
+fn github_payload_dedupe_key(payload: &serde_json::Value) -> Result<String, AgentKError> {
+    github_payload_string(payload, &["dedupe_key"], "dedupe_key")
+}
+
+fn github_payload_issue_title(payload: &serde_json::Value) -> Result<String, AgentKError> {
+    github_payload_string(payload, &["issue", "title"], "issue.title")
+}
+
+fn github_payload_issue_body(payload: &serde_json::Value) -> Result<String, AgentKError> {
+    github_payload_string(payload, &["issue", "body"], "issue.body")
+}
+
+fn github_payload_desired_state(
+    payload: &serde_json::Value,
+) -> Result<Option<String>, AgentKError> {
+    let Some(issue) = payload.get("issue") else {
+        return Ok(None);
+    };
+    let Some(state) = issue.get("desired_state") else {
+        return Ok(None);
+    };
+    let state = state.as_str().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest("GitHub issue desired_state must be a string".to_string())
+    })?;
+    if !matches!(state, "open" | "closed") {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub issue desired_state must be open or closed".to_string(),
+        ));
+    }
+    Ok(Some(state.to_string()))
+}
+
+fn github_payload_comment_body(payload: &serde_json::Value) -> Result<Option<String>, AgentKError> {
+    let Some(comment) = payload.get("comment") else {
+        return Ok(None);
+    };
+    let Some(body) = comment.get("body") else {
+        return Ok(None);
+    };
+    let body = body.as_str().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest("GitHub issue comment body must be a string".to_string())
+    })?;
+    if body
+        .chars()
+        .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub issue comment body must not contain control characters".to_string(),
+        ));
+    }
+    Ok(Some(body.to_string()))
+}
+
+fn github_payload_labels(payload: &serde_json::Value) -> Result<Vec<String>, AgentKError> {
+    let Some(labels) = payload
+        .get("issue")
+        .and_then(|issue| issue.get("labels"))
+        .and_then(|labels| labels.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+    labels
+        .iter()
+        .map(|label| {
+            let label = label.as_str().ok_or_else(|| {
+                AgentKError::InvalidMcpRequest("GitHub issue labels must be strings".to_string())
+            })?;
+            if label.is_empty() || label.chars().any(char::is_control) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "GitHub issue labels must be non-empty printable strings".to_string(),
+                ));
+            }
+            Ok(label.to_string())
+        })
+        .collect()
+}
+
+fn github_payload_string(
+    payload: &serde_json::Value,
+    path: &[&str],
+    name: &str,
+) -> Result<String, AgentKError> {
+    let mut value = payload;
+    for part in path {
+        value = value.get(*part).ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(format!("GitHub payload is missing {name}"))
+        })?;
+    }
+    let value = value.as_str().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest(format!("GitHub payload {name} must be a string"))
+    })?;
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "GitHub payload {name} must be non-empty and printable"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn is_valid_github_repository_for_send(repository: &str) -> bool {
+    let Some((owner, name)) = repository.split_once('/') else {
+        return false;
+    };
+    !owner.contains('/')
+        && !name.contains('/')
+        && is_valid_github_repository_part_for_send(owner)
+        && is_valid_github_repository_part_for_send(name)
+}
+
+fn is_valid_github_repository_part_for_send(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && value != "."
+        && value != ".."
+}
+
+fn write_temp_github_json(
+    payload: &serde_json::Value,
+    kind: &str,
+    index: usize,
+) -> Result<PathBuf, AgentKError> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "agentk-github-{kind}-{}-{index}-{nonce}.json",
+        std::process::id()
+    ));
+    fs::write(&path, serde_json::to_vec(payload)?)?;
+    Ok(path)
+}
+
+fn store_email(
+    root: PathBuf,
+    out: PathBuf,
+    to: Vec<String>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = export_email_notification_payloads(&root, &out, &to)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK email notification payloads exported");
+    println!("root       {}", report.root.display());
+    println!("out        {}", report.out.display());
+    println!("recipients {}", report.to.len());
+    println!("files      {}", report.files.len());
+    println!("payloads   {}", report.payloads);
+    println!("pending    {}", report.pending);
+    println!("decided    {}", report.decided);
+    println!("warning    payloads are local JSON only; AgentK did not call sendmail");
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailPayloadManifest {
+    schema: String,
+    payloads: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EmailDeliveryAttempt {
+    index: usize,
+    delivered: bool,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreEmailSendReport {
+    payload_root: PathBuf,
+    payloads_path: PathBuf,
+    sendmail: String,
+    dry_run: bool,
+    command: Vec<String>,
+    payloads: usize,
+    delivered: usize,
+    failed: usize,
+    attempts: Vec<EmailDeliveryAttempt>,
+}
+
+fn store_email_send(
+    payload_root: PathBuf,
+    sendmail: String,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_store_email_send(payload_root, sendmail, dry_run)?;
+    let failed = !report.dry_run && report.failed > 0;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK email notification delivery");
+        println!("payloads  {}", report.payloads_path.display());
+        println!("sendmail  {}", report.sendmail);
+        println!("dry-run   {}", report.dry_run);
+        println!("payloads  {}", report.payloads);
+        println!("delivered {}", report.delivered);
+        println!("failed    {}", report.failed);
+        println!("command   {}", report.command.join(" "));
+        println!(
+            "verdict   {}",
+            if report.dry_run {
+                "ready"
+            } else if report.failed == 0 {
+                "delivered"
+            } else {
+                "blocked"
+            }
+        );
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "email notification delivery failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn run_store_email_send(
+    payload_root: PathBuf,
+    sendmail: String,
+    dry_run: bool,
+) -> Result<StoreEmailSendReport, AgentKError> {
+    if sendmail.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sendmail executable must be non-empty".to_string(),
+        ));
+    }
+    let manifest_path = payload_root.join("manifest.json");
+    let manifest: EmailPayloadManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)
+        .map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!("Email payload manifest did not parse: {error}"))
+        })?;
+    if manifest.schema != "agentk.email_notification_payloads" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-email-send requires an email payload export from store-email".to_string(),
+        ));
+    }
+    if manifest.payloads != "payloads.jsonl" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Email payload manifest must reference payloads.jsonl".to_string(),
+        ));
+    }
+
+    let payloads_path = payload_root.join(&manifest.payloads);
+    let messages = read_email_payload_export(&payloads_path)?;
+    let command = vec![sendmail.clone(), "-t".to_string(), "-oi".to_string()];
+    if dry_run {
+        return Ok(StoreEmailSendReport {
+            payload_root,
+            payloads_path,
+            sendmail,
+            dry_run,
+            command,
+            payloads: messages.len(),
+            delivered: 0,
+            failed: 0,
+            attempts: Vec::new(),
+        });
+    }
+
+    let mut attempts = Vec::new();
+    let mut delivered = 0usize;
+    let mut failed = 0usize;
+    for (index, message) in messages.iter().enumerate() {
+        let status = send_email_payload_with_sendmail(&sendmail, message)?;
+        let ok = status.success();
+        if ok {
+            delivered += 1;
+        } else {
+            failed += 1;
+        }
+        attempts.push(EmailDeliveryAttempt {
+            index,
+            delivered: ok,
+            exit_code: status.code(),
+        });
+    }
+
+    Ok(StoreEmailSendReport {
+        payload_root,
+        payloads_path,
+        sendmail,
+        dry_run,
+        command,
+        payloads: messages.len(),
+        delivered,
+        failed,
+        attempts,
+    })
+}
+
+fn read_email_payload_export(path: &Path) -> Result<Vec<String>, AgentKError> {
+    let content = fs::read_to_string(path)?;
+    let mut messages = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "Email payload export line {} did not parse: {error}",
+                index + 1
+            ))
+        })?;
+        let message = payload
+            .get("message")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                AgentKError::InvalidMcpRequest(format!(
+                    "Email payload export line {} is missing message",
+                    index + 1
+                ))
+            })?;
+        if !message.contains("\n\n")
+            || !message.starts_with("To: ")
+            || message
+                .chars()
+                .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+        {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "Email payload export line {} is not a safe RFC822-style message",
+                index + 1
+            )));
+        }
+        messages.push(message.to_string());
+    }
+    Ok(messages)
+}
+
+fn send_email_payload_with_sendmail(
+    sendmail: &str,
+    message: &str,
+) -> Result<std::process::ExitStatus, AgentKError> {
+    let mut child = ProcessCommand::new(sendmail)
+        .arg("-t")
+        .arg("-oi")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    {
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err(AgentKError::InvalidMcpRequest(
+                "sendmail stdin was not available".to_string(),
+            ));
+        };
+        stdin.write_all(message.as_bytes())?;
+    }
+    Ok(child.wait()?)
 }
 
 #[derive(Debug, Serialize)]
@@ -4355,7 +5838,11 @@ struct McpHttpGatewayMetrics {
     origin_rejections: usize,
     method_rejections: usize,
     preflight_rejections: usize,
-    sse_unsupported_requests: usize,
+    sse_stream_requests: usize,
+    sse_resume_requests: usize,
+    sse_invalid_resume_requests: usize,
+    sse_evicted_resume_requests: usize,
+    sse_events_returned: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
     body_too_large_responses: usize,
@@ -4369,6 +5856,14 @@ struct McpHttpSession {
     proxy: McpSubprocessProxy,
     protocol_version: String,
     last_seen: Instant,
+    next_sse_event_id: u64,
+    sse_events: VecDeque<McpHttpSseEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct McpHttpSseEvent {
+    id: u64,
+    data: Vec<u8>,
 }
 
 fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentKError> {
@@ -4716,11 +6211,11 @@ fn mcp_http_preflight_response(origin: &str) -> DashboardHttpResponse {
     mcp_http_apply_cors_headers(&mut response, origin);
     response.headers.push((
         "Access-Control-Allow-Methods".to_string(),
-        "POST, DELETE, OPTIONS".to_string(),
+        "POST, GET, DELETE, OPTIONS".to_string(),
     ));
     response.headers.push((
         "Access-Control-Allow-Headers".to_string(),
-        "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version"
+        "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID"
             .to_string(),
     ));
     response
@@ -4739,7 +6234,7 @@ fn mcp_http_apply_cors_headers(response: &mut DashboardHttpResponse, origin: &st
         .push(("Vary".to_string(), "Origin".to_string()));
     response.headers.push((
         "Access-Control-Expose-Headers".to_string(),
-        "Mcp-Session-Id, WWW-Authenticate".to_string(),
+        "Mcp-Session-Id, Last-Event-ID, WWW-Authenticate".to_string(),
     ));
 }
 
@@ -4866,9 +6361,10 @@ fn mcp_http_response_inner(
         _ => {
             let mut response =
                 dashboard_http_text("405 Method Not Allowed", "method not allowed\n");
-            response
-                .headers
-                .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
+            response.headers.push((
+                "Allow".to_string(),
+                "POST, GET, DELETE, OPTIONS".to_string(),
+            ));
             Ok(response)
         }
     }?;
@@ -4906,12 +6402,6 @@ fn mcp_http_record_response_metrics(
             "401 Unauthorized" => metrics.auth_rejections += 1,
             "403 Forbidden" => metrics.origin_rejections += 1,
             "405 Method Not Allowed" => metrics.method_rejections += 1,
-            "501 Not Implemented"
-                if request.method == "GET"
-                    && request.target.split('?').next() == Some(state.endpoint.as_str()) =>
-            {
-                metrics.sse_unsupported_requests += 1;
-            }
             "404 Not Found"
                 if request.target.split('?').next() == Some(state.endpoint.as_str()) =>
             {
@@ -4962,7 +6452,7 @@ fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardH
             "MCP HTTP CORS preflight method is required\n",
         ));
     };
-    if !matches!(requested_method, "POST" | "DELETE") {
+    if !matches!(requested_method, "POST" | "GET" | "DELETE") {
         return Some(dashboard_http_text(
             "400 Bad Request",
             "MCP HTTP CORS preflight method is not allowed\n",
@@ -4988,6 +6478,7 @@ fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardH
                     "accept"
                         | "authorization"
                         | "content-type"
+                        | "last-event-id"
                         | "mcp-protocol-version"
                         | "mcp-session-id"
                         | "x-agentk-mcp-token"
@@ -5081,7 +6572,11 @@ fn mcp_http_operational_response(
             "origin_rejections": metrics.origin_rejections,
             "method_rejections": metrics.method_rejections,
             "preflight_rejections": metrics.preflight_rejections,
-            "sse_unsupported_requests": metrics.sse_unsupported_requests,
+            "sse_stream_requests": metrics.sse_stream_requests,
+            "sse_resume_requests": metrics.sse_resume_requests,
+            "sse_invalid_resume_requests": metrics.sse_invalid_resume_requests,
+            "sse_evicted_resume_requests": metrics.sse_evicted_resume_requests,
+            "sse_events_returned": metrics.sse_events_returned,
             "invalid_framing_responses": metrics.invalid_framing_responses,
             "header_too_large_responses": metrics.header_too_large_responses,
             "body_too_large_responses": metrics.body_too_large_responses,
@@ -5169,9 +6664,21 @@ agentk_mcp_http_method_rejections_total {method_rejections}\n\
 # HELP agentk_mcp_http_preflight_rejections_total CORS preflight requests rejected by MCP HTTP validation.\n\
 # TYPE agentk_mcp_http_preflight_rejections_total counter\n\
 agentk_mcp_http_preflight_rejections_total {preflight_rejections}\n\
-# HELP agentk_mcp_http_sse_unsupported_requests_total GET requests shaped like MCP SSE streams while SSE is not implemented.\n\
-# TYPE agentk_mcp_http_sse_unsupported_requests_total counter\n\
-agentk_mcp_http_sse_unsupported_requests_total {sse_unsupported_requests}\n\
+# HELP agentk_mcp_http_sse_stream_requests_total Authenticated MCP SSE stream reads served from bounded session buffers.\n\
+# TYPE agentk_mcp_http_sse_stream_requests_total counter\n\
+agentk_mcp_http_sse_stream_requests_total {sse_stream_requests}\n\
+# HELP agentk_mcp_http_sse_resume_requests_total MCP SSE stream reads using Last-Event-ID resume.\n\
+# TYPE agentk_mcp_http_sse_resume_requests_total counter\n\
+agentk_mcp_http_sse_resume_requests_total {sse_resume_requests}\n\
+# HELP agentk_mcp_http_sse_invalid_resume_requests_total MCP SSE stream reads rejected for invalid Last-Event-ID values.\n\
+# TYPE agentk_mcp_http_sse_invalid_resume_requests_total counter\n\
+agentk_mcp_http_sse_invalid_resume_requests_total {sse_invalid_resume_requests}\n\
+# HELP agentk_mcp_http_sse_evicted_resume_requests_total MCP SSE resume reads rejected because Last-Event-ID is older than the retained buffer.\n\
+# TYPE agentk_mcp_http_sse_evicted_resume_requests_total counter\n\
+agentk_mcp_http_sse_evicted_resume_requests_total {sse_evicted_resume_requests}\n\
+# HELP agentk_mcp_http_sse_events_returned_total Buffered MCP SSE events returned to clients.\n\
+# TYPE agentk_mcp_http_sse_events_returned_total counter\n\
+agentk_mcp_http_sse_events_returned_total {sse_events_returned}\n\
 # HELP agentk_mcp_http_invalid_framing_responses_total Requests rejected before parsing due to invalid HTTP framing.\n\
 # TYPE agentk_mcp_http_invalid_framing_responses_total counter\n\
 agentk_mcp_http_invalid_framing_responses_total {invalid_framing_responses}\n\
@@ -5213,7 +6720,11 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         origin_rejections = metrics.origin_rejections,
         method_rejections = metrics.method_rejections,
         preflight_rejections = metrics.preflight_rejections,
-        sse_unsupported_requests = metrics.sse_unsupported_requests,
+        sse_stream_requests = metrics.sse_stream_requests,
+        sse_resume_requests = metrics.sse_resume_requests,
+        sse_invalid_resume_requests = metrics.sse_invalid_resume_requests,
+        sse_evicted_resume_requests = metrics.sse_evicted_resume_requests,
+        sse_events_returned = metrics.sse_events_returned,
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
         body_too_large_responses = metrics.body_too_large_responses,
@@ -5263,6 +6774,7 @@ fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<Dashb
         "access-control-request-method",
         "authorization",
         "content-type",
+        "last-event-id",
         "mcp-protocol-version",
         "mcp-session-id",
         "origin",
@@ -5346,17 +6858,127 @@ fn mcp_http_sse_response(
     {
         return Ok(response);
     }
+    let last_event_id = match mcp_http_last_event_id(request) {
+        Ok(last_event_id) => last_event_id,
+        Err(response) => {
+            mcp_http_update_metrics(state, |metrics| {
+                metrics.sse_invalid_resume_requests += 1;
+            })?;
+            return Ok(response);
+        }
+    };
+    if mcp_http_sse_resume_evicted(&session, last_event_id) {
+        mcp_http_update_metrics(state, |metrics| {
+            metrics.sse_evicted_resume_requests += 1;
+        })?;
+        return Ok(dashboard_http_text(
+            "410 Gone",
+            "Last-Event-ID is older than the retained MCP HTTP SSE buffer\n",
+        ));
+    }
+    let events = session
+        .sse_events
+        .iter()
+        .filter(|event| last_event_id.is_none_or(|last_event_id| event.id > last_event_id))
+        .cloned()
+        .collect::<Vec<_>>();
     session.last_seen = Instant::now();
     drop(session);
 
-    let mut response = dashboard_http_text(
-        "501 Not Implemented",
-        "MCP HTTP SSE streams are not implemented for this AgentK gateway yet\n",
-    );
-    response
-        .headers
-        .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
-    Ok(response)
+    mcp_http_update_metrics(state, |metrics| {
+        metrics.sse_stream_requests += 1;
+        metrics.sse_events_returned += events.len();
+        if last_event_id.is_some() {
+            metrics.sse_resume_requests += 1;
+        }
+    })?;
+    let mut headers = vec![("X-Accel-Buffering".to_string(), "no".to_string())];
+    if let Some(last_event) = events.last().map(|event| event.id).or(last_event_id) {
+        headers.push(("Last-Event-ID".to_string(), last_event.to_string()));
+    }
+    Ok(DashboardHttpResponse {
+        status: "200 OK",
+        content_type: "text/event-stream",
+        headers,
+        body: mcp_http_sse_body(&events),
+    })
+}
+
+fn mcp_http_last_event_id(
+    request: &DashboardHttpRequest,
+) -> Result<Option<u64>, DashboardHttpResponse> {
+    let Some(value) = request.header("last-event-id") else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.trim() != value || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(dashboard_http_text(
+            "400 Bad Request",
+            "Last-Event-ID must be an unsigned decimal event id\n",
+        ));
+    }
+    value.parse::<u64>().map(Some).map_err(|_| {
+        dashboard_http_text(
+            "400 Bad Request",
+            "Last-Event-ID must be an unsigned decimal event id\n",
+        )
+    })
+}
+
+fn mcp_http_sse_resume_evicted(session: &McpHttpSession, last_event_id: Option<u64>) -> bool {
+    mcp_http_sse_resume_evicted_for_events(&session.sse_events, last_event_id)
+}
+
+fn mcp_http_sse_resume_evicted_for_events(
+    events: &VecDeque<McpHttpSseEvent>,
+    last_event_id: Option<u64>,
+) -> bool {
+    let Some(last_event_id) = last_event_id else {
+        return false;
+    };
+    let Some(first_event_id) = events.front().map(|event| event.id) else {
+        return false;
+    };
+    last_event_id.saturating_add(1) < first_event_id
+}
+
+fn mcp_http_sse_body(events: &[McpHttpSseEvent]) -> Vec<u8> {
+    if events.is_empty() {
+        return b": agentk no buffered events\n\n".to_vec();
+    }
+
+    let mut body = Vec::new();
+    for event in events {
+        body.extend_from_slice(format!("id: {}\nevent: message\n", event.id).as_bytes());
+        let data = String::from_utf8_lossy(&event.data);
+        if data.is_empty() {
+            body.extend_from_slice(b"data:\n");
+        } else {
+            for line in data.lines() {
+                body.extend_from_slice(b"data: ");
+                body.extend_from_slice(line.as_bytes());
+                body.extend_from_slice(b"\n");
+            }
+        }
+        body.extend_from_slice(b"\n");
+    }
+    body
+}
+
+fn mcp_http_push_sse_event(
+    events: &mut VecDeque<McpHttpSseEvent>,
+    next_event_id: &mut u64,
+    data: &[u8],
+) {
+    let id = *next_event_id;
+    *next_event_id = (*next_event_id).saturating_add(1);
+    events.push_back(McpHttpSseEvent {
+        id,
+        data: data.to_vec(),
+    });
+    while events.len() > MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION {
+        events.pop_front();
+    }
 }
 
 fn mcp_http_post_response(
@@ -5448,14 +7070,22 @@ fn mcp_http_post_response(
                         state.max_active_sessions,
                     ));
                 }
-                sessions.insert(
-                    session_id,
-                    Arc::new(Mutex::new(McpHttpSession {
-                        proxy,
-                        protocol_version,
-                        last_seen: Instant::now(),
-                    })),
-                );
+                let mut session = McpHttpSession {
+                    proxy,
+                    protocol_version,
+                    last_seen: Instant::now(),
+                    next_sse_event_id: 1,
+                    sse_events: VecDeque::new(),
+                };
+                {
+                    let McpHttpSession {
+                        sse_events,
+                        next_sse_event_id,
+                        ..
+                    } = &mut session;
+                    mcp_http_push_sse_event(sse_events, next_sse_event_id, &body);
+                }
+                sessions.insert(session_id, Arc::new(Mutex::new(session)));
                 mcp_http_update_metrics(state, |metrics| {
                     metrics.sessions_created += 1;
                 })?;
@@ -5503,15 +7133,24 @@ fn mcp_http_post_response(
     }
     session.last_seen = Instant::now();
     let response = session.proxy.handle_json_rpc_line(&request.body, false)?;
+    let response_body = response.as_ref().map(serde_json::to_vec).transpose()?;
+    if let Some(body) = response_body.as_deref() {
+        let McpHttpSession {
+            sse_events,
+            next_sse_event_id,
+            ..
+        } = &mut *session;
+        mcp_http_push_sse_event(sse_events, next_sse_event_id, body);
+    }
     mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     drop(session);
 
-    if let Some(response) = response {
+    if let Some(body) = response_body {
         Ok(DashboardHttpResponse {
             status: "200 OK",
             content_type: "application/json",
             headers: Vec::new(),
-            body: serde_json::to_vec(&response)?,
+            body,
         })
     } else if is_notification_or_response {
         Ok(DashboardHttpResponse {
@@ -6098,19 +7737,39 @@ fn mcp_session_report_path(trace_out: &std::path::Path) -> PathBuf {
 fn sidecar_package(
     root: PathBuf,
     out: PathBuf,
+    archive_out: Option<PathBuf>,
     force: bool,
     json: bool,
 ) -> Result<(), AgentKError> {
     let report = package_sidecar_bundle(&root, &out, force)?;
+    let archive_report = archive_out
+        .as_ref()
+        .map(|archive| archive_sidecar_package(&report.package, archive, force))
+        .transpose()?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        if let Some(archive) = &archive_report {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "package": report,
+                    "archive": archive,
+                }))?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         return Ok(());
     }
 
     println!("AgentK team sidecar package created");
     println!("root      {}", report.root.display());
     println!("package   {}", report.package.display());
+    if let Some(archive) = &archive_report {
+        println!("archive   {}", archive.archive.display());
+        println!("checksum  {}", archive.checksum.display());
+        println!("archive-sha {}", archive.sha256);
+    }
     println!("files     {}", report.files.len());
     for file in &report.files {
         println!("  {}", file.display());
@@ -6126,6 +7785,10 @@ fn sidecar_package(
     println!(
         "manifest  {}",
         report.package.join("manifest.json").display()
+    );
+    println!(
+        "lock      {}",
+        report.package.join("package.lock.json").display()
     );
     println!(
         "launch    {}",
@@ -6159,6 +7822,33 @@ fn sidecar_package(
         "push      {}",
         report.package.join("bin/agentk-store-push").display()
     );
+    println!(
+        "slack     {}",
+        report.package.join("bin/agentk-store-slack").display()
+    );
+    println!(
+        "slack-send {}",
+        report.package.join("bin/agentk-store-slack-send").display()
+    );
+    println!(
+        "github    {}",
+        report.package.join("bin/agentk-store-github").display()
+    );
+    println!(
+        "github-send {}",
+        report
+            .package
+            .join("bin/agentk-store-github-send")
+            .display()
+    );
+    println!(
+        "email     {}",
+        report.package.join("bin/agentk-store-email").display()
+    );
+    println!(
+        "email-send {}",
+        report.package.join("bin/agentk-store-email-send").display()
+    );
     Ok(())
 }
 
@@ -6191,6 +7881,114 @@ fn sidecar_package_check(root: PathBuf, json: bool) -> Result<(), AgentKError> {
         ));
     }
 
+    Ok(())
+}
+
+fn sidecar_package_archive_check(
+    archive: PathBuf,
+    checksum: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = check_sidecar_package_archive(&archive, checksum)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK team sidecar archive check");
+        println!("archive  {}", report.archive.display());
+        println!("checksum {}", report.checksum.display());
+        println!(
+            "verdict  {}",
+            if report.passed { "verified" } else { "blocked" }
+        );
+        if let Some(actual) = &report.actual_sha256 {
+            println!("sha256   {actual}");
+        }
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package archive check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn sidecar_package_install(
+    archive: PathBuf,
+    out: PathBuf,
+    checksum: Option<PathBuf>,
+    force: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = install_sidecar_package_archive(&archive, checksum, &out, force)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK team sidecar package installed");
+    println!("archive  {}", report.archive.display());
+    println!("checksum {}", report.checksum.display());
+    println!("package  {}", report.package.display());
+    println!("files    {}", report.files);
+    println!("sha256   {}", report.archive_sha256);
+    println!(
+        "verdict  {}",
+        if report.package_check.passed {
+            "ready"
+        } else {
+            "blocked"
+        }
+    );
+    Ok(())
+}
+
+fn sidecar_package_release_manifest(
+    package: PathBuf,
+    archive: PathBuf,
+    checksum: Option<PathBuf>,
+    install_receipt: Option<PathBuf>,
+    out: PathBuf,
+    force: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = write_sidecar_package_release_manifest(
+        &package,
+        &archive,
+        checksum,
+        install_receipt,
+        &out,
+        force,
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK team sidecar release manifest");
+    println!("manifest {}", report.output.display());
+    println!("package  {}", report.package_root.display());
+    println!("archive  {}", report.archive.display());
+    println!("checksum {}", report.checksum.display());
+    println!("receipt  {}", report.install_receipt.display());
+    println!("sha256   {}", report.archive_sha256);
+    println!(
+        "verdict  {}",
+        if report.passed { "ready" } else { "blocked" }
+    );
     Ok(())
 }
 
@@ -6304,6 +8102,15 @@ fn secret_refs_check(manifest: PathBuf, json: bool) -> Result<(), AgentKError> {
     println!("AgentK secret refs verified");
     println!("version   {}", report.version);
     println!("secrets   {}", report.secret_count);
+    println!("providers {}", report.provider_count);
+    println!(
+        "external  {} production provider refs shape-checked",
+        report.production_provider_ref_count
+    );
+    println!(
+        "shapes    {} provider-specific refs shape-checked",
+        report.shape_checked_ref_count
+    );
     println!("redacted  provider refs were not printed");
     Ok(())
 }
@@ -6414,10 +8221,668 @@ fn release_audit(json: bool, strict: bool) -> Result<(), AgentKError> {
     Ok(())
 }
 
+fn release_status(json: bool) -> Result<(), AgentKError> {
+    let report = alpha_release_status_report(".");
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.ready_for_alpha_rc {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    println!("AgentK v0.2 alpha release train status");
+    println!("release   {}", report.release);
+    println!(
+        "verdict   {}",
+        if report.ready_for_alpha_rc {
+            "alpha RC surface ready"
+        } else {
+            "blocked"
+        }
+    );
+    print_alpha_release_status_section("shipped", &report.shipped_surfaces);
+    print_alpha_release_status_section("gates", &report.verification_gates);
+    print_alpha_release_status_section("limits", &report.accepted_limits);
+    print_alpha_release_status_section("final blockers", &report.final_release_blockers);
+
+    if !report.ready_for_alpha_rc {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+fn print_alpha_release_status_section(title: &str, items: &[agentk::AlphaReleaseStatusItem]) {
+    println!();
+    println!("{title}");
+    for item in items {
+        println!("[{}] {:<42} {}", item.status, item.name, item.detail);
+        if !item.evidence.is_empty() {
+            println!("       evidence: {}", item.evidence.join("; "));
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseCandidateSmokeReport {
+    root: PathBuf,
+    package: PathBuf,
+    package_archive: PathBuf,
+    package_archive_checksum: PathBuf,
+    package_release_manifest: PathBuf,
+    installed_package: PathBuf,
+    package_archive_sha256: String,
+    trace_path: PathBuf,
+    dashboard_path: PathBuf,
+    store_export_root: PathBuf,
+    team_store_root: PathBuf,
+    slack_payload_root: PathBuf,
+    github_payload_root: PathBuf,
+    kept_root: bool,
+    passed: bool,
+    steps: Vec<ReleaseCandidateSmokeStep>,
+    artifacts: Vec<ReleaseCandidateSmokeArtifact>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseCandidateSmokeStep {
+    name: String,
+    command: Vec<String>,
+    passed: bool,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseCandidateSmokeArtifact {
+    name: String,
+    path: PathBuf,
+    present: bool,
+}
+
+fn release_candidate_smoke(
+    root: Option<PathBuf>,
+    force: bool,
+    keep_root: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_release_candidate_smoke(root, force, keep_root)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK release candidate smoke");
+    println!(
+        "verdict   {}",
+        if report.passed { "ready" } else { "blocked" }
+    );
+    println!("root      {}", report.root.display());
+    println!("package   {}", report.package.display());
+    println!("archive   {}", report.package_archive.display());
+    println!("checksum  {}", report.package_archive_checksum.display());
+    println!("handoff   {}", report.package_release_manifest.display());
+    println!("installed {}", report.installed_package.display());
+    println!("archive-sha {}", report.package_archive_sha256);
+    println!("trace     {}", report.trace_path.display());
+    println!("dashboard {}", report.dashboard_path.display());
+    println!("store     {}", report.store_export_root.display());
+    println!("team      {}", report.team_store_root.display());
+    println!("slack     {}", report.slack_payload_root.display());
+    println!("github    {}", report.github_payload_root.display());
+    println!("kept-root {}", report.kept_root);
+    println!();
+    for step in &report.steps {
+        println!(
+            "[{}] {:<24} {}",
+            if step.passed { "PASS" } else { "FAIL" },
+            step.name,
+            step.command.join(" ")
+        );
+    }
+    println!();
+    for artifact in &report.artifacts {
+        println!(
+            "[{}] {:<24} {}",
+            if artifact.present { "PASS" } else { "FAIL" },
+            artifact.name,
+            artifact.path.display()
+        );
+    }
+
+    if !report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release candidate smoke failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn release_homebrew_formula(
+    source_url: String,
+    sha256: Option<String>,
+    source_archive: Option<PathBuf>,
+    out: PathBuf,
+    version: Option<String>,
+    homepage: String,
+    class_name: String,
+    force: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = write_homebrew_formula(
+        &source_url,
+        sha256.as_deref(),
+        source_archive.as_deref(),
+        &out,
+        version.as_deref(),
+        Some(&homepage),
+        Some(&class_name),
+        force,
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("AgentK Homebrew formula written");
+    println!("out        {}", report.output.display());
+    println!("class      {}", report.class_name);
+    println!("name       {}", report.formula_name);
+    println!("version    {}", report.version);
+    println!("homepage   {}", report.homepage);
+    println!("source-url {}", report.source_url);
+    if let Some(source_archive) = &report.source_archive {
+        println!("archive    {}", source_archive.display());
+    }
+    println!("sha256     {}", report.sha256);
+    println!("note       formula was written locally; AgentK did not publish a tap");
+    Ok(())
+}
+
+fn run_release_candidate_smoke(
+    root: Option<PathBuf>,
+    force: bool,
+    keep_root: bool,
+) -> Result<ReleaseCandidateSmokeReport, AgentKError> {
+    let explicit_root = root.is_some();
+    let root = root.unwrap_or_else(release_candidate_smoke_temp_root);
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "release candidate smoke root {} exists but is not a directory",
+                root.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(root));
+        }
+        fs::remove_dir_all(&root)?;
+    }
+    fs::create_dir_all(&root)?;
+
+    let bundle = root.join("agentk-sidecar");
+    let package = root.join("dist/agentk-sidecar");
+    let package_archive = root.join("dist/agentk-sidecar.tar");
+    let package_release_manifest = root.join("dist/agentk-sidecar-release-manifest.json");
+    let installed_package = root.join("installed/agentk-sidecar");
+    let install_receipt_path = installed_package.join("sidecar/.agentk/install-receipt.json");
+    let trace_path = installed_package.join("sidecar/.agentk/runs/safe-agent-demo.jsonl");
+    let decisions_path = installed_package.join("sidecar/.agentk/approvals.jsonl");
+    let permissions_path = installed_package.join("sidecar/team-permissions.toml");
+    let dashboard_path = installed_package.join("sidecar/.agentk/dashboard.html");
+    let store_export_root = installed_package.join("sidecar/.agentk/store");
+    let team_store_root = installed_package.join("sidecar/.agentk/team-store");
+    let slack_payload_root = installed_package.join("sidecar/.agentk/slack");
+    let github_payload_root = installed_package.join("sidecar/.agentk/github");
+    let email_payload_root = installed_package.join("sidecar/.agentk/email");
+
+    init_sidecar_bundle(&bundle, false)?;
+    package_sidecar_bundle(&bundle, &package, false)?;
+    let package_archive_report = archive_sidecar_package(&package, &package_archive, false)?;
+
+    let bin = installed_package.join("bin");
+    let current_exe = env::current_exe()?;
+    let agentk_bin = current_exe.display().to_string();
+    let archive = package_archive.display().to_string();
+    let archive_checksum = package_archive_report.checksum.display().to_string();
+    let release_manifest = package_release_manifest.display().to_string();
+    let installed = installed_package.display().to_string();
+    let install_receipt = install_receipt_path.display().to_string();
+    let trace = trace_path.display().to_string();
+    let decisions = decisions_path.display().to_string();
+    let permissions = permissions_path.display().to_string();
+    let identity = installed_package
+        .join("sidecar/team-identity.toml")
+        .display()
+        .to_string();
+    let dashboard = dashboard_path.display().to_string();
+    let store_export = store_export_root.display().to_string();
+    let team_store = team_store_root.display().to_string();
+    let slack_payloads = slack_payload_root.display().to_string();
+    let github_payloads = github_payload_root.display().to_string();
+    let email_payloads = email_payload_root.display().to_string();
+    let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
+    let mut steps = Vec::new();
+
+    release_candidate_smoke_step(
+        &mut steps,
+        "archive checksum",
+        &current_exe,
+        &[
+            "sidecar-package-archive-check",
+            "--archive",
+            archive.as_str(),
+            "--checksum",
+            archive_checksum.as_str(),
+            "--json",
+        ],
+        &[],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "package install",
+        &current_exe,
+        &[
+            "sidecar-package-install",
+            "--archive",
+            archive.as_str(),
+            "--checksum",
+            archive_checksum.as_str(),
+            "--out",
+            installed.as_str(),
+            "--json",
+        ],
+        &[],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "release manifest",
+        &current_exe,
+        &[
+            "sidecar-package-release-manifest",
+            "--package",
+            installed.as_str(),
+            "--archive",
+            archive.as_str(),
+            "--checksum",
+            archive_checksum.as_str(),
+            "--install-receipt",
+            install_receipt.as_str(),
+            "--out",
+            release_manifest.as_str(),
+            "--json",
+        ],
+        &[],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "package info",
+        &bin.join("agentk-package-info"),
+        &[],
+        &[],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "package check",
+        &bin.join("agentk-package-check"),
+        &["--json"],
+        &common_env,
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "safe-agent demo",
+        &bin.join("agentk-safe-agent-demo"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_SAFE_AGENT_DEMO_TRACE_OUT", trace.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "dashboard",
+        &bin.join("agentk-dashboard"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_TRACE", trace.as_str()),
+            ("AGENTK_DECISIONS", decisions.as_str()),
+            ("AGENTK_PERMISSIONS", permissions.as_str()),
+            ("AGENTK_DASHBOARD_OUT", dashboard.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "sidecar check",
+        &bin.join("agentk-sidecar-check"),
+        &["--json"],
+        &common_env,
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "identity check",
+        &bin.join("agentk-identity-check"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_IDENTITY", identity.as_str()),
+            ("AGENTK_PERMISSIONS", permissions.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store export",
+        &bin.join("agentk-store-export"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_TRACE", trace.as_str()),
+            ("AGENTK_DECISIONS", decisions.as_str()),
+            ("AGENTK_PERMISSIONS", permissions.as_str()),
+            ("AGENTK_IDENTITY", identity.as_str()),
+            ("AGENTK_STORE_EXPORT_ROOT", store_export.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store check",
+        &bin.join("agentk-store-check"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_STORE_EXPORT_ROOT", store_export.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store sync",
+        &bin.join("agentk-store-sync"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_TRACE", trace.as_str()),
+            ("AGENTK_DECISIONS", decisions.as_str()),
+            ("AGENTK_PERMISSIONS", permissions.as_str()),
+            ("AGENTK_IDENTITY", identity.as_str()),
+            ("AGENTK_STORE_ROOT", team_store.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store slack",
+        &bin.join("agentk-store-slack"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_STORE_ROOT", team_store.as_str()),
+            ("AGENTK_SLACK_OUT", slack_payloads.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store slack send dry-run",
+        &bin.join("agentk-store-slack-send"),
+        &["--dry-run", "--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_SLACK_OUT", slack_payloads.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store github",
+        &bin.join("agentk-store-github"),
+        &[
+            "--repository",
+            "agentk/safe-agent-demo",
+            "--label",
+            "agentk",
+            "--label",
+            "approval",
+            "--json",
+        ],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_STORE_ROOT", team_store.as_str()),
+            ("AGENTK_GITHUB_OUT", github_payloads.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store github send dry-run",
+        &bin.join("agentk-store-github-send"),
+        &["--dry-run", "--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_GITHUB_OUT", github_payloads.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store email",
+        &bin.join("agentk-store-email"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_STORE_ROOT", team_store.as_str()),
+            ("AGENTK_EMAIL_OUT", email_payloads.as_str()),
+            ("AGENTK_EMAIL_TO", "agentk-alerts@example.com"),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store email send dry-run",
+        &bin.join("agentk-store-email-send"),
+        &["--dry-run", "--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_EMAIL_OUT", email_payloads.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "store push dry-run",
+        &bin.join("agentk-store-push"),
+        &["--dry-run", "--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_STORE_EXPORT_ROOT", store_export.as_str()),
+        ],
+    )?;
+
+    let mut artifacts = Vec::new();
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "manifest",
+        installed_package.join("manifest.json"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "package lock",
+        installed_package.join("package.lock.json"),
+    );
+    release_candidate_smoke_artifact(&mut artifacts, "package archive", package_archive.clone());
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "package archive checksum",
+        package_archive_report.checksum.clone(),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "release manifest",
+        package_release_manifest.clone(),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "install receipt",
+        install_receipt_path.clone(),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "claude client",
+        installed_package.join("clients/claude-desktop.mcp.json"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "codex cursor client",
+        installed_package.join("clients/codex-cursor-command.txt"),
+    );
+    release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone());
+    release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone());
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "store readme",
+        store_export_root.join("README.md"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "postgres load",
+        store_export_root.join("postgres/load.sql"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "team approvals",
+        team_store_root.join("current/approvals.json"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "slack payloads",
+        slack_payload_root.join("payloads.jsonl"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "github payloads",
+        github_payload_root.join("payloads.jsonl"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "email payloads",
+        email_payload_root.join("payloads.jsonl"),
+    );
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "docker compose",
+        installed_package.join("deploy/docker/compose.yml"),
+    );
+
+    if let Some(missing) = artifacts.iter().find(|artifact| !artifact.present) {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "release candidate smoke artifact is missing: {} ({})",
+            missing.name,
+            missing.path.display()
+        )));
+    }
+
+    let kept_root = explicit_root || keep_root;
+    if !kept_root {
+        fs::remove_dir_all(&root)?;
+    }
+
+    Ok(ReleaseCandidateSmokeReport {
+        root,
+        package,
+        package_archive,
+        package_archive_checksum: package_archive_report.checksum,
+        package_release_manifest,
+        installed_package,
+        package_archive_sha256: package_archive_report.sha256,
+        trace_path,
+        dashboard_path,
+        store_export_root,
+        team_store_root,
+        slack_payload_root,
+        github_payload_root,
+        kept_root,
+        passed: true,
+        steps,
+        artifacts,
+    })
+}
+
+fn release_candidate_smoke_step(
+    steps: &mut Vec<ReleaseCandidateSmokeStep>,
+    name: &str,
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<(), AgentKError> {
+    let command = std::iter::once(program.display().to_string())
+        .chain(args.iter().map(|arg| (*arg).to_string()))
+        .collect::<Vec<_>>();
+    let mut process = std::process::Command::new(program);
+    process.args(args);
+    for (key, value) in envs {
+        process.env(key, value);
+    }
+    let output = process.output()?;
+    let passed = output.status.success();
+    let exit_code = output.status.code();
+    steps.push(ReleaseCandidateSmokeStep {
+        name: name.to_string(),
+        command,
+        passed,
+        exit_code,
+    });
+    if !passed {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "release candidate smoke step {name} failed: {}",
+            release_candidate_smoke_output_detail(&output)
+        )));
+    }
+    Ok(())
+}
+
+fn release_candidate_smoke_output_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no command output");
+    let mut truncated = detail.chars().take(240).collect::<String>();
+    if detail.chars().count() > 240 {
+        truncated.push_str("...");
+    }
+    match output.status.code() {
+        Some(code) => format!("exit {code}; {truncated}"),
+        None => format!("terminated by signal; {truncated}"),
+    }
+}
+
+fn release_candidate_smoke_artifact(
+    artifacts: &mut Vec<ReleaseCandidateSmokeArtifact>,
+    name: &str,
+    path: PathBuf,
+) {
+    let present = path.exists();
+    artifacts.push(ReleaseCandidateSmokeArtifact {
+        name: name.to_string(),
+        path,
+        present,
+    });
+}
+
+fn release_candidate_smoke_temp_root() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "agentk-release-candidate-smoke-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[cfg(unix)]
     fn mcp_proxy_trace_out_test_path(label: &str) -> PathBuf {
@@ -6565,6 +9030,16 @@ done
 
     #[test]
     fn mcp_proxy_stdio_accepts_hyphen_prefixed_child_args() {
+        std::thread::Builder::new()
+            .name("agentk-cli-stdio-args-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(mcp_proxy_stdio_accepts_hyphen_prefixed_child_args_inner)
+            .expect("stdio args parser smoke thread should spawn")
+            .join()
+            .expect("stdio args parser smoke thread should not panic");
+    }
+
+    fn mcp_proxy_stdio_accepts_hyphen_prefixed_child_args_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "mcp-proxy-stdio",
@@ -6591,6 +9066,16 @@ done
 
     #[test]
     fn mcp_proxy_stdio_accepts_session_report_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-stdio-session-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(mcp_proxy_stdio_accepts_session_report_out_inner)
+            .expect("stdio session parser smoke thread should spawn")
+            .join()
+            .expect("stdio session parser smoke thread should not panic");
+    }
+
+    fn mcp_proxy_stdio_accepts_session_report_out_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "mcp-proxy-stdio",
@@ -6615,6 +9100,16 @@ done
 
     #[test]
     fn mcp_proxy_tcp_accepts_transport_args() {
+        std::thread::Builder::new()
+            .name("agentk-cli-tcp-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(mcp_proxy_tcp_accepts_transport_args_inner)
+            .expect("TCP parser smoke thread should spawn")
+            .join()
+            .expect("TCP parser smoke thread should not panic");
+    }
+
+    fn mcp_proxy_tcp_accepts_transport_args_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "mcp-proxy-tcp",
@@ -6666,6 +9161,16 @@ done
 
     #[test]
     fn mcp_proxy_http_accepts_streamable_http_args() {
+        std::thread::Builder::new()
+            .name("agentk-cli-http-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(mcp_proxy_http_accepts_streamable_http_args_inner)
+            .expect("HTTP parser smoke thread should spawn")
+            .join()
+            .expect("HTTP parser smoke thread should not panic");
+    }
+
+    fn mcp_proxy_http_accepts_streamable_http_args_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "mcp-proxy-http",
@@ -6832,7 +9337,7 @@ done
         );
         assert_eq!(
             response_header(&initialize_response, "Access-Control-Expose-Headers"),
-            Some("Mcp-Session-Id, WWW-Authenticate")
+            Some("Mcp-Session-Id, Last-Event-ID, WWW-Authenticate")
         );
         let session_id = response_header(&initialize_response, "Mcp-Session-Id")
             .expect("initialize should return session id")
@@ -6860,7 +9365,51 @@ done
         assert_eq!(initialized_response.status, "202 Accepted");
         assert!(initialized_response.body.is_empty());
 
-        let unsupported_sse = dashboard_test_request_with_headers(
+        let bad_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "BAD_RESUME_SHOULD_NOT_REFLECT"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let bad_resume_response =
+            mcp_http_response(&bad_resume, &state).expect("bad SSE resume should fail closed");
+        assert_eq!(bad_resume_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_resume_response.body)
+                .contains("BAD_RESUME_SHOULD_NOT_REFLECT")
+        );
+
+        let overflow_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "999999999999999999999999999999999999999"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let overflow_resume_response =
+            mcp_http_response(&overflow_resume, &state).expect("overflow resume should fail");
+        assert_eq!(overflow_resume_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&overflow_resume_response.body)
+                .contains("Last-Event-ID must be an unsigned decimal event id")
+        );
+        assert!(
+            !String::from_utf8_lossy(&overflow_resume_response.body)
+                .contains("999999999999999999999999999999999999999")
+        );
+
+        let initial_sse = dashboard_test_request_with_headers(
             "GET",
             "/mcp",
             [
@@ -6871,21 +9420,24 @@ done
             ],
             Vec::new(),
         );
-        let unsupported_sse_response =
-            mcp_http_response(&unsupported_sse, &state).expect("SSE should fail closed");
-        assert_eq!(unsupported_sse_response.status, "501 Not Implemented");
+        let initial_sse_response =
+            mcp_http_response(&initial_sse, &state).expect("SSE should return buffered events");
+        assert_eq!(initial_sse_response.status, "200 OK");
+        assert_eq!(initial_sse_response.content_type, "text/event-stream");
         assert_eq!(
-            response_header(&unsupported_sse_response, "Allow"),
-            Some("POST, DELETE, OPTIONS")
+            response_header(&initial_sse_response, "Last-Event-ID"),
+            Some("1")
         );
         assert_eq!(
-            response_header(&unsupported_sse_response, "Access-Control-Allow-Origin"),
+            response_header(&initial_sse_response, "Access-Control-Allow-Origin"),
             Some("http://127.0.0.1:3000")
         );
-        assert!(
-            String::from_utf8_lossy(&unsupported_sse_response.body)
-                .contains("SSE streams are not implemented")
-        );
+        let initial_sse_body = String::from_utf8_lossy(&initial_sse_response.body);
+        assert!(initial_sse_body.contains("id: 1\n"));
+        assert!(initial_sse_body.contains("event: message\n"));
+        assert!(initial_sse_body.contains("data: {"));
+        assert!(initial_sse_body.contains("\"jsonrpc\":\"2.0\""));
+        assert!(initial_sse_body.contains("\"protocolVersion\":\"2025-11-25\""));
         assert_eq!(
             state.sessions.lock().expect("sessions should lock").len(),
             1
@@ -6943,6 +9495,88 @@ done
             serde_json::from_slice(&tools_response.body).expect("tools response should be json");
         assert!(tools_json["result"]["tools"].is_array());
 
+        let resumed_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "1"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let resumed_sse_response =
+            mcp_http_response(&resumed_sse, &state).expect("SSE resume should return new events");
+        assert_eq!(resumed_sse_response.status, "200 OK");
+        assert_eq!(
+            response_header(&resumed_sse_response, "Last-Event-ID"),
+            Some("2")
+        );
+        let resumed_sse_body = String::from_utf8_lossy(&resumed_sse_response.body);
+        assert!(!resumed_sse_body.contains("id: 1\n"));
+        assert!(resumed_sse_body.contains("id: 2\n"));
+        assert!(resumed_sse_body.contains("\"tools\""));
+
+        let current_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "2"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let current_sse_response =
+            mcp_http_response(&current_sse, &state).expect("current SSE resume should heartbeat");
+        assert_eq!(current_sse_response.status, "200 OK");
+        assert_eq!(
+            response_header(&current_sse_response, "Last-Event-ID"),
+            Some("2")
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&current_sse_response.body),
+            ": agentk no buffered events\n\n"
+        );
+
+        {
+            let session = Arc::clone(
+                state
+                    .sessions
+                    .lock()
+                    .expect("sessions should lock")
+                    .get(&session_id)
+                    .expect("session should still exist"),
+            );
+            let mut session = session.lock().expect("session should lock");
+            while session.sse_events.front().is_some_and(|event| event.id < 2) {
+                session.sse_events.pop_front();
+            }
+        }
+        let evicted_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Last-Event-ID", "0"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let evicted_sse_response =
+            mcp_http_response(&evicted_sse, &state).expect("evicted SSE resume should fail");
+        assert_eq!(evicted_sse_response.status, "410 Gone");
+        assert!(
+            String::from_utf8_lossy(&evicted_sse_response.body)
+                .contains("older than the retained MCP HTTP SSE buffer")
+        );
+
         let delete = dashboard_test_request_with_headers(
             "DELETE",
             "/mcp",
@@ -6956,14 +9590,34 @@ done
             mcp_http_response(&delete, &state).expect("delete should be accepted");
         assert_eq!(delete_response.status, "202 Accepted");
 
+        let post_delete_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            Vec::new(),
+        );
+        let post_delete_sse_response = mcp_http_response(&post_delete_sse, &state)
+            .expect("deleted session SSE should be gone");
+        assert_eq!(post_delete_sse_response.status, "404 Not Found");
+
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.requests_total, 12);
         assert_eq!(metrics.post_requests, 4);
-        assert_eq!(metrics.get_requests, 1);
+        assert_eq!(metrics.get_requests, 7);
         assert_eq!(metrics.delete_requests, 1);
-        assert_eq!(metrics.client_error_responses, 1);
-        assert_eq!(metrics.server_error_responses, 1);
-        assert_eq!(metrics.sse_unsupported_requests, 1);
+        assert_eq!(metrics.client_error_responses, 5);
+        assert_eq!(metrics.server_error_responses, 0);
+        assert_eq!(metrics.sse_stream_requests, 3);
+        assert_eq!(metrics.sse_resume_requests, 2);
+        assert_eq!(metrics.sse_invalid_resume_requests, 2);
+        assert_eq!(metrics.sse_evicted_resume_requests, 1);
+        assert_eq!(metrics.sse_events_returned, 2);
+        assert_eq!(metrics.session_not_found, 1);
         assert_eq!(metrics.sessions_created, 1);
         assert_eq!(metrics.sessions_deleted, 1);
     }
@@ -7010,12 +9664,17 @@ done
         assert_eq!(response_header(&response, "Vary"), Some("Origin"));
         assert_eq!(
             response_header(&response, "Access-Control-Allow-Methods"),
-            Some("POST, DELETE, OPTIONS")
+            Some("POST, GET, DELETE, OPTIONS")
         );
         assert!(
             response_header(&response, "Access-Control-Allow-Headers")
                 .expect("preflight should list allowed headers")
                 .contains("MCP-Protocol-Version")
+        );
+        assert!(
+            response_header(&response, "Access-Control-Allow-Headers")
+                .expect("preflight should list allowed headers")
+                .contains("Last-Event-ID")
         );
         assert_eq!(response_header(&response, "WWW-Authenticate"), None);
 
@@ -7538,6 +10197,26 @@ done
                 .contains("MCP session not found")
         );
 
+        let duplicate_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("Mcp-Session-Id", "0123456789abcdef0123456789abcdef"),
+                ("Last-Event-ID", "1"),
+                ("Last-Event-ID", "2"),
+            ],
+            Vec::new(),
+        );
+        let duplicate_resume_response =
+            mcp_http_response(&duplicate_resume, &state).expect("duplicate resume should fail");
+        assert_eq!(duplicate_resume_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&duplicate_resume_response.body).contains("control header")
+        );
+        assert!(!String::from_utf8_lossy(&duplicate_resume_response.body).contains("2"));
+
         assert!(
             state
                 .sessions
@@ -7546,12 +10225,36 @@ done
                 .is_empty()
         );
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
-        assert_eq!(metrics.requests_total, 5);
-        assert_eq!(metrics.get_requests, 5);
+        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.get_requests, 6);
         assert_eq!(metrics.auth_rejections, 1);
-        assert_eq!(metrics.sse_unsupported_requests, 0);
         assert_eq!(metrics.session_not_found, 1);
         assert_eq!(metrics.sessions_created, 0);
+    }
+
+    #[test]
+    fn mcp_http_sse_buffer_bounds_events_and_detects_evicted_resume() {
+        let mut events = VecDeque::new();
+        let mut next_event_id = 1;
+        for index in 0..(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION + 2) {
+            mcp_http_push_sse_event(
+                &mut events,
+                &mut next_event_id,
+                format!("event-{index}").as_bytes(),
+            );
+        }
+
+        assert_eq!(events.len(), MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION);
+        assert_eq!(events.front().expect("front event").id, 3);
+        assert_eq!(events.back().expect("back event").id, 130);
+        assert_eq!(next_event_id, 131);
+        let ids = events.iter().map(|event| event.id).collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), events.len());
+        assert!(mcp_http_sse_resume_evicted_for_events(&events, Some(0)));
+        assert!(mcp_http_sse_resume_evicted_for_events(&events, Some(1)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(2)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(129)));
+        assert!(!mcp_http_sse_resume_evicted_for_events(&events, Some(130)));
     }
 
     #[test]
@@ -8707,7 +11410,17 @@ done
         assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
         assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
         assert_eq!(ready_json["preflight_rejections"], serde_json::json!(0));
-        assert_eq!(ready_json["sse_unsupported_requests"], serde_json::json!(0));
+        assert_eq!(ready_json["sse_stream_requests"], serde_json::json!(0));
+        assert_eq!(ready_json["sse_resume_requests"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["sse_invalid_resume_requests"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            ready_json["sse_evicted_resume_requests"],
+            serde_json::json!(0)
+        );
+        assert_eq!(ready_json["sse_events_returned"], serde_json::json!(0));
         assert_eq!(
             ready_json["invalid_framing_responses"],
             serde_json::json!(0)
@@ -8766,7 +11479,11 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 3\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_preflight_rejections_total 1\n"));
-        assert!(metrics_body.contains("agentk_mcp_http_sse_unsupported_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_stream_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_invalid_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_evicted_resume_requests_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_events_returned_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_body_too_large_responses_total 0\n"));
@@ -8816,7 +11533,7 @@ done
         assert_eq!(unsupported_endpoint_head.status, "405 Method Not Allowed");
         assert_eq!(
             response_header(&unsupported_endpoint_head, "Allow"),
-            Some("POST, DELETE, OPTIONS")
+            Some("POST, GET, DELETE, OPTIONS")
         );
         assert!(unsupported_endpoint_head.body.is_empty());
 
@@ -9004,6 +11721,16 @@ done
 
     #[test]
     fn sidecar_run_accepts_bundle_root() {
+        std::thread::Builder::new()
+            .name("agentk-cli-sidecar-run-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_run_accepts_bundle_root_inner)
+            .expect("sidecar-run parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-run parser smoke thread should not panic");
+    }
+
+    fn sidecar_run_accepts_bundle_root_inner() {
         let cli = Cli::try_parse_from(["agentk", "sidecar-run", "--root", "agentk-sidecar"])
             .expect("sidecar-run should parse");
 
@@ -9015,6 +11742,16 @@ done
 
     #[test]
     fn sidecar_serve_tcp_accepts_bundle_and_bind_args() {
+        std::thread::Builder::new()
+            .name("agentk-cli-sidecar-tcp-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_serve_tcp_accepts_bundle_and_bind_args_inner)
+            .expect("sidecar TCP parser smoke thread should spawn")
+            .join()
+            .expect("sidecar TCP parser smoke thread should not panic");
+    }
+
+    fn sidecar_serve_tcp_accepts_bundle_and_bind_args_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "sidecar-serve-tcp",
@@ -9050,6 +11787,16 @@ done
 
     #[test]
     fn sidecar_serve_http_accepts_bundle_and_streamable_http_args() {
+        std::thread::Builder::new()
+            .name("agentk-cli-sidecar-http-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_serve_http_accepts_bundle_and_streamable_http_args_inner)
+            .expect("sidecar HTTP parser smoke thread should spawn")
+            .join()
+            .expect("sidecar HTTP parser smoke thread should not panic");
+    }
+
+    fn sidecar_serve_http_accepts_bundle_and_streamable_http_args_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "sidecar-serve-http",
@@ -9200,18 +11947,19 @@ done
             let trace_path = PathBuf::from("dashboard-stream-trace.jsonl");
             let decisions_path = PathBuf::from("dashboard-stream-approvals.jsonl");
             let (mut stream, _) = listener.accept().expect("test client should connect");
-            handle_dashboard_http_stream(
-                &mut stream,
-                &trace_path,
-                &decisions_path,
-                None,
-                None,
-                false,
+            let context = DashboardHttpContext {
+                trace_path: &trace_path,
+                decisions_path: &decisions_path,
+                permissions_path: None,
+                identity_path: None,
+                admin_token: None,
+                admin_read_required: false,
                 max_body_bytes,
                 max_header_bytes,
-                None,
-            )
-            .expect("dashboard stream response should write");
+                store_root: None,
+            };
+            handle_dashboard_http_stream(&mut stream, &context)
+                .expect("dashboard stream response should write");
         });
         let mut client = TcpStream::connect(addr).expect("test client should connect");
         client
@@ -9665,6 +12413,16 @@ done
 
     #[test]
     fn sidecar_package_accepts_root_out_and_force() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_accepts_root_out_and_force_inner)
+            .expect("sidecar-package parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_accepts_root_out_and_force_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "sidecar-package",
@@ -9672,23 +12430,40 @@ done
             "agentk-sidecar",
             "--out",
             "dist/agentk-sidecar",
+            "--archive-out",
+            "dist/agentk-sidecar.tar",
             "--force",
         ])
         .expect("sidecar-package should parse");
 
         let Some(Command::SidecarPackage {
-            root, out, force, ..
+            root,
+            out,
+            archive_out,
+            force,
+            ..
         }) = cli.command
         else {
             panic!("expected sidecar-package command");
         };
         assert_eq!(root, PathBuf::from("agentk-sidecar"));
         assert_eq!(out, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(archive_out, Some(PathBuf::from("dist/agentk-sidecar.tar")));
         assert!(force);
     }
 
     #[test]
     fn sidecar_package_check_accepts_root() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-check-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_check_accepts_root_inner)
+            .expect("sidecar-package-check parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-check parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_check_accepts_root_inner() {
         let cli = Cli::try_parse_from([
             "agentk",
             "sidecar-package-check",
@@ -9706,7 +12481,164 @@ done
     }
 
     #[test]
+    fn sidecar_package_archive_check_accepts_archive_and_checksum() {
+        std::thread::Builder::new()
+            .name("agentk-cli-archive-check-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_archive_check_accepts_archive_and_checksum_inner)
+            .expect("sidecar-package-archive-check parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-archive-check parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_archive_check_accepts_archive_and_checksum_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-archive-check",
+            "--archive",
+            "dist/agentk-sidecar.tar",
+            "--checksum",
+            "dist/agentk-sidecar.tar.sha256",
+            "--json",
+        ])
+        .expect("sidecar-package-archive-check should parse");
+
+        let Some(Command::SidecarPackageArchiveCheck {
+            archive,
+            checksum,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-archive-check command");
+        };
+        assert_eq!(archive, PathBuf::from("dist/agentk-sidecar.tar"));
+        assert_eq!(
+            checksum,
+            Some(PathBuf::from("dist/agentk-sidecar.tar.sha256"))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_install_accepts_archive_out_checksum_and_force() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-install-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_install_accepts_archive_out_checksum_and_force_inner)
+            .expect("sidecar-package-install parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-install parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_install_accepts_archive_out_checksum_and_force_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-install",
+            "--archive",
+            "dist/agentk-sidecar.tar",
+            "--out",
+            "installed/agentk-sidecar",
+            "--checksum",
+            "dist/agentk-sidecar.tar.sha256",
+            "--force",
+            "--json",
+        ])
+        .expect("sidecar-package-install should parse");
+
+        let Some(Command::SidecarPackageInstall {
+            archive,
+            out,
+            checksum,
+            force,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-install command");
+        };
+        assert_eq!(archive, PathBuf::from("dist/agentk-sidecar.tar"));
+        assert_eq!(out, PathBuf::from("installed/agentk-sidecar"));
+        assert_eq!(
+            checksum,
+            Some(PathBuf::from("dist/agentk-sidecar.tar.sha256"))
+        );
+        assert!(force);
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_release_manifest_accepts_package_archive_and_receipt() {
+        std::thread::Builder::new()
+            .name("agentk-cli-release-manifest-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_release_manifest_accepts_package_archive_and_receipt_inner)
+            .expect("sidecar-package-release-manifest parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-release-manifest parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_release_manifest_accepts_package_archive_and_receipt_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-release-manifest",
+            "--package",
+            "installed/agentk-sidecar",
+            "--archive",
+            "dist/agentk-sidecar.tar",
+            "--checksum",
+            "dist/agentk-sidecar.tar.sha256",
+            "--install-receipt",
+            "installed/agentk-sidecar/sidecar/.agentk/install-receipt.json",
+            "--out",
+            "dist/agentk-sidecar-release-manifest.json",
+            "--force",
+            "--json",
+        ])
+        .expect("sidecar-package-release-manifest should parse");
+
+        let Some(Command::SidecarPackageReleaseManifest {
+            package,
+            archive,
+            checksum,
+            install_receipt,
+            out,
+            force,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-release-manifest command");
+        };
+        assert_eq!(package, PathBuf::from("installed/agentk-sidecar"));
+        assert_eq!(archive, PathBuf::from("dist/agentk-sidecar.tar"));
+        assert_eq!(
+            checksum,
+            Some(PathBuf::from("dist/agentk-sidecar.tar.sha256"))
+        );
+        assert_eq!(
+            install_receipt,
+            Some(PathBuf::from(
+                "installed/agentk-sidecar/sidecar/.agentk/install-receipt.json"
+            ))
+        );
+        assert_eq!(
+            out,
+            PathBuf::from("dist/agentk-sidecar-release-manifest.json")
+        );
+        assert!(force);
+        assert!(json);
+    }
+
+    #[test]
     fn approvals_and_decisions_accept_review_metadata() {
+        std::thread::Builder::new()
+            .name("agentk-cli-parser-smoke".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(approvals_and_decisions_accept_review_metadata_inner)
+            .expect("parser smoke thread should spawn")
+            .join()
+            .expect("parser smoke thread should not panic");
+    }
+
+    fn approvals_and_decisions_accept_review_metadata_inner() {
         let approvals = Cli::try_parse_from([
             "agentk",
             "approvals",
@@ -9764,6 +12696,31 @@ done
         };
         assert_eq!(path, PathBuf::from("agentk-sidecar/team-permissions.toml"));
 
+        let identity = Cli::try_parse_from([
+            "agentk",
+            "identity-check",
+            "--identity",
+            "agentk-sidecar/team-identity.toml",
+            "--permissions",
+            "agentk-sidecar/team-permissions.toml",
+            "--json",
+        ])
+        .expect("identity-check should parse");
+        let Some(Command::IdentityCheck {
+            identity,
+            permissions,
+            json,
+        }) = identity.command
+        else {
+            panic!("expected identity-check command");
+        };
+        assert_eq!(identity, PathBuf::from("agentk-sidecar/team-identity.toml"));
+        assert_eq!(
+            permissions,
+            Some(PathBuf::from("agentk-sidecar/team-permissions.toml"))
+        );
+        assert!(json);
+
         let dashboard = Cli::try_parse_from([
             "agentk",
             "dashboard",
@@ -9800,6 +12757,8 @@ done
             "agentk-sidecar/.agentk/runs/team-sidecar.jsonl",
             "--permissions",
             "agentk-sidecar/team-permissions.toml",
+            "--identity",
+            "agentk-sidecar/team-identity.toml",
             "--host",
             "127.0.0.1",
             "--port",
@@ -9818,6 +12777,7 @@ done
             path,
             decisions,
             permissions,
+            identity,
             host,
             port,
             admin_token_env,
@@ -9848,6 +12808,10 @@ done
         assert_eq!(
             store_root,
             Some(PathBuf::from("agentk-sidecar/.agentk/team-store"))
+        );
+        assert_eq!(
+            identity,
+            Some(PathBuf::from("agentk-sidecar/team-identity.toml"))
         );
 
         let dashboard_serve_non_local = Cli::try_parse_from([
@@ -9906,6 +12870,8 @@ done
             "agentk-sidecar/.agentk/runs/team-sidecar.jsonl",
             "--permissions",
             "agentk-sidecar/team-permissions.toml",
+            "--identity",
+            "agentk-sidecar/team-identity.toml",
             "--out",
             "agentk-sidecar/.agentk/store",
         ])
@@ -9914,6 +12880,7 @@ done
             path,
             decisions,
             permissions,
+            identity,
             out,
             ..
         }) = store_export.command
@@ -9928,6 +12895,10 @@ done
             permissions,
             Some(PathBuf::from("agentk-sidecar/team-permissions.toml"))
         );
+        assert_eq!(
+            identity,
+            Some(PathBuf::from("agentk-sidecar/team-identity.toml"))
+        );
         assert_eq!(out, PathBuf::from("agentk-sidecar/.agentk/store"));
 
         let store_sync = Cli::try_parse_from([
@@ -9936,6 +12907,8 @@ done
             "agentk-sidecar/.agentk/runs/team-sidecar.jsonl",
             "--permissions",
             "agentk-sidecar/team-permissions.toml",
+            "--identity",
+            "agentk-sidecar/team-identity.toml",
             "--root",
             "agentk-sidecar/.agentk/team-store",
         ])
@@ -9944,6 +12917,7 @@ done
             path,
             decisions,
             permissions,
+            identity,
             root,
             ..
         }) = store_sync.command
@@ -9957,6 +12931,10 @@ done
         assert_eq!(
             permissions,
             Some(PathBuf::from("agentk-sidecar/team-permissions.toml"))
+        );
+        assert_eq!(
+            identity,
+            Some(PathBuf::from("agentk-sidecar/team-identity.toml"))
         );
         assert_eq!(root, PathBuf::from("agentk-sidecar/.agentk/team-store"));
 
@@ -9998,6 +12976,256 @@ done
         assert_eq!(database_url_env, "AGENTK_TEST_DATABASE_URL");
         assert_eq!(psql, "custom-psql");
         assert!(dry_run);
+
+        let store_slack = Cli::try_parse_from([
+            "agentk",
+            "store-slack",
+            "--root",
+            "agentk-sidecar/.agentk/team-store",
+            "--out",
+            "agentk-sidecar/.agentk/slack",
+            "--channel",
+            "#agentk-approvals",
+            "--json",
+        ])
+        .expect("store slack should parse");
+        let Some(Command::StoreSlack {
+            root,
+            out,
+            channel,
+            json,
+        }) = store_slack.command
+        else {
+            panic!("expected store-slack command");
+        };
+        assert_eq!(root, PathBuf::from("agentk-sidecar/.agentk/team-store"));
+        assert_eq!(out, PathBuf::from("agentk-sidecar/.agentk/slack"));
+        assert_eq!(channel, Some("#agentk-approvals".to_string()));
+        assert!(json);
+
+        let store_slack_send = Cli::try_parse_from([
+            "agentk",
+            "store-slack-send",
+            "--payload-root",
+            "agentk-sidecar/.agentk/slack",
+            "--webhook-url-env",
+            "AGENTK_TEST_SLACK_WEBHOOK_URL",
+            "--curl",
+            "custom-curl",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("store slack send should parse");
+        let Some(Command::StoreSlackSend {
+            payload_root,
+            webhook_url_env,
+            curl,
+            dry_run,
+            json,
+        }) = store_slack_send.command
+        else {
+            panic!("expected store-slack-send command");
+        };
+        assert_eq!(payload_root, PathBuf::from("agentk-sidecar/.agentk/slack"));
+        assert_eq!(webhook_url_env, "AGENTK_TEST_SLACK_WEBHOOK_URL");
+        assert_eq!(curl, "custom-curl");
+        assert!(dry_run);
+        assert!(json);
+
+        let store_github = Cli::try_parse_from([
+            "agentk",
+            "store-github",
+            "--root",
+            "agentk-sidecar/.agentk/team-store",
+            "--out",
+            "agentk-sidecar/.agentk/github",
+            "--repository",
+            "owner/repo",
+            "--label",
+            "agentk",
+            "--label",
+            "approvals",
+            "--json",
+        ])
+        .expect("store github should parse");
+        let Some(Command::StoreGithub {
+            root,
+            out,
+            repository,
+            label,
+            json,
+        }) = store_github.command
+        else {
+            panic!("expected store-github command");
+        };
+        assert_eq!(root, PathBuf::from("agentk-sidecar/.agentk/team-store"));
+        assert_eq!(out, PathBuf::from("agentk-sidecar/.agentk/github"));
+        assert_eq!(repository, Some("owner/repo".to_string()));
+        assert_eq!(label, vec!["agentk".to_string(), "approvals".to_string()]);
+        assert!(json);
+
+        let store_github_send = Cli::try_parse_from([
+            "agentk",
+            "store-github-send",
+            "--payload-root",
+            "agentk-sidecar/.agentk/github",
+            "--github-token-env",
+            "AGENTK_TEST_GITHUB_TOKEN",
+            "--gh",
+            "custom-gh",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("store github send should parse");
+        let Some(Command::StoreGithubSend {
+            payload_root,
+            github_token_env,
+            gh,
+            dry_run,
+            json,
+        }) = store_github_send.command
+        else {
+            panic!("expected store-github-send command");
+        };
+        assert_eq!(payload_root, PathBuf::from("agentk-sidecar/.agentk/github"));
+        assert_eq!(github_token_env, "AGENTK_TEST_GITHUB_TOKEN");
+        assert_eq!(gh, "custom-gh");
+        assert!(dry_run);
+        assert!(json);
+
+        let store_email = Cli::try_parse_from([
+            "agentk",
+            "store-email",
+            "--root",
+            "agentk-sidecar/.agentk/team-store",
+            "--out",
+            "agentk-sidecar/.agentk/email",
+            "--to",
+            "agentk-alerts@example.com",
+            "--json",
+        ])
+        .expect("store email should parse");
+        let Some(Command::StoreEmail {
+            root,
+            out,
+            to,
+            json,
+        }) = store_email.command
+        else {
+            panic!("expected store-email command");
+        };
+        assert_eq!(root, PathBuf::from("agentk-sidecar/.agentk/team-store"));
+        assert_eq!(out, PathBuf::from("agentk-sidecar/.agentk/email"));
+        assert_eq!(to, vec!["agentk-alerts@example.com".to_string()]);
+        assert!(json);
+
+        let store_email_send = Cli::try_parse_from([
+            "agentk",
+            "store-email-send",
+            "--payload-root",
+            "agentk-sidecar/.agentk/email",
+            "--sendmail",
+            "custom-sendmail",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("store email send should parse");
+        let Some(Command::StoreEmailSend {
+            payload_root,
+            sendmail,
+            dry_run,
+            json,
+        }) = store_email_send.command
+        else {
+            panic!("expected store-email-send command");
+        };
+        assert_eq!(payload_root, PathBuf::from("agentk-sidecar/.agentk/email"));
+        assert_eq!(sendmail, "custom-sendmail");
+        assert!(dry_run);
+        assert!(json);
+
+        let release_candidate_smoke = Cli::try_parse_from([
+            "agentk",
+            "release-candidate-smoke",
+            "--root",
+            "agentk-rc-smoke",
+            "--force",
+            "--keep-root",
+        ])
+        .expect("release candidate smoke should parse");
+        let Some(Command::ReleaseCandidateSmoke {
+            root,
+            force,
+            keep_root,
+            ..
+        }) = release_candidate_smoke.command
+        else {
+            panic!("expected release-candidate-smoke command");
+        };
+        assert_eq!(root, Some(PathBuf::from("agentk-rc-smoke")));
+        assert!(force);
+        assert!(keep_root);
+
+        let release_status = Cli::try_parse_from(["agentk", "release-status", "--json"])
+            .expect("release status should parse");
+        let Some(Command::ReleaseStatus { json }) = release_status.command else {
+            panic!("expected release-status command");
+        };
+        assert!(json);
+
+        let release_homebrew_formula = Cli::try_parse_from([
+            "agentk",
+            "release-homebrew-formula",
+            "--source-url",
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            "--sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--source-archive",
+            "dist/agentk-v0.1.0.tar.gz",
+            "--out",
+            "dist/homebrew/agentk.rb",
+            "--version",
+            "0.1.0",
+            "--homepage",
+            "https://github.com/agentk/agentk",
+            "--class-name",
+            "Agentk",
+            "--force",
+            "--json",
+        ])
+        .expect("release homebrew formula should parse");
+        let Some(Command::ReleaseHomebrewFormula {
+            source_url,
+            sha256,
+            source_archive,
+            out,
+            version,
+            homepage,
+            class_name,
+            force,
+            json,
+        }) = release_homebrew_formula.command
+        else {
+            panic!("expected release-homebrew-formula command");
+        };
+        assert_eq!(
+            source_url,
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"
+        );
+        assert_eq!(
+            sha256,
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
+        );
+        assert_eq!(
+            source_archive,
+            Some(PathBuf::from("dist/agentk-v0.1.0.tar.gz"))
+        );
+        assert_eq!(out, PathBuf::from("dist/homebrew/agentk.rb"));
+        assert_eq!(version, Some("0.1.0".to_string()));
+        assert_eq!(homepage, "https://github.com/agentk/agentk");
+        assert_eq!(class_name, "Agentk");
+        assert!(force);
+        assert!(json);
     }
 
     #[test]
@@ -10006,7 +13234,7 @@ done
         let decisions_path = test_temp_path("agentk-store-push-decisions", "jsonl");
         let output_dir = test_temp_path("agentk-store-push-export", "dir");
         run_safe_agent_demo(&trace_path).expect("safe agent demo should write a trace");
-        export_audit_store(&trace_path, &decisions_path, None, &output_dir)
+        export_audit_store(&trace_path, &decisions_path, None, None, &output_dir)
             .expect("store export should write");
 
         let report = run_store_push(
@@ -10047,6 +13275,290 @@ done
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(decisions_path);
         fs::remove_dir_all(output_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_slack_send_delivers_with_fake_curl_without_reporting_webhook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let payload_root = test_temp_path("agentk-slack-payload-root", "dir");
+        let fake_curl = test_temp_path("agentk-fake-curl", "sh");
+        let args_path = test_temp_path("agentk-fake-curl-args", "txt");
+        let config_path = test_temp_path("agentk-fake-curl-config", "txt");
+        let webhook_env = format!("AGENTK_TEST_SLACK_WEBHOOK_{}", std::process::id());
+        fs::create_dir_all(&payload_root).expect("payload root should create");
+        fs::write(
+            payload_root.join("manifest.json"),
+            serde_json::json!({
+                "schema": "agentk.slack_notification_payloads",
+                "version": 1,
+                "payloads": "payloads.jsonl"
+            })
+            .to_string(),
+        )
+        .expect("manifest should write");
+        fs::write(
+            payload_root.join("payloads.jsonl"),
+            serde_json::json!({
+                "text": "AgentK approval requested",
+                "blocks": []
+            })
+            .to_string()
+                + "\n",
+        )
+        .expect("payloads should write");
+        fs::write(
+            &fake_curl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\ncase \"$*\" in *SECRET*) exit 23;; esac\nexit 0\n",
+                args_path.display(),
+                config_path.display()
+            ),
+        )
+        .expect("fake curl should write");
+        fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o700))
+            .expect("fake curl should be executable");
+
+        let dry_run = run_store_slack_send(
+            payload_root.clone(),
+            webhook_env.clone(),
+            fake_curl.display().to_string(),
+            true,
+        )
+        .expect("dry-run should parse payload export without a webhook");
+        assert_eq!(dry_run.payloads, 1);
+        assert_eq!(dry_run.delivered, 0);
+        assert!(!dry_run.webhook_url_present);
+
+        unsafe {
+            env::set_var(&webhook_env, "https://hooks.slack.test/services/SECRET");
+        }
+        let report = run_store_slack_send(
+            payload_root.clone(),
+            webhook_env.clone(),
+            fake_curl.display().to_string(),
+            false,
+        )
+        .expect("fake curl delivery should succeed");
+        let report_json = serde_json::to_string(&report).expect("report should serialize");
+        assert_eq!(report.payloads, 1);
+        assert_eq!(report.delivered, 1);
+        assert_eq!(report.failed, 0);
+        assert!(report.webhook_url_present);
+        assert!(!report_json.contains("SECRET"));
+        assert!(!report.command.iter().any(|arg| arg.contains("SECRET")));
+        let args = fs::read_to_string(&args_path).expect("fake curl args should read");
+        assert!(!args.contains("SECRET"));
+        let config = fs::read_to_string(&config_path).expect("fake curl config should read");
+        assert!(config.contains("https://hooks.slack.test/services/SECRET"));
+        assert!(config.contains("data-binary = \"@"));
+
+        unsafe {
+            env::remove_var(&webhook_env);
+        }
+        fs::remove_dir_all(payload_root).ok();
+        let _ = fs::remove_file(fake_curl);
+        let _ = fs::remove_file(args_path);
+        let _ = fs::remove_file(config_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_github_send_delivers_with_fake_gh_without_reporting_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let payload_root = test_temp_path("agentk-github-payload-root", "dir");
+        let fake_gh = test_temp_path("agentk-fake-gh", "sh");
+        let args_path = test_temp_path("agentk-fake-gh-args", "txt");
+        let token_env = format!("AGENTK_TEST_GITHUB_TOKEN_{}", std::process::id());
+        fs::create_dir_all(&payload_root).expect("payload root should create");
+        fs::write(
+            payload_root.join("manifest.json"),
+            serde_json::json!({
+                "schema": "agentk.github_notification_payloads",
+                "version": 1,
+                "payloads": "payloads.jsonl"
+            })
+            .to_string(),
+        )
+        .expect("manifest should write");
+        fs::write(
+            payload_root.join("payloads.jsonl"),
+            serde_json::json!({
+                "operation": "upsert_issue",
+                "dedupe_key": "agentk:test-trace:appr_test:approval_requested",
+                "repository": "owner/repo",
+                "issue": {
+                    "title": "AgentK approval requested: appr_test",
+                    "body": "Review approval appr_test.",
+                    "labels": ["agentk", "approval"],
+                    "desired_state": "open"
+                },
+                "metadata": {
+                    "notification_id": "notif_requested_appr_test"
+                }
+            })
+            .to_string()
+                + "\n",
+        )
+        .expect("payloads should write");
+        fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \"$*\" in *SECRET*) exit 23;; esac\ncase \"$*\" in *search/issues*) exit 0;; *repos/owner/repo/issues*) printf '{{\"number\":456}}\\n'; exit 0;; *) exit 0;; esac\n",
+                args_path.display()
+            ),
+        )
+        .expect("fake gh should write");
+        fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o700))
+            .expect("fake gh should be executable");
+
+        let dry_run = run_store_github_send(
+            payload_root.clone(),
+            token_env.clone(),
+            fake_gh.display().to_string(),
+            true,
+        )
+        .expect("dry-run should parse payload export without a token");
+        assert_eq!(dry_run.payloads, 1);
+        assert_eq!(dry_run.delivered, 0);
+        assert!(!dry_run.github_token_present);
+
+        unsafe {
+            env::set_var(&token_env, "SECRET_GITHUB_TOKEN");
+        }
+        let report = run_store_github_send(
+            payload_root.clone(),
+            token_env.clone(),
+            fake_gh.display().to_string(),
+            false,
+        )
+        .expect("fake gh delivery should succeed");
+        let report_json = serde_json::to_string(&report).expect("report should serialize");
+        assert_eq!(report.payloads, 1);
+        assert_eq!(report.delivered, 1);
+        assert_eq!(report.failed, 0);
+        assert!(report.github_token_present);
+        assert_eq!(report.attempts[0].operation, "created");
+        assert_eq!(report.attempts[0].issue_number, Some(456));
+        assert!(!report_json.contains("SECRET_GITHUB_TOKEN"));
+        assert!(
+            !report
+                .command
+                .iter()
+                .any(|arg| arg.contains("SECRET_GITHUB_TOKEN"))
+        );
+        let args = fs::read_to_string(&args_path).expect("fake gh args should read");
+        assert!(!args.contains("SECRET_GITHUB_TOKEN"));
+        assert!(args.contains("search/issues"));
+        assert!(args.contains("repos/owner/repo/issues"));
+
+        unsafe {
+            env::remove_var(&token_env);
+        }
+        fs::remove_dir_all(payload_root).ok();
+        let _ = fs::remove_file(fake_gh);
+        let _ = fs::remove_file(args_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_email_send_delivers_with_fake_sendmail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let payload_root = test_temp_path("agentk-email-payload-root", "dir");
+        let fake_sendmail = test_temp_path("agentk-fake-sendmail", "sh");
+        let args_path = test_temp_path("agentk-fake-sendmail-args", "txt");
+        let message_path = test_temp_path("agentk-fake-sendmail-message", "txt");
+        fs::create_dir_all(&payload_root).expect("payload root should create");
+        fs::write(
+            payload_root.join("manifest.json"),
+            serde_json::json!({
+                "schema": "agentk.email_notification_payloads",
+                "version": 1,
+                "payloads": "payloads.jsonl"
+            })
+            .to_string(),
+        )
+        .expect("manifest should write");
+        fs::write(
+            payload_root.join("payloads.jsonl"),
+            serde_json::json!({
+                "to": ["agentk-alerts@example.com"],
+                "subject": "AgentK approval requested: appr_test",
+                "message": "To: agentk-alerts@example.com\nSubject: AgentK approval requested: appr_test\n\nReview approval appr_test."
+            })
+            .to_string()
+                + "\n",
+        )
+        .expect("payloads should write");
+        fs::write(
+            &fake_sendmail,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\ncase \"$*\" in *SECRET*) exit 23;; esac\nexit 0\n",
+                args_path.display(),
+                message_path.display()
+            ),
+        )
+        .expect("fake sendmail should write");
+        fs::set_permissions(&fake_sendmail, fs::Permissions::from_mode(0o700))
+            .expect("fake sendmail should be executable");
+
+        let dry_run = run_store_email_send(
+            payload_root.clone(),
+            fake_sendmail.display().to_string(),
+            true,
+        )
+        .expect("dry-run should parse payload export");
+        assert_eq!(dry_run.payloads, 1);
+        assert_eq!(dry_run.delivered, 0);
+        assert_eq!(
+            dry_run.command,
+            vec![
+                fake_sendmail.display().to_string(),
+                "-t".to_string(),
+                "-oi".to_string()
+            ]
+        );
+
+        let report = run_store_email_send(
+            payload_root.clone(),
+            fake_sendmail.display().to_string(),
+            false,
+        )
+        .expect("fake sendmail delivery should succeed");
+        let report_json = serde_json::to_string(&report).expect("report should serialize");
+        assert_eq!(report.payloads, 1);
+        assert_eq!(report.delivered, 1);
+        assert_eq!(report.failed, 0);
+        assert!(!report_json.contains("SECRET"));
+        let args = fs::read_to_string(&args_path).expect("fake sendmail args should read");
+        assert!(args.contains("-t"));
+        assert!(args.contains("-oi"));
+        let message = fs::read_to_string(&message_path).expect("fake sendmail message should read");
+        assert!(message.contains("To: agentk-alerts@example.com"));
+        assert!(message.contains("Subject: AgentK approval requested"));
+        assert!(message.contains("Review approval appr_test."));
+        assert!(!message.contains("SECRET"));
+
+        fs::remove_dir_all(payload_root).ok();
+        let _ = fs::remove_file(fake_sendmail);
+        let _ = fs::remove_file(args_path);
+        let _ = fs::remove_file(message_path);
+    }
+
+    #[test]
+    fn release_candidate_smoke_requires_force_for_existing_root() {
+        let root = test_temp_path("agentk-rc-smoke-existing", "dir");
+        fs::create_dir_all(&root).expect("root should create");
+
+        let error = run_release_candidate_smoke(Some(root.clone()), false, true)
+            .expect_err("existing root should require force")
+            .to_string();
+        assert!(error.contains("already exists"));
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

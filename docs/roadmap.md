@@ -234,6 +234,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Surface redacted trace-inspect evidence in approval dashboards.
 - [x] Add normalized evidence summary tables to durable and Postgres audit stores.
 - [x] Add a credential-free durable notification outbox for approval events.
+- [x] Add local Slack/GitHub/email delivery bridges for approval notifications.
 - [x] Add a bounded TCP JSON-RPC sidecar gateway for internal adapters.
 - [x] Add explicit TCP gateway concurrency bounds for service operation.
 - [x] Add a subprocess MCP client message cap for runaway-session backpressure.
@@ -324,4 +325,4 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject MCP/dashboard HTTP WebSocket handshake headers.
 - [x] Preflight packaged AgentK binary resolution before launcher work.
 - [x] Embed redacted trace-inspect evidence in the safe-agent demo report.
-- [ ] Build production MCP gateway transport hardening.
+- [ ] Continue bounded local MCP gateway transport hardening.

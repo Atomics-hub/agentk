@@ -178,7 +178,13 @@ Validate a secret-reference manifest without printing provider refs:
 
 ```sh
 cargo run -- secret-refs-check --manifest examples/secret-refs.toml
+cargo run -- secret-refs-check --manifest examples/secret-refs-production.toml
 ```
+
+`examples/secret-refs-production.toml` shows production-shaped references for
+AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, Vault, and
+1Password. AgentK validates those provider-specific reference shapes without
+fetching secret bytes, requiring cloud credentials, or printing raw refs.
 
 Check whether secret references are available through the local env store without
 printing refs:
@@ -207,6 +213,24 @@ Run the full local release audit:
 cargo run -- release-audit
 ```
 
+This includes formatting, tests, clippy, runtime security smokes, and the
+packaged sidecar release-candidate smoke.
+
+Summarize the v0.2 alpha release train before running heavier gates:
+
+```sh
+cargo run --locked -- release-status
+```
+
+This prints the shipped team sidecar surfaces, accepted alpha limits, final
+release blockers, and verification gates.
+
+Run the packaged sidecar release-candidate smoke:
+
+```sh
+cargo run --locked -- release-candidate-smoke
+```
+
 Run the strict pre-push audit with a configured signing key file:
 
 ```sh
@@ -217,12 +241,15 @@ cargo run -- release-audit --strict
 ```
 
 Contribution and release rules live in [CONTRIBUTING.md](CONTRIBUTING.md),
-[docs/v0.1-target.md](docs/v0.1-target.md), and
-[docs/release-checklist.md](docs/release-checklist.md). Accepted v0.1 limits
-are tracked in
-[docs/v0.1-limit-disposition.md](docs/v0.1-limit-disposition.md), and the
-current pre-tag dry run is recorded in
-[docs/v0.1-release-dry-run.md](docs/v0.1-release-dry-run.md).
+[docs/productization-plan.md](docs/productization-plan.md), and
+[docs/release-checklist.md](docs/release-checklist.md). Historical v0.1 scope,
+accepted limits, and dry-run evidence remain archived in
+[docs/v0.1-target.md](docs/v0.1-target.md),
+[docs/v0.1-limit-disposition.md](docs/v0.1-limit-disposition.md), and
+[docs/v0.1-release-dry-run.md](docs/v0.1-release-dry-run.md); current release
+trains should use the productization plan and signed release checklist as the
+source of truth. The current team-sidecar alpha release-note draft lives in
+[docs/v0.2-alpha-release-notes.md](docs/v0.2-alpha-release-notes.md).
 
 Mediate a demo MCP-shaped tool request without executing it:
 
@@ -360,8 +387,8 @@ and require a localhost/loopback `Host` authority on the request.
 Sandboxed/file `Origin: null` requests are allowed only when `null` is
 explicitly configured.
 SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
-syntactically valid `Mcp-Session-Id`, then fail closed with sanitized 501
-responses and a redacted counter until resumable SSE support lands. It also
+syntactically valid `Mcp-Session-Id`, then return a bounded authenticated
+event-stream snapshot from the session buffer with `Last-Event-ID` resume. It also
 serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz`, and `/metrics`;
 `/readyz` reports the supported MCP protocol version plus session,
@@ -385,12 +412,12 @@ Generate the first installable-team bundle:
 cargo install --path .
 agentk sidecar-init --out agentk-sidecar
 agentk sidecar-check --root agentk-sidecar
-agentk sidecar-package --root agentk-sidecar --out dist/agentk-sidecar --force
+agentk sidecar-package --root agentk-sidecar --out dist/agentk-sidecar --archive-out dist/agentk-sidecar.tar --force
 ```
 
-`sidecar-check` validates the TOML, policy, secret-reference, permission, and
-MCP client snippet shapes without spawning downstream tools or touching
-credentials.
+`sidecar-check` validates the TOML, policy, secret-reference, permission,
+external identity mapping, and MCP client snippet shapes without spawning
+downstream tools or touching credentials.
 
 The bundle writes a reviewable starter layout:
 
@@ -398,6 +425,7 @@ The bundle writes a reviewable starter layout:
 agentk-sidecar/
   agentk-sidecar.toml
   team-permissions.toml
+  team-identity.toml
   policies/team-sidecar.toml
   secrets.toml
   clients/claude-desktop.mcp.json
@@ -414,10 +442,11 @@ cargo run --locked -- safe-agent-demo
 agentk audit agentk-sidecar/.agentk/runs/team-sidecar.jsonl
 agentk approvals agentk-sidecar/.agentk/runs/team-sidecar.jsonl
 agentk permissions --path agentk-sidecar/team-permissions.toml
+agentk identity-check --identity agentk-sidecar/team-identity.toml --permissions agentk-sidecar/team-permissions.toml
 agentk dashboard agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --out agentk-sidecar/.agentk/dashboard.html
-agentk dashboard-serve agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --store-root agentk-sidecar/.agentk/team-store
-agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --root agentk-sidecar/.agentk/team-store
-agentk store-export agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --out agentk-sidecar/.agentk/store
+agentk dashboard-serve agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --identity agentk-sidecar/team-identity.toml --store-root agentk-sidecar/.agentk/team-store
+agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --identity agentk-sidecar/team-identity.toml --root agentk-sidecar/.agentk/team-store
+agentk store-export agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --identity agentk-sidecar/team-identity.toml --out agentk-sidecar/.agentk/store
 agentk store-check --root agentk-sidecar/.agentk/store
 agentk store-push --root agentk-sidecar/.agentk/store --dry-run
 agentk trace-inspect agentk-sidecar/.agentk/runs/team-sidecar.jsonl
@@ -442,13 +471,36 @@ dist/agentk-sidecar/bin/agentk-sidecar
 Packaged Claude Desktop and generic Codex/Cursor command snippets are written
 under `dist/agentk-sidecar/clients/`. The package also writes a relative-path
 `manifest.json` with the AgentK version, schema version, stable launchers,
-client snippets, local transports, store workflow, and deploy artifacts; run
-`dist/agentk-sidecar/bin/agentk-package-info` to print it after copying or
-installing the package. Run `dist/agentk-sidecar/bin/agentk-package-check` to
-validate the manifest, package artifacts, launcher modes, launcher preflights,
-deploy-template hardening, the configured `AGENTK_BIN`, and embedded sidecar
-bundle after a copy, deploy, or image build. Set `AGENTK_BIN` to the reviewed
-AgentK executable path when `agentk` is not on the service account's `PATH`.
+client snippets, local transports, store workflow, and deploy artifacts, plus
+`package.lock.json` with relative paths, byte counts, SHA-256 hashes, and
+executable-bit expectations for every packaged install file; runtime state under
+`sidecar/.agentk` is excluded. Pass `--archive-out dist/agentk-sidecar.tar` to
+write a single uncompressed tar handoff after the package self-check passes; the
+CLI also writes `dist/agentk-sidecar.tar.sha256` and includes the archive
+SHA-256 plus checksum path in JSON for release notes or inventory systems. Run
+`agentk sidecar-package-archive-check --archive dist/agentk-sidecar.tar` to
+verify the handoff against `dist/agentk-sidecar.tar.sha256` before unpacking or
+deploying it. Run
+`agentk sidecar-package-install --archive dist/agentk-sidecar.tar --out installed/agentk-sidecar`
+to verify, safely unpack, and run the package self-check into a reviewed install
+directory; the install writes
+`installed/agentk-sidecar/sidecar/.agentk/install-receipt.json` with the
+archive filename, checksum filename, SHA-256, AgentK version, and installed file
+count for deployment tickets. Run
+`agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json`
+to write a machine-readable release handoff that binds the installed package,
+package lock, archive checksum, and install receipt. Run
+`dist/agentk-sidecar/bin/agentk-package-info` to print the manifest after
+copying or installing the package. Run
+`dist/agentk-sidecar/bin/agentk-package-check` to validate the manifest,
+package lock, package artifacts, launcher modes, launcher preflights,
+deploy-template hardening, dummy deploy env examples, the configured
+`AGENTK_BIN`, and embedded sidecar bundle after a copy, deploy, or image build.
+Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
+the service account's `PATH`. The package includes
+`deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
+and local Slack/GitHub/email payload exporters; replace only `CHANGE_ME` values in
+service-manager or CI secret storage, not in the packaged examples.
 Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
 credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
 install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
@@ -459,11 +511,18 @@ report. Set `AGENTK_TRACE` to that path when running
 `dist/agentk-sidecar/bin/agentk-store-export`, or
 `dist/agentk-sidecar/bin/agentk-store-sync` to review or store the packaged
 demo trace instead of the default team-sidecar trace. Those packaged demo,
-dashboard, sidecar-check, and store workflow launchers run the package
-self-check before touching package-local evidence or store artifacts.
+dashboard, sidecar-check, identity-check, and store workflow launchers run the
+package self-check before touching package-local evidence or store artifacts.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
-bundle to validate policy, permissions, secret references, and client snippets
-without spawning downstream tools.
+bundle to validate policy, permissions, identity mappings, secret references,
+and client snippets without spawning downstream tools. Run
+`dist/agentk-sidecar/bin/agentk-identity-check --json` to verify that external
+IdP groups map to configured local reviewers; the report prints counts only and
+does not print issuers, groups, or claim values. Packaged dashboard-server,
+store-export, and store-sync launchers pass the same identity manifest into
+the durable store paths, which write redacted identity summaries plus
+IdP group-to-reviewer mapping tables that omit issuer, audience, and claim
+values for team review/control-plane ingestion.
 For internal adapters that need a local TCP JSONL endpoint instead of stdio, run
 `dist/agentk-sidecar/bin/agentk-sidecar-tcp`; it loads the same reviewed
 sidecar bundle, runs the package self-check before binding, listens on
@@ -543,9 +602,8 @@ LAN/public exposure is therefore an explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` to bound accepted connection reads and
 writes. SSE-shaped `GET` requests require `Accept: text/event-stream` plus an
 existing, syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
-checks, then fail closed with sanitized 501 responses and a redacted
-unsupported-SSE counter until resumable SSE support lands. All MCP HTTP `HEAD`
-responses omit bodies; `HEAD` on the MCP
+checks, and return bounded buffered events with `Last-Event-ID` resume. All MCP
+HTTP `HEAD` responses omit bodies; `HEAD` on the MCP
 endpoint remains an unsupported method response with the normal `Allow` header.
 This is a bounded local adapter, not a hosted production
 HTTP/SSE control plane. Set comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS`
@@ -626,14 +684,28 @@ or control-plane processes, including blocked-rule, syscall, and evidence-ref
 summary rows. It also writes `current/notifications.json` and
 `tables/notifications.jsonl`, a credential-free outbox for pending approval
 requests and recorded decisions that Slack, GitHub, email, or ticket bridges
-can consume without AgentK storing delivery tokens. `agentk store-check`
-validates both exported Postgres artifacts and the live durable team store.
+can consume without AgentK storing delivery tokens. `agentk store-slack` turns
+that durable outbox into local Slack-ready JSON payloads without reading Slack
+tokens, and `agentk store-slack-send` can deliver those payloads through `curl`
+with a webhook URL read only from environment. `agentk store-github` turns the
+same outbox into local GitHub issue-ready JSON payloads, `agentk
+store-github-send` can deliver them through `gh` with a token read only from
+environment, `agentk store-email` exports sendmail-ready local payloads, and
+`agentk store-email-send` can deliver them through a local mail relay. `agentk
+store-check` validates both exported Postgres artifacts and the live durable
+team store.
 `dashboard-serve --store-root ...` refreshes the same durable store on review
 reads and reviewer decisions:
 
 ```sh
-agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --root agentk-sidecar/.agentk/team-store
+agentk store-sync agentk-sidecar/.agentk/runs/team-sidecar.jsonl --permissions agentk-sidecar/team-permissions.toml --identity agentk-sidecar/team-identity.toml --root agentk-sidecar/.agentk/team-store
 agentk store-check --root agentk-sidecar/.agentk/team-store
+agentk store-slack --root agentk-sidecar/.agentk/team-store --out agentk-sidecar/.agentk/slack --channel '#agentk-approvals'
+agentk store-slack-send --payload-root agentk-sidecar/.agentk/slack --webhook-url-env AGENTK_SLACK_WEBHOOK_URL --dry-run
+agentk store-github --root agentk-sidecar/.agentk/team-store --out agentk-sidecar/.agentk/github --repository owner/repo --label agentk --label approvals
+agentk store-github-send --payload-root agentk-sidecar/.agentk/github --github-token-env GITHUB_TOKEN --dry-run
+agentk store-email --root agentk-sidecar/.agentk/team-store --out agentk-sidecar/.agentk/email --to agentk-alerts@example.com
+agentk store-email-send --payload-root agentk-sidecar/.agentk/email --dry-run
 ```
 
 For Postgres import:
@@ -650,6 +722,9 @@ Packaged installs include the same workflow as stable launchers:
 ```sh
 dist/agentk-sidecar/bin/agentk-package-info
 AGENTK_BIN="$(command -v agentk)" dist/agentk-sidecar/bin/agentk-package-check
+agentk sidecar-package-archive-check --archive dist/agentk-sidecar.tar
+agentk sidecar-package-install --archive dist/agentk-sidecar.tar --out installed/agentk-sidecar
+agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
@@ -658,7 +733,36 @@ dist/agentk-sidecar/bin/agentk-store-export
 dist/agentk-sidecar/bin/agentk-store-check
 dist/agentk-sidecar/bin/agentk-store-sync
 dist/agentk-sidecar/bin/agentk-store-push --dry-run
+dist/agentk-sidecar/bin/agentk-store-slack --channel '#agentk-approvals'
+dist/agentk-sidecar/bin/agentk-store-slack-send --dry-run
+dist/agentk-sidecar/bin/agentk-store-github --repository owner/repo --label agentk --label approvals
+dist/agentk-sidecar/bin/agentk-store-github-send --dry-run
+dist/agentk-sidecar/bin/agentk-store-email --to agentk-alerts@example.com
+dist/agentk-sidecar/bin/agentk-store-email-send --dry-run
 ```
+
+Maintainers can run `cargo run --locked -- release-status` to summarize the
+v0.2 alpha shipped surfaces, accepted limits, final blockers, and verification
+gates. Run `cargo run --locked -- release-candidate-smoke` to recreate the
+package, `dist/agentk-sidecar.tar`, and
+`dist/agentk-sidecar.tar.sha256`, write
+`dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
+packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
+Slack/GitHub/email payload exporters, and Postgres dry-run push launchers, then
+verify the install receipt and other artifacts before a release branch or tag.
+For a Homebrew tap handoff, generate a reviewed formula from the final source
+tarball URL and SHA:
+
+```sh
+agentk release-homebrew-formula \
+  --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz \
+  --sha256 <source-tarball-sha256> \
+  --version X.Y.Z \
+  --homepage https://github.com/OWNER/REPO \
+  --out dist/homebrew/agentk.rb
+```
+
+The command writes a local formula only; it does not publish a tap.
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged MCP HTTP sidecar gateway, dashboard, and
@@ -667,7 +771,8 @@ self-check before launching, serving, writing demo traces, rendering dashboards,
 or updating store artifacts. `agentk-package-check` also verifies
 baseline deploy-template hardening markers, including no-new-privileges systemd
 services, a non-root package Dockerfile, and loopback-published,
-capability-dropped, read-only Compose services.
+capability-dropped, read-only Compose services, plus dummy env examples with
+required variables and no real-looking credentials.
 The packaged safe-agent demo JSON includes the same redacted inspect counts,
 syscall summary, evidence-ref summary, and blocked policy rules that
 `trace-inspect` would show separately.
@@ -767,6 +872,9 @@ This repo currently includes:
 - a metadata-only secret store registry that checks provider support and external reference availability without returning secret bytes,
 - an env-backed local secret store presence adapter for `env` references,
 - a versioned secret-reference manifest parser with provider-id validation for registering external refs without secret values,
+- provider-specific reference-shape validation for AWS Secrets Manager, GCP
+  Secret Manager, Azure Key Vault, Vault, and 1Password without contacting
+  those services,
 - a redacted secret-reference manifest validation command,
 - a redacted secret-reference store availability command,
 - a hash-chained flight recorder,
@@ -805,7 +913,8 @@ This repo currently includes:
 
 Next obvious pieces:
 
-- close the remaining [v0.1 target](docs/v0.1-target.md) gaps,
+- complete the remaining [productization plan](docs/productization-plan.md)
+  release gaps,
 - production key storage and operational key lifecycle,
 - fuller MCP proxy/server compliance,
 - filesystem diff capture,
@@ -881,6 +990,8 @@ Implemented today:
 - a one-command `mcp-shim-eval` scorecard for showing why the shim matters,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
+- local Homebrew formula generation for a reviewed source release URL and
+  SHA-256,
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer summaries, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,
