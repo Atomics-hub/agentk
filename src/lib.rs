@@ -16060,11 +16060,11 @@ decision endpoints and must declare `Content-Type: application/json`, so review
 reads and probes cannot smuggle ignored payload bytes. Set
 `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, on write requests; clients must choose one admin token
-carrier, not both. If a
+carrier, not both, and the chosen carrier may appear only once. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`, and reviewer-scoped reads must choose one
-reviewer token carrier instead of sending both header and query forms. Decisions
-are appended to
+reviewer token carrier instead of sending both header and query forms; the
+chosen reviewer read carrier may appear only once. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
 dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
 and reviewer decisions maintain the live durable team store. Dashboard and MCP
@@ -17713,6 +17713,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
         assert!(package_readme.contains("choose one admin token"));
         assert!(package_readme.contains("reviewer token carrier"));
+        assert!(package_readme.contains("may appear only once"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));

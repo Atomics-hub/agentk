@@ -511,7 +511,8 @@ dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
 requests; clients must choose either the standard authorization bearer header or
-`X-AgentK-Admin-Token`, not both. If the reviewer has `token_env` in
+`X-AgentK-Admin-Token`, not both, and the chosen carrier may appear only once.
+If the reviewer has `token_env` in
 `team-permissions.toml`, scoped
 `/api/review?reviewer=<id>` reads must include `X-AgentK-Reviewer-Token`, and
 write requests must include `reviewer_token` matching that environment
@@ -533,7 +534,8 @@ use **My View** to load only the approvals and decisions that reviewer is
 authorized to see. Direct scoped HTML views are also available at
 `/?reviewer=<id>` and enforce the same reviewer token checks. Token-protected
 reviewer reads must choose either `X-AgentK-Reviewer-Token` or the
-`reviewer_token` query parameter, not both.
+`reviewer_token` query parameter, not both, and the chosen carrier may appear
+only once.
 It also has a requester view: enter an AgentK agent id and use **Agent View**,
 or open `/?requester=<agent-id>`, to see only approvals and decisions produced
 by that signed agent identity.

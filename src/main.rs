@@ -1500,6 +1500,14 @@ impl DashboardHttpRequest {
             .find(|(candidate, _)| candidate == &name)
             .map(|(_, value)| value.as_str())
     }
+
+    fn header_count(&self, name: &str) -> usize {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .filter(|(candidate, _)| candidate == &name)
+            .count()
+    }
 }
 
 fn read_dashboard_http_request(
@@ -2588,11 +2596,10 @@ fn dashboard_http_decision(
     store_root: Option<&PathBuf>,
     decision: ApprovalDecision,
 ) -> DashboardHttpResponse {
-    if admin_token.is_some() && dashboard_admin_token_carriers_are_ambiguous(request) {
-        return dashboard_http_text(
-            "400 Bad Request",
-            "dashboard admin token must use either Authorization or X-AgentK-Admin-Token\n",
-        );
+    if admin_token.is_some()
+        && let Err(error) = dashboard_admin_token_carrier_error(request)
+    {
+        return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
     }
     if let Err(error) = dashboard_verify_admin_token(request, admin_token) {
         return dashboard_http_text("401 Unauthorized", &format!("{error}\n"));
@@ -2654,8 +2661,21 @@ fn dashboard_verify_admin_token(
     Ok(())
 }
 
-fn dashboard_admin_token_carriers_are_ambiguous(request: &DashboardHttpRequest) -> bool {
-    request.header("authorization").is_some() && request.header("x-agentk-admin-token").is_some()
+fn dashboard_admin_token_carrier_error(request: &DashboardHttpRequest) -> Result<(), AgentKError> {
+    let authorization_count = request.header_count("authorization");
+    let explicit_count = request.header_count("x-agentk-admin-token");
+    if authorization_count > 1 || explicit_count > 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard admin token carrier must appear at most once".to_string(),
+        ));
+    }
+    if authorization_count == 1 && explicit_count == 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard admin token must use either Authorization or X-AgentK-Admin-Token"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn dashboard_admin_token_from_request(request: &DashboardHttpRequest) -> Option<String> {
@@ -2682,8 +2702,15 @@ fn dashboard_reviewer_token_from_request(
 fn dashboard_reviewer_token_carrier_error(
     request: &DashboardHttpRequest,
 ) -> Result<(), AgentKError> {
-    let has_header = request.header("x-agentk-reviewer-token").is_some();
-    let has_query = dashboard_query_param(&request.target, "reviewer_token")?.is_some();
+    let header_count = request.header_count("x-agentk-reviewer-token");
+    let query_count = dashboard_query_param_count(&request.target, "reviewer_token")?;
+    if header_count > 1 || query_count > 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard reviewer token carrier must appear at most once".to_string(),
+        ));
+    }
+    let has_header = header_count == 1;
+    let has_query = query_count == 1;
     if has_header && has_query {
         return Err(AgentKError::InvalidMcpRequest(
             "dashboard reviewer token must use either X-AgentK-Reviewer-Token or reviewer_token query parameter"
@@ -2716,6 +2743,23 @@ fn dashboard_query_param(target: &str, name: &str) -> Result<Option<String>, Age
         }
     }
     Ok(None)
+}
+
+fn dashboard_query_param_count(target: &str, name: &str) -> Result<usize, AgentKError> {
+    let Some((_, query)) = target.split_once('?') else {
+        return Ok(0);
+    };
+    let mut count = 0usize;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (raw_name, _) = pair.split_once('=').unwrap_or((pair, ""));
+        if dashboard_query_decode(raw_name)? == name {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn dashboard_query_decode(value: &str) -> Result<String, AgentKError> {
@@ -8707,6 +8751,51 @@ can_deny = []
             assert!(!dual_reviewer_carrier_body.contains("VALUE_SHOULD_NOT_REFLECT"));
         }
 
+        let duplicate_reviewer_header = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/api/review?reviewer=tom",
+                [
+                    ("X-AgentK-Reviewer-Token", "VALUE_SHOULD_NOT_REFLECT"),
+                    ("X-AgentK-Reviewer-Token", "VALUE_SHOULD_NOT_REFLECT"),
+                ],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(duplicate_reviewer_header.status, "400 Bad Request");
+        let duplicate_reviewer_header_body = String::from_utf8(duplicate_reviewer_header.body)
+            .expect("duplicate reviewer header body should be utf8");
+        assert!(duplicate_reviewer_header_body.contains("dashboard reviewer token"));
+        assert!(duplicate_reviewer_header_body.contains("at most once"));
+        assert!(!duplicate_reviewer_header_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+
+        let duplicate_reviewer_query = dashboard_http_response(
+            &dashboard_test_request(
+                "GET",
+                format!(
+                    "/api/review?reviewer=tom&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT"
+                )
+                .as_str(),
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(duplicate_reviewer_query.status, "400 Bad Request");
+        let duplicate_reviewer_query_body = String::from_utf8(duplicate_reviewer_query.body)
+            .expect("duplicate reviewer query body should be utf8");
+        assert!(duplicate_reviewer_query_body.contains("dashboard reviewer token"));
+        assert!(duplicate_reviewer_query_body.contains("at most once"));
+        assert!(!duplicate_reviewer_query_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+
         let read_only_scoped = dashboard_http_response(
             &dashboard_test_request("GET", "/api/review?reviewer=viewer", Vec::new()),
             &trace_path,
@@ -8951,6 +9040,69 @@ can_deny = []
             String::from_utf8(dual_admin_carrier.body).expect("admin carrier body should be utf8");
         assert!(dual_admin_carrier_body.contains("dashboard admin token"));
         assert!(!dual_admin_carrier_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
+
+        let duplicate_admin_header = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [
+                    ("Authorization", "Bearer TOKEN_SHOULD_NOT_REFLECT"),
+                    ("Authorization", "Bearer TOKEN_SHOULD_NOT_REFLECT"),
+                    ("Content-Type", "application/json"),
+                ],
+                serde_json::json!({
+                    "id": approval_id,
+                    "reviewer": "tom",
+                    "reason": "duplicate dashboard admin token",
+                    "reviewer_token": "dashboard-token"
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            None,
+        );
+        assert_eq!(duplicate_admin_header.status, "400 Bad Request");
+        let duplicate_admin_header_body = String::from_utf8(duplicate_admin_header.body)
+            .expect("duplicate admin body should be utf8");
+        assert!(duplicate_admin_header_body.contains("dashboard admin token"));
+        assert!(duplicate_admin_header_body.contains("at most once"));
+        assert!(!duplicate_admin_header_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
+
+        let duplicate_explicit_admin_header = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [
+                    ("X-AgentK-Admin-Token", "TOKEN_SHOULD_NOT_REFLECT"),
+                    ("X-AgentK-Admin-Token", "TOKEN_SHOULD_NOT_REFLECT"),
+                    ("Content-Type", "application/json"),
+                ],
+                serde_json::json!({
+                    "id": approval_id,
+                    "reviewer": "tom",
+                    "reason": "duplicate dashboard explicit admin token",
+                    "reviewer_token": "dashboard-token"
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            None,
+        );
+        assert_eq!(duplicate_explicit_admin_header.status, "400 Bad Request");
+        let duplicate_explicit_admin_header_body =
+            String::from_utf8(duplicate_explicit_admin_header.body)
+                .expect("duplicate explicit admin body should be utf8");
+        assert!(duplicate_explicit_admin_header_body.contains("dashboard admin token"));
+        assert!(duplicate_explicit_admin_header_body.contains("at most once"));
+        assert!(!duplicate_explicit_admin_header_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
 
         let approved = dashboard_http_response(
             &dashboard_test_request_with_headers(

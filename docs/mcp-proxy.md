@@ -260,7 +260,8 @@ durable team store. Dashboard request bodies are accepted only on those decision
 endpoints and must declare `Content-Type: application/json`, so review reads and
 probes cannot smuggle ignored payload bytes. Set `AGENTK_DASHBOARD_ADMIN_TOKEN`
 to require an admin bearer token or `X-AgentK-Admin-Token` header on dashboard
-write requests; clients must choose one admin token carrier, not both.
+write requests; clients must choose one admin token carrier, not both, and the
+chosen carrier may appear only once.
 Reviewers can set `token_env` in `team-permissions.toml`; those users must
 include `X-AgentK-Reviewer-Token` for scoped `/api/review?reviewer=<id>` reads
 and matching `reviewer_token` values in dashboard write requests. `agentk
@@ -277,7 +278,8 @@ scoped review API and redraws the approval and decision tables with only the
 items that reviewer is authorized to see. Direct scoped HTML views are also
 available at `/?reviewer=<id>`; token-protected reviewers must provide their
 reviewer token by header or query parameter for that view, choosing one carrier
-instead of sending both. The same dashboard also supports requester views at
+instead of sending both and sending the chosen carrier only once. The same
+dashboard also supports requester views at
 `/?requester=<agent-id>` and
 `/api/review?requester=<agent-id>`, filtering approvals and decisions by the
 signed AgentK agent identity recorded in each event.
