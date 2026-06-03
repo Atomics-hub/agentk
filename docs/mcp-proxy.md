@@ -239,7 +239,10 @@ for a local bounded TCP JSONL gateway; Claude, Codex, and Cursor should keep
 using the stdio launcher unless their MCP client configuration supports that
 adapter. Streamable HTTP POST-capable clients can run
 `<package>/bin/agentk-sidecar-http`; keep it bound to localhost unless a separate
-deployment layer supplies TLS, external auth, and network policy.
+deployment layer supplies TLS, external auth, and network policy. The packaged
+HTTP launcher forwards extra arguments to `sidecar-serve-http`, so operators can
+add one-off flags such as `--allow-origin` or `--auth-token-env` without editing
+the package script.
 `sidecar-run` reads `agentk-sidecar.toml`, launches the configured downstream
 MCP server, copies only the env vars named in `[downstream].allow_env`, and
 writes the configured redacted JSONL audit log plus a

@@ -253,7 +253,8 @@ The safest first productization slice is the local team sidecar path:
     reviewed bundle, enforces local endpoint/origin/session checks, answers
     allowed browser CORS preflights before bearer-token auth, supports an
     optional bearer token from environment, enforces HTTP protocol-version
-    headers, supports env-configured additional browser origins, caps active
+    headers, supports env-configured additional browser origins, forwards extra
+    launcher arguments for one-off operator flags, caps active
     sessions, reaps idle sessions, bounds request bodies and headers, applies
     accepted connection read/write timeouts, uses per-session runtime locks so
     one busy downstream session does not block unrelated sessions, reports local

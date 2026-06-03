@@ -467,7 +467,10 @@ path-bearing URL patterns, and IPv6 origins must be bracketed. Non-loopback
 HTTP binds fail closed unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes it when
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds also require a
-non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request lines or header lines,
+non-empty `AGENTK_MCP_HTTP_TOKEN`. The packaged HTTP launcher forwards extra
+arguments to `sidecar-serve-http`, so operators can add one-off flags such as
+`--allow-origin` or `--auth-token-env` without editing the package script.
+Malformed request lines or header lines,
 including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid

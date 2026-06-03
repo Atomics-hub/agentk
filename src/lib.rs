@@ -16112,7 +16112,10 @@ concurrent HTTP requests. Set
 the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
-operations. Malformed request lines or header lines, including invalid UTF-8,
+operations. The packaged HTTP launcher forwards extra arguments to
+`sidecar-serve-http`, so operators can add one-off flags such as
+`--allow-origin` or `--auth-token-env` without editing the package script.
+Malformed request lines or header lines, including invalid UTF-8,
 duplicate or non-decimal `Content-Length` headers, LF-only line endings, control
 characters in header values, and any `Transfer-Encoding`, `Expect`, or
 `Upgrade` header are rejected as invalid framing because the adapter only
@@ -16429,7 +16432,8 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --session-idle-timeout-ms "${AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS:-900000}" \
   --stream-timeout-ms "${AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS:-30000}" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}" \
-  ${ALLOW_NON_LOCAL_BIND_FLAG}
+  ${ALLOW_NON_LOCAL_BIND_FLAG} \
+  "$@"
 "#
     .to_string()
 }
@@ -17726,6 +17730,7 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(http_launcher.contains("--allow-non-local-bind"));
+        assert!(http_launcher.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -17774,6 +17779,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("unbounded buffering"));
+        assert!(package_readme.contains("forwards extra arguments"));
         assert!(package_readme.contains("per-session runtime locks"));
         assert!(package_readme.contains("CORS preflight validation rejection totals"));
         assert!(package_readme.contains("stream-framing rejection totals"));
