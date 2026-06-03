@@ -1829,7 +1829,7 @@ impl<'de> serde::de::Visitor<'de> for DashboardDecisionUniqueKeysVisitor {
     type Value = ();
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a dashboard decision JSON object with unique keys")
+        formatter.write_str("a dashboard decision JSON object with supported unique keys")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1838,6 +1838,14 @@ impl<'de> serde::de::Visitor<'de> for DashboardDecisionUniqueKeysVisitor {
     {
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
+            if !matches!(
+                key.as_str(),
+                "id" | "reviewer" | "reason" | "reviewer_token"
+            ) {
+                return Err(serde::de::Error::custom(
+                    "dashboard decision JSON keys must be id, reviewer, reason, or reviewer_token",
+                ));
+            }
             if !keys.insert(key) {
                 return Err(serde::de::Error::custom(
                     "dashboard decision JSON keys must appear at most once",
@@ -9029,6 +9037,30 @@ can_deny = []
         assert!(duplicate_decision_key_body.contains("dashboard decision JSON"));
         assert!(duplicate_decision_key_body.contains("at most once"));
         assert!(!duplicate_decision_key_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+
+        let unknown_decision_key = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [("Content-Type", "application/json")],
+                format!(
+                    r#"{{"id":"{approval_id}","reviewer":"tom","reason":"unsupported dashboard decision key","reviewer_token":"dashboard-token","unsupported_key":"VALUE_SHOULD_NOT_REFLECT"}}"#
+                )
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(unknown_decision_key.status, "400 Bad Request");
+        let unknown_decision_key_body = String::from_utf8(unknown_decision_key.body)
+            .expect("unknown decision key body should be utf8");
+        assert!(unknown_decision_key_body.contains("dashboard decision JSON"));
+        assert!(unknown_decision_key_body.contains("id, reviewer, reason"));
+        assert!(!unknown_decision_key_body.contains("unsupported_key"));
+        assert!(!unknown_decision_key_body.contains("VALUE_SHOULD_NOT_REFLECT"));
 
         let missing_admin = dashboard_http_response(
             &dashboard_test_request_with_headers(
