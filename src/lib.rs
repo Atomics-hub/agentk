@@ -15538,12 +15538,13 @@ their MCP client configuration supports a TCP JSONL adapter.
 
 `bin/agentk-sidecar-http` listens on `127.0.0.1:9798/mcp` by default and serves
 the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
-direct JSON responses, Origin validation, optional bearer-token auth from
-`AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
-`AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`, and
-`AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` to tune the local service. Service
-supervisors can probe `GET /healthz` for liveness and `GET /readyz` for a
-redacted readiness summary. GET/SSE streams are currently rejected with 405
+direct JSON responses, Origin validation, `MCP-Protocol-Version` enforcement,
+optional bearer-token auth from `AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent
+HTTP requests. Set `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`,
+`AGENTK_MCP_HTTP_ENDPOINT`, and `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` to
+tune the local service. Service supervisors can probe `GET /healthz` for
+liveness and `GET /readyz` for a redacted readiness summary that includes the
+supported MCP protocol version. GET/SSE streams are currently rejected with 405
 until the gateway grows resumable SSE support.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
@@ -16930,6 +16931,7 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
+        assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));
         let dashboard =
