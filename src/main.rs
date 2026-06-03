@@ -1711,6 +1711,10 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP transfer-encoding is not supported".to_string(),
             ));
+        } else if name == "content-encoding" {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP content-encoding is not supported".to_string(),
+            ));
         } else if matches!(name.as_str(), "expect" | "upgrade") {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP expectation and upgrade headers are not supported".to_string(),
@@ -9203,6 +9207,18 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_encoded_request_bodies() {
+        let response = dashboard_http_stream_response_for(
+            b"POST /api/approve HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: 42\r\n\r\nCONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT",
+            DASHBOARD_HTTP_MAX_BODY_BYTES,
+            DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(response.contains("invalid dashboard HTTP request"));
+        assert!(!response.contains("CONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT"));
+    }
+
+    #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
@@ -9411,6 +9427,8 @@ done
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: 42\r\n\r\nCONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT"
+                .as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\n\r\n".as_slice(),
@@ -9447,6 +9465,7 @@ done
             assert!(!response.contains("PROXY_REALM_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("SPOOFED"));
             assert!(!response.contains("COOKIE_SECRET_SHOULD_NOT_REFLECT"));
+            assert!(!response.contains("CONTENT_ENCODING_SECRET_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)

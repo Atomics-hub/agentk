@@ -16283,11 +16283,12 @@ operations. The packaged HTTP launcher forwards extra arguments to
 `--allow-origin` or `--auth-token-env` without editing the package script.
 Malformed request lines or header lines, including invalid UTF-8,
 duplicate or non-decimal `Content-Length` headers, LF-only line endings, control
-characters in header values, and any `Transfer-Encoding`, `Expect`, or
-`Upgrade` header are rejected as invalid framing because the adapter only
+characters in header values, and any `Transfer-Encoding`, `Content-Encoding`,
+`Expect`, or `Upgrade` header are rejected as invalid framing because the adapter only
 accepts origin-form paths beginning with exactly one `/`, fragment-free,
-CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
-request lines and token-shaped header names without whitespace before `:`.
+CRLF-delimited, unencoded fixed-length HTTP/1.x requests with exactly
+space-delimited request lines and token-shaped header names without whitespace
+before `:`.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as
@@ -18136,7 +18137,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("LF-only line endings"));
         assert!(package_readme.contains("non-decimal `Content-Length`"));
         assert!(package_readme.contains("header values"));
-        assert!(package_readme.contains("any `Transfer-Encoding`, `Expect`, or"));
+        assert!(package_readme.contains("`Content-Encoding`"));
+        assert!(package_readme.contains("unencoded fixed-length"));
+        assert!(package_readme.contains("any `Transfer-Encoding`, `Content-Encoding`,"));
         assert!(package_readme.contains("`Upgrade` header"));
         assert!(package_readme.contains("`Expect`, or"));
         assert!(package_readme.contains("Only `Connection: close` is accepted"));

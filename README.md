@@ -314,11 +314,12 @@ oversized request bodies with 413 and excess initialized sessions with 429.
 POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, including invalid UTF-8, duplicate or
 non-decimal `Content-Length` headers, LF-only line endings, control characters
-in header values, ambiguous MCP control headers, any `Transfer-Encoding` header, and
-`Expect`/`Upgrade` headers are rejected as invalid framing or control
-ambiguity. `Connection: close` is accepted, while other `Connection` values and
-hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
-and `Trailer` are rejected, as are proxy auth headers such as
+in header values, ambiguous MCP control headers, any `Transfer-Encoding` or
+`Content-Encoding` header, and `Expect`/`Upgrade` headers are rejected as
+invalid framing or control ambiguity; the gateway only accepts unencoded
+fixed-length request bodies. `Connection: close` is accepted, while other
+`Connection` values and hop-by-hop negotiation headers such as
+`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` are rejected, as are proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate`. Forwarded proxy metadata such
 as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
 explicit trusted-proxy mode, and ambient cookie headers such as `Cookie` and
@@ -490,8 +491,9 @@ arguments to `sidecar-serve-http`, so operators can add one-off flags such as
 Malformed request lines or header lines,
 including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
-`Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid
-framing. Only `Connection: close` is accepted; other `Connection` values plus
+`Transfer-Encoding`, `Content-Encoding`, `Expect`, or `Upgrade` header are
+rejected as invalid framing. Request bodies must be unencoded fixed-length
+payloads. Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
 Forwarded proxy metadata such as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
 is rejected until AgentK has an explicit trusted-proxy mode.
