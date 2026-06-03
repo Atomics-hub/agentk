@@ -536,6 +536,7 @@ authorized to see. Direct scoped HTML views are also available at
 `/?reviewer=<id>` and enforce the same reviewer token checks. Token-protected
 reviewer reads must choose either `X-AgentK-Reviewer-Token` or the
 `reviewer_token` query parameter, not both, and the chosen carrier may appear
+only once. Scoped `reviewer` and `requester` query parameters may also appear
 only once.
 It also has a requester view: enter an AgentK agent id and use **Agent View**,
 or open `/?requester=<agent-id>`, to see only approvals and decisions produced

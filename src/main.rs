@@ -2007,6 +2007,9 @@ fn dashboard_http_html(
     permissions_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
+    if let Err(error) = dashboard_scope_query_param_error(request) {
+        return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
+    }
     let reviewer = match dashboard_query_param(&request.target, "reviewer") {
         Ok(reviewer) => reviewer,
         Err(error) => return dashboard_http_text("400 Bad Request", &format!("{error}\n")),
@@ -2487,6 +2490,9 @@ fn dashboard_http_json(
     permissions_path: Option<&PathBuf>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
+    if let Err(error) = dashboard_scope_query_param_error(request) {
+        return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
+    }
     let reviewer = match dashboard_query_param(&request.target, "reviewer") {
         Ok(reviewer) => reviewer,
         Err(error) => return dashboard_http_text("400 Bad Request", &format!("{error}\n")),
@@ -2762,6 +2768,17 @@ fn dashboard_reviewer_token_carrier_error(
             "dashboard reviewer token must use either X-AgentK-Reviewer-Token or reviewer_token query parameter"
                 .to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn dashboard_scope_query_param_error(request: &DashboardHttpRequest) -> Result<(), AgentKError> {
+    for name in ["reviewer", "requester"] {
+        if dashboard_query_param_count(&request.target, name)? > 1 {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "dashboard {name} query parameter must appear at most once"
+            )));
+        }
     }
     Ok(())
 }
@@ -8781,6 +8798,30 @@ can_deny = []
             owner_scoped_value["viewer"]["open_visible"],
             serde_json::json!(full_open)
         );
+
+        let duplicate_scope_targets = [
+            "/api/review?reviewer=VALUE_SHOULD_NOT_REFLECT&reviewer=VALUE_SHOULD_NOT_REFLECT",
+            "/?reviewer=VALUE_SHOULD_NOT_REFLECT&reviewer=VALUE_SHOULD_NOT_REFLECT",
+            "/api/review?requester=VALUE_SHOULD_NOT_REFLECT&requester=VALUE_SHOULD_NOT_REFLECT",
+            "/?requester=VALUE_SHOULD_NOT_REFLECT&requester=VALUE_SHOULD_NOT_REFLECT",
+        ];
+        for target in duplicate_scope_targets {
+            let duplicate_scope = dashboard_http_response(
+                &dashboard_test_request("GET", target, Vec::new()),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                None,
+                None,
+            );
+            assert_eq!(duplicate_scope.status, "400 Bad Request");
+            let duplicate_scope_body =
+                String::from_utf8(duplicate_scope.body).expect("scope error body should be utf8");
+            assert!(duplicate_scope_body.contains("dashboard"));
+            assert!(duplicate_scope_body.contains("query parameter"));
+            assert!(duplicate_scope_body.contains("at most once"));
+            assert!(!duplicate_scope_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+        }
 
         let reviewer_token_param = "reviewer_token";
         let dual_reviewer_targets = [
