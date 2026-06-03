@@ -2565,6 +2565,7 @@ fn dashboard_server_html(
         ));
     }
     html.push_str("</tbody></table></div>");
+    dashboard_server_evidence_summary(&mut html, review);
     dashboard_server_open_table(&mut html, &review.open_approvals);
     dashboard_server_decisions_table(&mut html, &review.decided_approvals);
     dashboard_server_stale_table(&mut html, &review.stale_decisions);
@@ -2590,6 +2591,62 @@ fn dashboard_server_metric(html: &mut String, label: &str, value: usize) {
         dashboard_html_escape(label),
         value
     ));
+}
+
+fn dashboard_server_evidence_summary(html: &mut String, review: &ApprovalReviewReport) {
+    html.push_str("<h2>Evidence Summary</h2>");
+    html.push_str("<div class=\"panel\"><table><tbody>");
+    html.push_str(&format!(
+        "<tr><th>Final Hash</th><td class=\"mono\">{}</td></tr>",
+        dashboard_html_escape(&review.trace_final_hash)
+    ));
+    html.push_str(&format!(
+        "<tr><th>Events</th><td>{} checked, {} allowed, {} blocked</td></tr>",
+        review.events_checked, review.allowed, review.blocked
+    ));
+    html.push_str(&format!(
+        "<tr><th>Signatures</th><td>{}</td></tr>",
+        if review.signatures_ok { "ok" } else { "failed" }
+    ));
+    html.push_str("</tbody></table></div>");
+
+    if !review.blocked_rules.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Blocked Rule</th><th>Count</th></tr></thead><tbody>");
+        for (rule, count) in &review.blocked_rules {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td></tr>",
+                dashboard_html_escape(rule),
+                count
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
+
+    if !review.syscall_summary.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Syscall</th><th>Allowed</th><th>Blocked</th><th>Targets</th></tr></thead><tbody>");
+        for (syscall, summary) in &review.syscall_summary {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                dashboard_html_escape(syscall),
+                summary.allowed,
+                summary.blocked,
+                summary.targets
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
+
+    if !review.evidence_summary.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Evidence Ref</th><th>Count</th></tr></thead><tbody>");
+        for (kind, count) in &review.evidence_summary {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td></tr>",
+                dashboard_html_escape(kind),
+                count
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
 }
 
 fn dashboard_server_open_table(html: &mut String, approvals: &[AuditApprovalItem]) {
@@ -9988,6 +10045,12 @@ can_deny = []
         assert_eq!(html.content_type, "text/html; charset=utf-8");
         let html_body = String::from_utf8(html.body).expect("html should be utf8");
         assert!(html_body.contains("AgentK Approval Dashboard"));
+        assert!(html_body.contains("Evidence Summary"));
+        assert!(html_body.contains("Final Hash"));
+        assert!(html_body.contains("tool.invoke"));
+        assert!(html_body.contains("tool-tainted-input"));
+        assert!(html_body.contains("args_sha256"));
+        assert!(html_body.contains("response_sha256"));
         assert!(html_body.contains("Open Approvals"));
         assert!(html_body.contains("data-agentk-dashboard=\"server\""));
         assert!(html_body.contains("id=\"reviewer\""));
@@ -10014,6 +10077,12 @@ can_deny = []
         let value: serde_json::Value =
             serde_json::from_slice(&json.body).expect("review response should be JSON");
         assert_eq!(value["review"]["signatures_ok"], true);
+        assert_eq!(value["review"]["evidence_summary"]["args_sha256"], 9);
+        assert_eq!(value["review"]["evidence_summary"]["response_sha256"], 2);
+        assert_eq!(
+            value["review"]["syscall_summary"]["tool.invoke"]["blocked"],
+            4
+        );
         assert!(value["viewer"].is_null());
         assert!(
             !value["review"]["open_approvals"]

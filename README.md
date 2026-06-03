@@ -604,6 +604,10 @@ reviewer-scoped reads.
 It also has a requester view: enter an AgentK agent id and use **Agent View**,
 or open `/?requester=<agent-id>`, to see only approvals and decisions produced
 by that signed agent identity.
+Both the static and served dashboards include the same redacted inspect evidence
+summary as the CLI: final hash, signature status, allow/block counts, blocked
+policy rules, syscall rollups, and evidence-ref counts such as `args_sha256`,
+`descriptor_sha256`, and `response_sha256`.
 
 `agentk store-export` writes normalized audit, approval, and permission JSON
 plus a Postgres schema contract and psql-loadable TSV files for teams that want

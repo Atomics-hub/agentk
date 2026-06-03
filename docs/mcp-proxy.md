@@ -335,6 +335,10 @@ signed AgentK agent identity recorded in each event. Scoped `reviewer` and
 `requester` query parameters may appear only once and cannot be combined in one
 request. Dashboard review routes reject unsupported query parameters, and
 reviewer-token carriers are accepted only on reviewer-scoped reads.
+The static and served dashboards also render the redacted inspect evidence
+summary from the signed trace: final hash, signature status, allow/block counts,
+blocked policy rules, syscall rollups, and evidence-ref counts such as
+`args_sha256`, `descriptor_sha256`, and `response_sha256`.
 `agentk store-check --root <store>` validates either the exported Postgres
 artifacts or the live durable team store before a team relies on it. `agentk
 store-push --root <store>` accepts only the export shape, preflights again, and

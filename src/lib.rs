@@ -6141,6 +6141,10 @@ pub struct AuditInboxReport {
     pub pending_approvals: Vec<AuditApprovalItem>,
     pub allowed_side_effects: Vec<AuditSideEffectItem>,
     pub blocked_rules: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub syscall_summary: BTreeMap<String, FlightLogSyscallSummary>,
+    #[serde(default)]
+    pub evidence_summary: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -6209,8 +6213,20 @@ pub struct ApprovalDecisionRecord {
 pub struct ApprovalReviewReport {
     pub trace_path: PathBuf,
     pub decisions_path: PathBuf,
+    #[serde(default)]
+    pub trace_final_hash: String,
     pub events_checked: u64,
     pub signatures_ok: bool,
+    #[serde(default)]
+    pub allowed: usize,
+    #[serde(default)]
+    pub blocked: usize,
+    #[serde(default)]
+    pub blocked_rules: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub syscall_summary: BTreeMap<String, FlightLogSyscallSummary>,
+    #[serde(default)]
+    pub evidence_summary: BTreeMap<String, usize>,
     pub open_approvals: Vec<AuditApprovalItem>,
     pub decided_approvals: Vec<ApprovalDecisionRecord>,
     pub stale_decisions: Vec<ApprovalDecisionRecord>,
@@ -6235,6 +6251,8 @@ pub struct ApprovalDashboardReport {
     pub decisions_path: PathBuf,
     pub permissions_path: Option<PathBuf>,
     pub signatures_ok: bool,
+    pub events_checked: u64,
+    pub evidence_refs: usize,
     pub open: usize,
     pub approved: usize,
     pub denied: usize,
@@ -6353,6 +6371,8 @@ pub fn write_approval_dashboard_html(
         decisions_path: review.decisions_path.clone(),
         permissions_path: permissions.as_ref().map(|report| report.path.clone()),
         signatures_ok: review.signatures_ok,
+        events_checked: review.events_checked,
+        evidence_refs: review.evidence_summary.values().sum(),
         open: review.open_approvals.len(),
         approved: review.approved,
         denied: review.denied,
@@ -7046,6 +7066,8 @@ pub fn audit_inbox_from_inspect(inspect: FlightLogInspectReport) -> AuditInboxRe
         pending_approvals,
         allowed_side_effects,
         blocked_rules: inspect.blocked_rules,
+        syscall_summary: inspect.syscall_summary,
+        evidence_summary: inspect.evidence_summary,
     }
 }
 
@@ -7093,8 +7115,14 @@ fn approval_review_from_inbox(
     ApprovalReviewReport {
         trace_path: inbox.path,
         decisions_path,
+        trace_final_hash: inbox.final_hash,
         events_checked: inbox.events_checked,
         signatures_ok: inbox.signatures_ok,
+        allowed: inbox.allowed,
+        blocked: inbox.blocked,
+        blocked_rules: inbox.blocked_rules,
+        syscall_summary: inbox.syscall_summary,
+        evidence_summary: inbox.evidence_summary,
         open_approvals,
         decided_approvals,
         stale_decisions,
@@ -7234,6 +7262,7 @@ pub fn approval_dashboard_html(
     }
     html.push_str("</tbody></table></div>");
 
+    approval_dashboard_evidence_summary(&mut html, review);
     approval_dashboard_open_table(&mut html, &review.open_approvals);
     approval_dashboard_decisions_table(&mut html, &review.decided_approvals);
     approval_dashboard_stale_table(&mut html, &review.stale_decisions);
@@ -7259,6 +7288,62 @@ fn approval_dashboard_metric(html: &mut String, label: &str, value: usize) {
         html_escape(label),
         value
     ));
+}
+
+fn approval_dashboard_evidence_summary(html: &mut String, review: &ApprovalReviewReport) {
+    html.push_str("<h2>Evidence Summary</h2>");
+    html.push_str("<div class=\"panel\"><table><tbody>");
+    html.push_str(&format!(
+        "<tr><th>Final Hash</th><td class=\"mono\">{}</td></tr>",
+        html_escape(&review.trace_final_hash)
+    ));
+    html.push_str(&format!(
+        "<tr><th>Events</th><td>{} checked, {} allowed, {} blocked</td></tr>",
+        review.events_checked, review.allowed, review.blocked
+    ));
+    html.push_str(&format!(
+        "<tr><th>Signatures</th><td>{}</td></tr>",
+        if review.signatures_ok { "ok" } else { "failed" }
+    ));
+    html.push_str("</tbody></table></div>");
+
+    if !review.blocked_rules.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Blocked Rule</th><th>Count</th></tr></thead><tbody>");
+        for (rule, count) in &review.blocked_rules {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td></tr>",
+                html_escape(rule),
+                count
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
+
+    if !review.syscall_summary.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Syscall</th><th>Allowed</th><th>Blocked</th><th>Targets</th></tr></thead><tbody>");
+        for (syscall, summary) in &review.syscall_summary {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(syscall),
+                summary.allowed,
+                summary.blocked,
+                summary.targets
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
+
+    if !review.evidence_summary.is_empty() {
+        html.push_str("<div class=\"panel\"><table><thead><tr><th>Evidence Ref</th><th>Count</th></tr></thead><tbody>");
+        for (kind, count) in &review.evidence_summary {
+            html.push_str(&format!(
+                "<tr><td class=\"mono\">{}</td><td>{}</td></tr>",
+                html_escape(kind),
+                count
+            ));
+        }
+        html.push_str("</tbody></table></div>");
+    }
 }
 
 fn approval_dashboard_open_table(html: &mut String, approvals: &[AuditApprovalItem]) {
@@ -22667,7 +22752,10 @@ can_deny = ["*"]
             target: "slack.send_message<script>".to_string(),
             intent: "send support reply".to_string(),
             labels: labels(&[Label::Trusted]),
-            inputs: vec!["input_sha256:demo".to_string()],
+            inputs: vec![
+                "input_sha256:demo".to_string(),
+                "raw_marker=DEMO_PRIVATE_MARKER<script>".to_string(),
+            ],
         });
         kernel.write_jsonl(&trace_path).expect("log should write");
         let approval_id = approval_review_jsonl(&trace_path, &decisions_path)
@@ -22698,10 +22786,18 @@ can_deny = ["*"]
         assert_eq!(report.open, 0);
         assert_eq!(report.denied, 1);
         assert_eq!(report.reviewers, 1);
+        assert_eq!(report.events_checked, 1);
+        assert_eq!(report.evidence_refs, 2);
         assert!(html.contains("AgentK Approval Dashboard"));
+        assert!(html.contains("Evidence Summary"));
+        assert!(html.contains("Final Hash"));
+        assert!(html.contains("tool.invoke"));
+        assert!(html.contains("tool-invoke-capability-missing"));
+        assert!(html.contains("input_sha256"));
         assert!(html.contains("slack.send_message&lt;script&gt;"));
         assert!(html.contains("contains &lt;unsafe&gt; request"));
         assert!(!html.contains("slack.send_message<script>"));
+        assert!(!html.contains("DEMO_PRIVATE_MARKER"));
 
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(decisions_path);

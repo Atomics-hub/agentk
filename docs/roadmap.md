@@ -231,6 +231,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add reviewer-scoped dashboard API reads backed by team permissions.
 - [x] Add role-aware served dashboard views backed by reviewer scopes.
 - [x] Add requester-scoped dashboard views backed by signed agent identity.
+- [x] Surface redacted trace-inspect evidence in approval dashboards.
 - [x] Add a credential-free durable notification outbox for approval events.
 - [x] Add a bounded TCP JSON-RPC sidecar gateway for internal adapters.
 - [x] Add explicit TCP gateway concurrency bounds for service operation.
