@@ -278,8 +278,9 @@ The safest first productization slice is the local team sidecar path:
     evidence. The HTTP parser rejects malformed or non-UTF-8
     request/header lines, LF-only line endings, duplicate or non-decimal
     `Content-Length` headers, control characters in header values, and any
-    transfer-encoding header, expectation header, or upgrade header with
-    sanitized 400 responses.
+    transfer-encoding, content-encoding, expectation, or upgrade header with
+    sanitized 400 responses; HTTP request bodies must be unencoded and
+    fixed-length.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
     rejected before request handling. Forwarded proxy metadata such as
