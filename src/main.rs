@@ -1,10 +1,10 @@
 use agentk::{
     AgentKError, ApprovalDecision, ApprovalDecisionRecord, ApprovalReviewReport, AuditApprovalItem,
-    McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus, TeamPermissionsReport,
-    Verdict, approval_review_jsonl, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
-    check_sidecar_bundle, default_log_path, export_audit_store, fork_replay_behavior_jsonl,
-    fork_replay_jsonl, generate_signing_key_file, init_sidecar_bundle, inspect_jsonl,
-    mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
+    MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
+    TeamPermissionsReport, Verdict, approval_review_jsonl, audit_inbox_jsonl, check_audit_store,
+    check_audit_store_export, check_sidecar_bundle, default_log_path, export_audit_store,
+    fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, init_sidecar_bundle,
+    inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
     mediate_mcp_json_reader, mediate_mcp_json_stream, package_sidecar_bundle, readiness_report,
     record_approval_decision_jsonl, record_approval_decision_jsonl_with_permissions,
     release_audit_report, replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo,
@@ -3225,7 +3225,12 @@ struct McpHttpGatewayState {
     auth_token: Option<String>,
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
-    sessions: Mutex<BTreeMap<String, McpSubprocessProxy>>,
+    sessions: Mutex<BTreeMap<String, McpHttpSession>>,
+}
+
+struct McpHttpSession {
+    proxy: McpSubprocessProxy,
+    protocol_version: String,
 }
 
 fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentKError> {
@@ -3448,11 +3453,29 @@ fn mcp_http_operational_response(
         body: serde_json::to_vec(&serde_json::json!({
             "ready": true,
             "endpoint": state.endpoint.as_str(),
+            "protocol_version": MCP_PROTOCOL_VERSION,
             "active_sessions": active_sessions,
             "max_concurrent_requests": state.max_concurrent_requests,
             "auth_required": state.auth_token.is_some()
         }))?,
     })
+}
+
+fn mcp_http_protocol_version_error(
+    request: &DashboardHttpRequest,
+    negotiated_protocol_version: Option<&str>,
+) -> Option<DashboardHttpResponse> {
+    let protocol_version = request.header("mcp-protocol-version")?;
+    if protocol_version == MCP_PROTOCOL_VERSION
+        && negotiated_protocol_version.is_none_or(|negotiated| negotiated == protocol_version)
+    {
+        return None;
+    }
+
+    Some(dashboard_http_text(
+        "400 Bad Request",
+        &format!("MCP-Protocol-Version must be {MCP_PROTOCOL_VERSION}\n"),
+    ))
 }
 
 fn mcp_http_post_response(
@@ -3502,19 +3525,34 @@ fn mcp_http_post_response(
     let is_notification_or_response = message.get("id").is_none();
 
     if is_initialize {
+        if let Some(response) = mcp_http_protocol_version_error(request, None) {
+            return Ok(response);
+        }
         let session_id = mcp_http_new_session_id()?;
         let mut proxy = McpSubprocessProxy::spawn(state.proxy.clone())?;
         let response = proxy.handle_json_rpc_line(&request.body, false)?;
         let mut headers = Vec::new();
         if let Some(response) = response {
             let initialized = response.get("result").is_some();
+            let protocol_version = response
+                .get("result")
+                .and_then(|result| result.get("protocolVersion"))
+                .and_then(|value| value.as_str())
+                .unwrap_or(MCP_PROTOCOL_VERSION)
+                .to_string();
             let body = serde_json::to_vec(&response)?;
             if initialized {
                 headers.push(("Mcp-Session-Id".to_string(), session_id.clone()));
                 let mut sessions = state.sessions.lock().map_err(|_| {
                     AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
                 })?;
-                sessions.insert(session_id, proxy);
+                sessions.insert(
+                    session_id,
+                    McpHttpSession {
+                        proxy,
+                        protocol_version,
+                    },
+                );
             }
             return Ok(DashboardHttpResponse {
                 status: "200 OK",
@@ -3539,14 +3577,19 @@ fn mcp_http_post_response(
     let mut sessions = state.sessions.lock().map_err(|_| {
         AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
     })?;
-    let Some(proxy) = sessions.get_mut(&session_id) else {
+    let Some(session) = sessions.get_mut(&session_id) else {
         return Ok(dashboard_http_text(
             "404 Not Found",
             "MCP session not found\n",
         ));
     };
-    let response = proxy.handle_json_rpc_line(&request.body, false)?;
-    mcp_http_write_session_outputs(&session_id, proxy, state)?;
+    if let Some(response) =
+        mcp_http_protocol_version_error(request, Some(session.protocol_version.as_str()))
+    {
+        return Ok(response);
+    }
+    let response = session.proxy.handle_json_rpc_line(&request.body, false)?;
+    mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     drop(sessions);
 
     if let Some(response) = response {
@@ -3582,13 +3625,19 @@ fn mcp_http_delete_response(
     let mut sessions = state.sessions.lock().map_err(|_| {
         AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string())
     })?;
-    let Some(proxy) = sessions.remove(&session_id) else {
+    let Some(session) = sessions.remove(&session_id) else {
         return Ok(dashboard_http_text(
             "404 Not Found",
             "MCP session not found\n",
         ));
     };
-    mcp_http_write_session_outputs(&session_id, &proxy, state)?;
+    if let Some(response) =
+        mcp_http_protocol_version_error(request, Some(session.protocol_version.as_str()))
+    {
+        sessions.insert(session_id, session);
+        return Ok(response);
+    }
+    mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     Ok(DashboardHttpResponse {
         status: "202 Accepted",
         content_type: "text/plain; charset=utf-8",
@@ -4516,6 +4565,7 @@ done
                 ("Accept", "application/json, text/event-stream"),
                 ("Content-Type", "application/json"),
                 ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
             ],
             r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
         );
@@ -4524,6 +4574,38 @@ done
         assert_eq!(initialized_response.status, "202 Accepted");
         assert!(initialized_response.body.is_empty());
 
+        let invalid_protocol = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                (
+                    "MCP-Protocol-Version",
+                    "UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT",
+                ),
+            ],
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        );
+        let invalid_protocol_response =
+            mcp_http_response(&invalid_protocol, &state).expect("bad protocol should be rejected");
+        assert_eq!(invalid_protocol_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&invalid_protocol_response.body)
+                .contains("UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT")
+        );
+        let client_messages_seen = state
+            .sessions
+            .lock()
+            .expect("session lock should not be poisoned")
+            .get(&session_id)
+            .expect("session should still exist")
+            .proxy
+            .session_report()
+            .client_messages_seen;
+        assert_eq!(client_messages_seen, 2);
+
         let tools = dashboard_test_request_with_headers(
             "POST",
             "/mcp",
@@ -4531,6 +4613,7 @@ done
                 ("Accept", "application/json, text/event-stream"),
                 ("Content-Type", "application/json"),
                 ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
             ],
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
         );
@@ -4544,7 +4627,10 @@ done
         let delete = dashboard_test_request_with_headers(
             "DELETE",
             "/mcp",
-            [("Mcp-Session-Id", session_id.as_str())],
+            [
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
             Vec::new(),
         );
         let delete_response =
@@ -4590,6 +4676,142 @@ done
         let missing_session_response =
             mcp_http_response(&missing_session, &state).expect("missing session should be handled");
         assert_eq!(missing_session_response.status, "400 Bad Request");
+
+        let bad_protocol = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                (
+                    "MCP-Protocol-Version",
+                    "UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT",
+                ),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let bad_protocol_response =
+            mcp_http_response(&bad_protocol, &state).expect("bad protocol should be handled");
+        assert_eq!(bad_protocol_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_protocol_response.body)
+                .contains("UNSUPPORTED_HTTP_VERSION_SHOULD_NOT_REFLECT")
+        );
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_protocol_version_mismatches() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+
+        let bad_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", "1900-01-01"),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.0"}}}"#,
+        );
+        let bad_initialize_response =
+            mcp_http_response(&bad_initialize, &state).expect("bad protocol should be handled");
+        assert_eq!(bad_initialize_response.status, "400 Bad Request");
+        assert!(
+            String::from_utf8_lossy(&bad_initialize_response.body)
+                .contains("MCP-Protocol-Version must be 2025-11-25")
+        );
+        assert_eq!(
+            state.sessions.lock().expect("sessions should lock").len(),
+            0
+        );
+
+        let good_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.0"}}}"#,
+        );
+        let good_initialize_response = mcp_http_response(&good_initialize, &state)
+            .expect("supported protocol should initialize");
+        assert_eq!(good_initialize_response.status, "200 OK");
+        let session_id = response_header(&good_initialize_response, "Mcp-Session-Id")
+            .expect("initialize should return session")
+            .to_string();
+
+        let bad_followup = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Mcp-Protocol-Version", "1900-01-01"),
+            ],
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        );
+        let bad_followup_response =
+            mcp_http_response(&bad_followup, &state).expect("bad followup should be handled");
+        assert_eq!(bad_followup_response.status, "400 Bad Request");
+        assert_eq!(
+            state.sessions.lock().expect("sessions should lock").len(),
+            1
+        );
+
+        let bad_delete = dashboard_test_request_with_headers(
+            "DELETE",
+            "/mcp",
+            [
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Mcp-Protocol-Version", "1900-01-01"),
+            ],
+            Vec::new(),
+        );
+        let bad_delete_response =
+            mcp_http_response(&bad_delete, &state).expect("bad delete should be handled");
+        assert_eq!(bad_delete_response.status, "400 Bad Request");
+        assert_eq!(
+            state.sessions.lock().expect("sessions should lock").len(),
+            1
+        );
+
+        let good_delete = dashboard_test_request_with_headers(
+            "DELETE",
+            "/mcp",
+            [
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            Vec::new(),
+        );
+        let good_delete_response =
+            mcp_http_response(&good_delete, &state).expect("good delete should be accepted");
+        assert_eq!(good_delete_response.status, "202 Accepted");
+        assert_eq!(
+            state.sessions.lock().expect("sessions should lock").len(),
+            0
+        );
     }
 
     #[test]
@@ -4624,6 +4846,10 @@ done
             serde_json::from_slice(&ready.body).expect("readyz should be JSON");
         assert_eq!(ready_json["ready"], serde_json::json!(true));
         assert_eq!(ready_json["endpoint"], serde_json::json!("/mcp"));
+        assert_eq!(
+            ready_json["protocol_version"],
+            serde_json::json!(MCP_PROTOCOL_VERSION)
+        );
         assert_eq!(ready_json["active_sessions"], serde_json::json!(0));
         assert_eq!(ready_json["max_concurrent_requests"], serde_json::json!(8));
         assert_eq!(ready_json["auth_required"], serde_json::json!(true));
