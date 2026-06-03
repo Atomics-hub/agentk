@@ -16086,12 +16086,12 @@ the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
 operations. Malformed request lines or header lines, including invalid UTF-8,
-duplicate `Content-Length` headers, LF-only line endings, control characters in
-header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are
-rejected as invalid framing because the adapter only accepts origin-form,
-fragment-free, CRLF-delimited, fixed-length HTTP/1.x requests with exactly
-space-delimited request lines and token-shaped header names without whitespace
-before `:`.
+duplicate or non-decimal `Content-Length` headers, LF-only line endings, control
+characters in header values, and any `Transfer-Encoding`, `Expect`, or
+`Upgrade` header are rejected as invalid framing because the adapter only
+accepts origin-form, fragment-free, CRLF-delimited, fixed-length HTTP/1.x
+requests with exactly space-delimited request lines and token-shaped header
+names without whitespace before `:`.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation.
@@ -17722,9 +17722,11 @@ can_deny = ["*"]
         assert!(package_readme.contains("Malformed request lines or header lines"));
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));
+        assert!(package_readme.contains("non-decimal `Content-Length`"));
         assert!(package_readme.contains("header values"));
-        assert!(package_readme.contains("any `Transfer-Encoding`, `Expect`, or `Upgrade` header"));
-        assert!(package_readme.contains("`Expect`, or `Upgrade` header"));
+        assert!(package_readme.contains("any `Transfer-Encoding`, `Expect`, or"));
+        assert!(package_readme.contains("`Upgrade` header"));
+        assert!(package_readme.contains("`Expect`, or"));
         assert!(package_readme.contains("Only `Connection: close` is accepted"));
         assert!(package_readme.contains("unsupported hop-by-hop negotiation"));
         assert!(package_readme.contains("fragment-free"));
