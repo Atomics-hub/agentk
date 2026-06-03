@@ -3991,11 +3991,14 @@ fn mcp_http_response_inner(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
-    let path = request.target.split('?').next().unwrap_or_default();
-    if path == state.endpoint && request.target.contains('?') {
+    let (path, has_query) = match request.target.split_once('?') {
+        Some((path, _)) => (path, true),
+        None => (request.target.as_str(), false),
+    };
+    if has_query && (path == state.endpoint || mcp_http_is_operational_path(path)) {
         return Ok(dashboard_http_text(
             "400 Bad Request",
-            "MCP HTTP endpoint must not include a query string\n",
+            "MCP HTTP endpoint and probes must not include query strings\n",
         ));
     }
     if (path == state.endpoint || matches!(path, "/readyz" | "/metrics"))
@@ -4009,7 +4012,7 @@ fn mcp_http_response_inner(
     {
         return Ok(response);
     }
-    if path == "/healthz" || path == "/readyz" || path == "/metrics" {
+    if mcp_http_is_operational_path(path) {
         let mut response =
             if path != "/healthz" && !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
                 mcp_http_token_required_response()
@@ -4082,6 +4085,10 @@ fn mcp_http_response_inner(
         mcp_http_apply_cors_headers(&mut response, origin);
     }
     Ok(response)
+}
+
+fn mcp_http_is_operational_path(path: &str) -> bool {
+    matches!(path, "/healthz" | "/readyz" | "/metrics")
 }
 
 fn mcp_http_record_response_metrics(
@@ -6664,7 +6671,7 @@ done
     }
 
     #[test]
-    fn mcp_http_response_rejects_endpoint_query_strings() {
+    fn mcp_http_response_rejects_endpoint_and_probe_query_strings() {
         let state = Arc::new(McpHttpGatewayState {
             proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
             endpoint: "/mcp".to_string(),
@@ -6709,14 +6716,27 @@ done
                 ],
                 Vec::new(),
             ),
+            dashboard_test_request("GET", "/healthz?probe=QUERY_SHOULD_NOT_REFLECT", Vec::new()),
+            dashboard_test_request_with_headers(
+                "GET",
+                "/readyz?probe=QUERY_SHOULD_NOT_REFLECT",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
+            dashboard_test_request_with_headers(
+                "GET",
+                "/metrics?probe=QUERY_SHOULD_NOT_REFLECT",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
         ];
 
         for request in cases {
             let response =
-                mcp_http_response(&request, &state).expect("endpoint query should fail closed");
+                mcp_http_response(&request, &state).expect("query target should fail closed");
             assert_eq!(response.status, "400 Bad Request");
             let response_body = String::from_utf8_lossy(&response.body);
-            assert!(response_body.contains("query string"));
+            assert!(response_body.contains("query strings"));
             assert!(!response_body.contains("QUERY_SHOULD_NOT_REFLECT"));
         }
         assert!(
@@ -7351,7 +7371,7 @@ done
         assert_eq!(health.body, br#"{"ok":true}"#);
 
         let unauthorized_ready = mcp_http_response(
-            &dashboard_test_request("GET", "/readyz?probe=1", Vec::new()),
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
             &state,
         )
         .expect("readyz auth failure should respond");
@@ -7364,7 +7384,7 @@ done
         let ready = mcp_http_response(
             &dashboard_test_request_with_headers(
                 "GET",
-                "/readyz?probe=1",
+                "/readyz",
                 [("Authorization", "Bearer secret")],
                 Vec::new(),
             ),

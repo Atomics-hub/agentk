@@ -16104,11 +16104,11 @@ are rejected as ambiguous, and POSTs require an exact `application/json` media
 type. Request bodies are accepted only on MCP `POST`.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers.
-The configured MCP endpoint path is matched exactly; query strings are rejected
-before auth or session handling. The configured endpoint must be a clean
-origin-form path beginning with `/`, without query strings, fragments,
-whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
-`/metrics`.
+The configured MCP endpoint and operational probe paths are matched exactly;
+query strings on those paths are rejected before auth, session, or probe
+handling. The configured endpoint must be a clean origin-form path beginning
+with `/`, without query strings, fragments, whitespace, or control characters,
+and cannot reuse `/healthz`, `/readyz`, or `/metrics`.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Values must be exact `scheme://authority` origins or `null`,
 without paths, queries, fragments, wildcards, whitespace, invalid ports, or
@@ -17740,8 +17740,10 @@ can_deny = ["*"]
         assert!(package_readme.contains("`application/json` media"));
         assert!(package_readme.contains("Request bodies are accepted only"));
         assert!(package_readme.contains("preflights must request `POST` or `DELETE`"));
-        assert!(package_readme.contains("endpoint path is matched exactly"));
-        assert!(package_readme.contains("origin-form path beginning with `/`"));
+        assert!(package_readme.contains("endpoint and operational probe paths"));
+        assert!(package_readme.contains("query strings on those paths"));
+        assert!(package_readme.contains("origin-form path beginning"));
+        assert!(package_readme.contains("with `/`, without query strings"));
         assert!(package_readme.contains("fixed-length"));
         let package_manifest =
             fs::read_to_string(out.join("manifest.json")).expect("manifest should read");
