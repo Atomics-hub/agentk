@@ -15562,6 +15562,8 @@ header. Incomplete header blocks and short fixed-length bodies are rejected
 before handling. Duplicate MCP control headers and dual token-carrier headers
 are rejected as ambiguous, and POSTs require an exact `application/json` media
 type. Request bodies are accepted only on MCP `POST`.
+Allowed browser preflights must request `POST` or `DELETE` and only known MCP
+HTTP headers.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
@@ -17036,6 +17038,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("Duplicate MCP control headers"));
         assert!(package_readme.contains("exact `application/json` media"));
         assert!(package_readme.contains("accepted only on MCP `POST`"));
+        assert!(package_readme.contains("preflights must request `POST` or `DELETE`"));
         assert!(package_readme.contains("fixed-length"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");

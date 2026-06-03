@@ -303,7 +303,8 @@ cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-c
 ```
 
 The HTTP gateway validates Origin headers, answers allowed browser CORS
-preflights without requiring auth, supports optional bearer auth via
+preflights for `POST`/`DELETE` plus known MCP headers without requiring auth,
+supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN` with one token header per request, returns
 `Mcp-Session-Id` on initialize, accepts subsequent POSTs with that session id,
 rejects unsupported `MCP-Protocol-Version` headers, returns direct JSON
@@ -315,8 +316,10 @@ invalid framing or control ambiguity. HTTP/1.1 requests must include exactly
 one nonblank `Host` header. Incomplete header blocks and short fixed-length
 bodies are rejected before request handling. Request bodies are accepted only on
 MCP `POST`; operational probes and other MCP methods reject bodies before auth
-or session handling. Idle sessions are reaped after the configured timeout so
-abandoned clients do not hold downstream processes forever.
+or session handling. Unsupported preflight methods or headers return sanitized
+400 responses with CORS visibility for allowed origins. Idle sessions are reaped
+after the configured timeout so abandoned clients do not hold downstream
+processes forever.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
@@ -420,8 +423,9 @@ lines or header lines, duplicate `Content-Length` headers, and
 control headers and dual token-carrier headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
 truncated headers or bodies are rejected before request handling. Request bodies
-are accepted only on MCP `POST`. LAN/public exposure is therefore an explicit
-authenticated operator choice. Set
+are accepted only on MCP `POST`, and CORS preflights are limited to `POST`,
+`DELETE`, and known MCP HTTP headers. LAN/public exposure is therefore an
+explicit authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,

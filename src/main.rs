@@ -3900,6 +3900,10 @@ fn mcp_http_response(
     let cors_origin = mcp_http_cors_origin(origin, &state.allow_origins);
     if request.method == "OPTIONS" {
         if let Some(origin) = cors_origin.as_deref() {
+            if let Some(mut response) = mcp_http_preflight_error(request) {
+                mcp_http_apply_cors_headers(&mut response, origin);
+                return Ok(response);
+            }
             return Ok(mcp_http_preflight_response(origin));
         }
         let mut response = dashboard_http_text("204 No Content", "");
@@ -3953,6 +3957,45 @@ fn mcp_http_response(
         mcp_http_apply_cors_headers(&mut response, origin);
     }
     Ok(response)
+}
+
+fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
+    let Some(requested_method) = request.header("access-control-request-method") else {
+        return Some(dashboard_http_text(
+            "400 Bad Request",
+            "MCP HTTP CORS preflight method is required\n",
+        ));
+    };
+    if !matches!(requested_method, "POST" | "DELETE") {
+        return Some(dashboard_http_text(
+            "400 Bad Request",
+            "MCP HTTP CORS preflight method is not allowed\n",
+        ));
+    }
+
+    if let Some(headers) = request.header("access-control-request-headers") {
+        for header in headers.split(',') {
+            let header = header.trim().to_ascii_lowercase();
+            if header.is_empty()
+                || !matches!(
+                    header.as_str(),
+                    "accept"
+                        | "authorization"
+                        | "content-type"
+                        | "mcp-protocol-version"
+                        | "mcp-session-id"
+                        | "x-agentk-mcp-token"
+                )
+            {
+                return Some(dashboard_http_text(
+                    "400 Bad Request",
+                    "MCP HTTP CORS preflight header is not allowed\n",
+                ));
+            }
+        }
+    }
+
+    None
 }
 
 fn mcp_http_token_required_response() -> DashboardHttpResponse {
@@ -4092,6 +4135,8 @@ fn mcp_http_protocol_version_error(
 fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
     for name in [
         "accept",
+        "access-control-request-headers",
+        "access-control-request-method",
         "authorization",
         "content-type",
         "mcp-protocol-version",
@@ -5521,7 +5566,10 @@ done
         let configured_origin = dashboard_test_request_with_headers(
             "OPTIONS",
             "/mcp",
-            [("Origin", "https://console.example")],
+            [
+                ("Origin", "https://console.example"),
+                ("Access-Control-Request-Method", "DELETE"),
+            ],
             Vec::new(),
         );
         let configured_response = mcp_http_response(&configured_origin, &state)
@@ -5576,6 +5624,83 @@ done
         let localhost_suffix_response = mcp_http_response(&localhost_suffix, &state)
             .expect("localhost suffix origin should be rejected");
         assert_eq!(localhost_suffix_response.status, "403 Forbidden");
+        let missing_preflight_method = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [("Origin", "http://localhost:5173")],
+            Vec::new(),
+        );
+        let missing_preflight_method_response =
+            mcp_http_response(&missing_preflight_method, &state)
+                .expect("missing preflight method should be rejected");
+        assert_eq!(missing_preflight_method_response.status, "400 Bad Request");
+        assert_eq!(
+            response_header(
+                &missing_preflight_method_response,
+                "Access-Control-Allow-Origin"
+            ),
+            Some("http://localhost:5173")
+        );
+        assert!(
+            String::from_utf8_lossy(&missing_preflight_method_response.body)
+                .contains("preflight method is required")
+        );
+
+        let unsupported_preflight_method = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "PATCH"),
+            ],
+            Vec::new(),
+        );
+        let unsupported_preflight_method_response =
+            mcp_http_response(&unsupported_preflight_method, &state)
+                .expect("unsupported preflight method should be rejected");
+        assert_eq!(
+            unsupported_preflight_method_response.status,
+            "400 Bad Request"
+        );
+        assert_eq!(
+            response_header(
+                &unsupported_preflight_method_response,
+                "Access-Control-Allow-Origin"
+            ),
+            Some("http://localhost:5173")
+        );
+
+        let unsupported_preflight_header = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "POST"),
+                (
+                    "Access-Control-Request-Headers",
+                    "authorization, x-unsafe-header",
+                ),
+            ],
+            Vec::new(),
+        );
+        let unsupported_preflight_header_response =
+            mcp_http_response(&unsupported_preflight_header, &state)
+                .expect("unsupported preflight header should be rejected");
+        assert_eq!(
+            unsupported_preflight_header_response.status,
+            "400 Bad Request"
+        );
+        assert!(
+            String::from_utf8_lossy(&unsupported_preflight_header_response.body)
+                .contains("preflight header is not allowed")
+        );
+        assert_eq!(
+            response_header(
+                &unsupported_preflight_header_response,
+                "Access-Control-Allow-Origin"
+            ),
+            Some("http://localhost:5173")
+        );
         assert!(
             state
                 .sessions
@@ -5728,6 +5853,16 @@ done
                     ("X-AgentK-MCP-Token", "TOKEN_SHOULD_NOT_REFLECT"),
                 ],
                 body,
+            ),
+            dashboard_test_request_with_headers(
+                "OPTIONS",
+                "/mcp",
+                [
+                    ("Origin", "http://localhost:5173"),
+                    ("Access-Control-Request-Method", "POST"),
+                    ("Access-Control-Request-Method", "DELETE"),
+                ],
+                Vec::new(),
             ),
         ];
 
