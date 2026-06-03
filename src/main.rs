@@ -29,10 +29,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MCP_HTTP_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
+const MCP_HTTP_DEFAULT_MAX_HEADER_BYTES: usize = 16 * 1024;
 const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
+const DASHBOARD_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Parser)]
@@ -421,6 +423,9 @@ enum Command {
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
+        /// Maximum HTTP request line plus header bytes.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_HEADER_BYTES)]
+        max_header_bytes: usize,
         /// Milliseconds before an accepted HTTP connection read/write operation times out.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
         stream_timeout_ms: u64,
@@ -532,6 +537,9 @@ enum Command {
         /// Maximum HTTP request body size in bytes.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_BODY_BYTES)]
         max_body_bytes: usize,
+        /// Maximum HTTP request line plus header bytes.
+        #[arg(long, default_value_t = MCP_HTTP_DEFAULT_MAX_HEADER_BYTES)]
+        max_header_bytes: usize,
         /// Milliseconds before an accepted HTTP connection read/write operation times out.
         #[arg(long, default_value_t = MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
         stream_timeout_ms: u64,
@@ -840,6 +848,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -863,6 +872,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -896,6 +906,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -911,6 +922,7 @@ fn run() -> Result<(), AgentKError> {
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -1474,24 +1486,27 @@ impl DashboardHttpRequest {
 fn read_dashboard_http_request(
     stream: &mut TcpStream,
 ) -> Result<Option<DashboardHttpRequest>, AgentKError> {
-    read_dashboard_http_request_with_body_limit(stream, DASHBOARD_HTTP_MAX_BODY_BYTES)
+    read_dashboard_http_request_with_limits(
+        stream,
+        DASHBOARD_HTTP_MAX_BODY_BYTES,
+        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+    )
 }
 
-fn read_dashboard_http_request_with_body_limit(
+fn read_dashboard_http_request_with_limits(
     stream: &mut TcpStream,
     max_body_bytes: usize,
+    max_header_bytes: usize,
 ) -> Result<Option<DashboardHttpRequest>, AgentKError> {
-    const MAX_REQUEST_BYTES: usize = 16 * 1024;
-
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     let mut bytes = reader.read_line(&mut request_line)?;
     if bytes == 0 {
         return Ok(None);
     }
-    if bytes > MAX_REQUEST_BYTES {
+    if bytes > max_header_bytes {
         return Err(AgentKError::InvalidMcpRequest(
-            "dashboard HTTP request is too large".to_string(),
+            "HTTP request headers are too large".to_string(),
         ));
     }
     let mut parts = request_line.split_whitespace();
@@ -1507,9 +1522,9 @@ fn read_dashboard_http_request_with_body_limit(
             break;
         }
         bytes += read;
-        if bytes > MAX_REQUEST_BYTES {
+        if bytes > max_header_bytes {
             return Err(AgentKError::InvalidMcpRequest(
-                "dashboard HTTP request is too large".to_string(),
+                "HTTP request headers are too large".to_string(),
             ));
         }
         if line == "\r\n" || line == "\n" {
@@ -3282,6 +3297,7 @@ fn mcp_proxy_http(
     max_active_sessions: usize,
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
+    max_header_bytes: usize,
     stream_timeout_ms: u64,
     allow_origins: Vec<String>,
     allow_origin_env: String,
@@ -3323,6 +3339,7 @@ fn mcp_proxy_http(
         max_active_sessions,
         session_idle_timeout: Duration::from_millis(session_idle_timeout_ms),
         max_body_bytes,
+        max_header_bytes,
         stream_timeout: Duration::from_millis(stream_timeout_ms),
         allow_origins,
         auth_token,
@@ -3343,6 +3360,7 @@ struct McpHttpGatewayConfig {
     max_active_sessions: usize,
     session_idle_timeout: Duration,
     max_body_bytes: usize,
+    max_header_bytes: usize,
     stream_timeout: Duration,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
@@ -3358,6 +3376,7 @@ struct McpHttpGatewayState {
     max_active_sessions: usize,
     session_idle_timeout: Duration,
     max_body_bytes: usize,
+    max_header_bytes: usize,
     stream_timeout: Duration,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
@@ -3398,6 +3417,11 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
             "MCP HTTP max-body-bytes must be positive".to_string(),
         ));
     }
+    if config.max_header_bytes == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP max-header-bytes must be positive".to_string(),
+        ));
+    }
     if config.stream_timeout.is_zero() {
         return Err(AgentKError::InvalidMcpRequest(
             "MCP HTTP stream-timeout-ms must be positive".to_string(),
@@ -3425,6 +3449,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
     println!("sessions    {}", config.max_active_sessions);
     println!("idle ms     {}", config.session_idle_timeout.as_millis());
     println!("body bytes  {}", config.max_body_bytes);
+    println!("header bytes {}", config.max_header_bytes);
     println!("stream ms   {}", config.stream_timeout.as_millis());
     println!(
         "auth        {}",
@@ -3442,6 +3467,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         max_active_sessions: config.max_active_sessions,
         session_idle_timeout: config.session_idle_timeout,
         max_body_bytes: config.max_body_bytes,
+        max_header_bytes: config.max_header_bytes,
         stream_timeout: config.stream_timeout,
         allow_origins: config.allow_origins,
         auth_token: config.auth_token,
@@ -3572,9 +3598,20 @@ fn handle_mcp_http_stream(
     stream: &mut TcpStream,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<(), AgentKError> {
-    let request = match read_dashboard_http_request_with_body_limit(stream, state.max_body_bytes) {
+    let request = match read_dashboard_http_request_with_limits(
+        stream,
+        state.max_body_bytes,
+        state.max_header_bytes,
+    ) {
         Ok(Some(request)) => request,
         Ok(None) => return Ok(()),
+        Err(AgentKError::InvalidMcpRequest(message))
+            if message == "HTTP request headers are too large" =>
+        {
+            let response = mcp_http_headers_too_large_response(state.max_header_bytes);
+            write_dashboard_http_response(stream, &response)?;
+            return Ok(());
+        }
         Err(AgentKError::InvalidMcpRequest(message))
             if message == "HTTP request body is too large" =>
         {
@@ -3593,6 +3630,13 @@ fn mcp_http_payload_too_large_response(max_body_bytes: usize) -> DashboardHttpRe
     dashboard_http_text(
         "413 Payload Too Large",
         &format!("MCP HTTP request body must be at most {max_body_bytes} bytes\n"),
+    )
+}
+
+fn mcp_http_headers_too_large_response(max_header_bytes: usize) -> DashboardHttpResponse {
+    dashboard_http_text(
+        "431 Request Header Fields Too Large",
+        &format!("MCP HTTP request headers must be at most {max_header_bytes} bytes\n"),
     )
 }
 
@@ -3792,6 +3836,7 @@ fn mcp_http_operational_response(
             "expired_sessions_reaped": expired_sessions,
             "max_concurrent_requests": state.max_concurrent_requests,
             "max_body_bytes": state.max_body_bytes,
+            "max_header_bytes": state.max_header_bytes,
             "stream_timeout_ms": state.stream_timeout.as_millis(),
             "configured_allowed_origins": state.allow_origins.len(),
             "auth_required": state.auth_token.is_some()
@@ -4325,6 +4370,7 @@ fn sidecar_serve_http(
     max_active_sessions: usize,
     session_idle_timeout_ms: u64,
     max_body_bytes: usize,
+    max_header_bytes: usize,
     stream_timeout_ms: u64,
     allow_origins: Vec<String>,
     allow_origin_env: String,
@@ -4352,6 +4398,7 @@ fn sidecar_serve_http(
         max_active_sessions,
         session_idle_timeout: Duration::from_millis(session_idle_timeout_ms),
         max_body_bytes,
+        max_header_bytes,
         stream_timeout: Duration::from_millis(stream_timeout_ms),
         allow_origins,
         auth_token,
@@ -4925,6 +4972,8 @@ done
             "60000",
             "--max-body-bytes",
             "32768",
+            "--max-header-bytes",
+            "8192",
             "--stream-timeout-ms",
             "12000",
             "--allow-origin",
@@ -4956,6 +5005,7 @@ done
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -4977,6 +5027,7 @@ done
         assert_eq!(max_active_sessions, 5);
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
+        assert_eq!(max_header_bytes, 8192);
         assert_eq!(stream_timeout_ms, 12000);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
@@ -5002,6 +5053,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5131,6 +5183,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec!["https://console.example".to_string()],
             auth_token: Some("secret".to_string()),
@@ -5265,6 +5318,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5339,6 +5393,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5449,6 +5504,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: 16,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5494,6 +5550,7 @@ done
             max_active_sessions: 1,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5571,6 +5628,7 @@ done
             max_active_sessions: 1,
             session_idle_timeout: Duration::from_millis(250),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
@@ -5627,6 +5685,7 @@ done
             max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
             session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
             max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec![
                 "https://console.example".to_string(),
@@ -5675,6 +5734,10 @@ done
         assert_eq!(
             ready_json["max_body_bytes"],
             serde_json::json!(MCP_HTTP_DEFAULT_MAX_BODY_BYTES)
+        );
+        assert_eq!(
+            ready_json["max_header_bytes"],
+            serde_json::json!(MCP_HTTP_DEFAULT_MAX_HEADER_BYTES)
         );
         assert_eq!(
             ready_json["stream_timeout_ms"],
@@ -5944,6 +6007,8 @@ done
             "60000",
             "--max-body-bytes",
             "32768",
+            "--max-header-bytes",
+            "8192",
             "--stream-timeout-ms",
             "12000",
             "--allow-origin",
@@ -5966,6 +6031,7 @@ done
             max_active_sessions,
             session_idle_timeout_ms,
             max_body_bytes,
+            max_header_bytes,
             stream_timeout_ms,
             allow_origins,
             allow_origin_env,
@@ -5984,6 +6050,7 @@ done
         assert_eq!(max_active_sessions, 5);
         assert_eq!(session_idle_timeout_ms, 60000);
         assert_eq!(max_body_bytes, 32768);
+        assert_eq!(max_header_bytes, 8192);
         assert_eq!(stream_timeout_ms, 12000);
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
@@ -6031,6 +6098,53 @@ done
             Some(timeout)
         );
         drop(client);
+    }
+
+    #[test]
+    fn mcp_http_stream_returns_431_for_oversized_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: 32,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let server_state = Arc::clone(&state);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            handle_mcp_http_stream(&mut stream, &server_state)
+                .expect("oversized header response should write");
+        });
+        let mut client = TcpStream::connect(addr).expect("test client should connect");
+        client
+            .write_all(b"GET /mcp HTTP/1.1\r\nX-Long: 123456789012345678901234567890\r\n\r\n")
+            .expect("test request should write");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("test response should read");
+        server.join().expect("server thread should finish");
+        assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
+        assert!(response.contains("MCP HTTP request headers must be at most 32 bytes"));
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
     }
 
     #[test]

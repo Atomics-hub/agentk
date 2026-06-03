@@ -15550,7 +15550,8 @@ direct JSON responses, Origin validation, browser CORS preflight handling,
 `AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
 `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`,
 `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
-and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
+`AGENTK_MCP_HTTP_MAX_BODY_BYTES`, and `AGENTK_MCP_HTTP_MAX_HEADER_BYTES` to tune
+the local service;
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup, and
 `AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS` bounds accepted connection read/write
 operations.
@@ -15561,8 +15562,8 @@ exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
 `GET /healthz` for liveness and `GET /readyz` for a redacted readiness summary
 that includes the supported MCP protocol version, active-session cap, idle
-timeout, request body cap, configured stream-timeout, and allowed-origin counts
-without raw origin values.
+timeout, request body cap, request header cap, configured stream-timeout, and
+allowed-origin counts without raw origin values.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 
@@ -15747,6 +15748,7 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --port "${AGENTK_MCP_HTTP_PORT:-9798}" \
   --endpoint "${AGENTK_MCP_HTTP_ENDPOINT:-/mcp}" \
   --max-body-bytes "${AGENTK_MCP_HTTP_MAX_BODY_BYTES:-65536}" \
+  --max-header-bytes "${AGENTK_MCP_HTTP_MAX_HEADER_BYTES:-16384}" \
   --max-active-sessions "${AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS:-32}" \
   --session-idle-timeout-ms "${AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS:-900000}" \
   --stream-timeout-ms "${AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS:-30000}" \
@@ -16986,6 +16988,7 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_BODY_BYTES"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(http_launcher.contains("--allow-non-local-bind"));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
@@ -17000,6 +17003,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
+        assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
