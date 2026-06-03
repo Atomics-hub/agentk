@@ -1592,14 +1592,9 @@ fn read_dashboard_http_request_with_limits(
 ) -> Result<Option<DashboardHttpRequest>, AgentKError> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
-    let mut bytes = read_dashboard_http_line(&mut reader, &mut request_line)?;
+    let mut bytes = read_dashboard_http_line(&mut reader, &mut request_line, max_header_bytes)?;
     if bytes == 0 {
         return Ok(None);
-    }
-    if bytes > max_header_bytes {
-        return Err(AgentKError::InvalidMcpRequest(
-            "HTTP request headers are too large".to_string(),
-        ));
     }
     let (method, target, version) = parse_dashboard_http_request_line(&request_line)?;
     let mut content_length = 0usize;
@@ -1609,18 +1604,14 @@ fn read_dashboard_http_request_with_limits(
 
     loop {
         let mut line = String::new();
-        let read = read_dashboard_http_line(&mut reader, &mut line)?;
+        let remaining_header_bytes = max_header_bytes.saturating_sub(bytes);
+        let read = read_dashboard_http_line(&mut reader, &mut line, remaining_header_bytes)?;
         if read == 0 {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP header block is incomplete".to_string(),
             ));
         }
         bytes += read;
-        if bytes > max_header_bytes {
-            return Err(AgentKError::InvalidMcpRequest(
-                "HTTP request headers are too large".to_string(),
-            ));
-        }
         if line == "\r\n" {
             break;
         }
@@ -1723,20 +1714,38 @@ fn read_dashboard_http_request_with_limits(
 fn read_dashboard_http_line(
     reader: &mut impl BufRead,
     line: &mut String,
+    max_line_bytes: usize,
 ) -> Result<usize, AgentKError> {
-    let bytes = reader.read_line(line).map_err(|error| {
-        if error.kind() == io::ErrorKind::InvalidData {
-            AgentKError::InvalidMcpRequest("HTTP request line is invalid".to_string())
-        } else {
-            AgentKError::Io(error)
+    let mut line_bytes = Vec::new();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
         }
-    })?;
-    if bytes > 0 && !line.ends_with("\r\n") {
+        let bytes_to_take = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        if line_bytes.len() + bytes_to_take > max_line_bytes {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP request headers are too large".to_string(),
+            ));
+        }
+        line_bytes.extend_from_slice(&buffer[..bytes_to_take]);
+        reader.consume(bytes_to_take);
+        if line_bytes.ends_with(b"\n") {
+            break;
+        }
+    }
+    if !line_bytes.is_empty() && !line_bytes.ends_with(b"\r\n") {
         return Err(AgentKError::InvalidMcpRequest(
             "HTTP line ending is invalid".to_string(),
         ));
     }
-    Ok(bytes)
+    let line_text = std::str::from_utf8(&line_bytes)
+        .map_err(|_| AgentKError::InvalidMcpRequest("HTTP request line is invalid".to_string()))?;
+    line.push_str(line_text);
+    Ok(line_bytes.len())
 }
 
 fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String, String), AgentKError> {
@@ -8307,50 +8316,62 @@ done
 
     #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
-        let addr = listener
-            .local_addr()
-            .expect("test listener should have addr");
-        let state = Arc::new(McpHttpGatewayState {
-            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
-            endpoint: "/mcp".to_string(),
-            max_concurrent_requests: 8,
-            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
-            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
-            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
-            max_header_bytes: 32,
-            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
-            allow_origins: Vec::new(),
-            auth_token: None,
-            trace_out: None,
-            session_report_out: None,
-            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
-            sessions: Mutex::new(BTreeMap::new()),
-        });
-        let server_state = Arc::clone(&state);
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("test client should connect");
-            handle_mcp_http_stream(&mut stream, &server_state)
-                .expect("oversized header response should write");
-        });
-        let mut client = TcpStream::connect(addr).expect("test client should connect");
-        client
-            .write_all(b"GET /mcp HTTP/1.1\r\nX-Long: 123456789012345678901234567890\r\n\r\n")
-            .expect("test request should write");
-        let mut response = String::new();
-        client
-            .read_to_string(&mut response)
-            .expect("test response should read");
-        server.join().expect("server thread should finish");
-        assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
-        assert!(response.contains("MCP HTTP request headers must be at most 32 bytes"));
-        assert!(
-            state
-                .sessions
-                .lock()
-                .expect("session lock should not be poisoned")
-                .is_empty()
-        );
+        fn response_for(raw_request: &[u8]) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+            let addr = listener
+                .local_addr()
+                .expect("test listener should have addr");
+            let state = Arc::new(McpHttpGatewayState {
+                proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+                endpoint: "/mcp".to_string(),
+                max_concurrent_requests: 8,
+                max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+                session_idle_timeout: Duration::from_millis(
+                    MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+                ),
+                max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+                max_header_bytes: 32,
+                stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+                allow_origins: Vec::new(),
+                auth_token: None,
+                trace_out: None,
+                session_report_out: None,
+                metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+                sessions: Mutex::new(BTreeMap::new()),
+            });
+            let server_state = Arc::clone(&state);
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("test client should connect");
+                handle_mcp_http_stream(&mut stream, &server_state)
+                    .expect("oversized header response should write");
+            });
+            let mut client = TcpStream::connect(addr).expect("test client should connect");
+            client
+                .write_all(raw_request)
+                .expect("test request should write");
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .expect("test response should read");
+            server.join().expect("server thread should finish");
+            assert!(
+                state
+                    .sessions
+                    .lock()
+                    .expect("session lock should not be poisoned")
+                    .is_empty()
+            );
+            response
+        }
+
+        for raw_request in [
+            b"GET /mcp HTTP/1.1\r\nX-Long: 123456789012345678901234567890\r\n\r\n".as_slice(),
+            b"GET /mcp?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_slice(),
+        ] {
+            let response = response_for(raw_request);
+            assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
+            assert!(response.contains("MCP HTTP request headers must be at most 32 bytes"));
+        }
     }
 
     #[test]

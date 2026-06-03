@@ -16122,7 +16122,9 @@ HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
 literals. Incomplete header blocks and short fixed-length bodies are rejected
-before handling. Duplicate MCP control headers and dual token-carrier headers
+before handling. The configured header byte cap is enforced while each request
+line and header line is read, so oversized unterminated lines fail closed before
+unbounded buffering. Duplicate MCP control headers and dual token-carrier headers
 are rejected as ambiguous, and POSTs require an exact `application/json` media
 type. Request bodies are accepted only on MCP `POST`.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
@@ -17752,6 +17754,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
+        assert!(package_readme.contains("unbounded buffering"));
         assert!(package_readme.contains("still-active initialized"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));

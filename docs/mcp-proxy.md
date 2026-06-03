@@ -155,9 +155,11 @@ include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
 literals; duplicate `Host` headers are rejected for all accepted HTTP versions.
 EOF before the blank header terminator or before the declared fixed-length body
-completes is rejected as invalid framing. Duplicate MCP control headers used for
-auth/session/protocol/origin/media negotiation are rejected with sanitized 400
-responses, and clients must choose either `Authorization` or
+completes is rejected as invalid framing. The configured header byte cap is
+enforced while each request line and header line is read, so oversized
+unterminated lines fail closed before unbounded buffering. Duplicate MCP control
+headers used for auth/session/protocol/origin/media negotiation are rejected
+with sanitized 400 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
 rejected with sanitized 400 responses before session lookup. POSTs require an
 exact `application/json` media type; parameters such as `charset` are allowed.
