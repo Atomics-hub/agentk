@@ -4693,10 +4693,7 @@ fn mcp_http_response_inner(
     {
         return Ok(response);
     }
-    if (path == state.endpoint || matches!(path, "/healthz" | "/readyz" | "/metrics"))
-        && let Some(response) =
-            mcp_http_unexpected_body_error(request, path, state.endpoint.as_str())
-    {
+    if let Some(response) = mcp_http_unexpected_body_error(request, path, state.endpoint.as_str()) {
         return Ok(response);
     }
     if mcp_http_is_operational_path(path) {
@@ -7391,6 +7388,7 @@ done
                 [("Authorization", "Bearer secret")],
                 "BODY_SHOULD_NOT_REFLECT",
             ),
+            dashboard_test_request("POST", "/missing", "BODY_SHOULD_NOT_REFLECT"),
         ];
 
         for request in cases {

@@ -16144,15 +16144,16 @@ Only `Connection: close` is accepted; other `Connection` values plus
 unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
 gateway is not an HTTP proxy credential boundary.
-HTTP/1.1 requests must
-include exactly one syntactically valid `Host` authority with no userinfo,
-wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
-literals. Incomplete header blocks and short fixed-length bodies are rejected
-before handling. The configured header byte cap is enforced while each request
-line and header line is read, so oversized unterminated lines fail closed before
-unbounded buffering. Duplicate MCP control headers and dual token-carrier headers
-are rejected as ambiguous, and POSTs require an exact `application/json` media
-type. Request bodies are accepted only on MCP `POST`.
+All accepted HTTP requests must include exactly one syntactically valid `Host`
+authority with no userinfo, wildcards, paths, queries, fragments, invalid ports,
+or unbracketed IPv6 literals. Incomplete header blocks and short fixed-length
+bodies are rejected before handling. The configured header byte cap is enforced
+while each request line and header line is read, so oversized unterminated lines
+fail closed before unbounded buffering. Duplicate MCP control headers and dual
+token-carrier headers are rejected as ambiguous, and POSTs require an exact
+`application/json` media type. Request bodies are accepted only on MCP endpoint
+`POST`, so unknown routes, CORS preflights, probes, and session-control requests
+reject bodies before route fallback or auth handling.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or
 `DELETE`, and only known MCP HTTP headers.
 The configured MCP endpoint and operational probe paths are matched exactly;
@@ -17922,6 +17923,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("normal `Allow` header"));
         assert!(package_readme.contains("same bearer token as MCP"));
         assert!(package_readme.contains("requests; `GET /healthz` remains open"));
+        assert!(package_readme.contains("All accepted HTTP requests"));
+        assert!(package_readme.contains("unknown routes, CORS preflights"));
         assert!(package_readme.contains("Accept: text/event-stream"));
         assert!(package_readme.contains("sanitized 501"));
         assert!(package_readme.contains("unsupported-SSE counter"));
@@ -17941,7 +17944,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("request lines"));
         assert!(package_readme.contains("without whitespace"));
         assert!(package_readme.contains("before `:`"));
-        assert!(package_readme.contains("syntactically valid `Host` authority"));
+        assert!(package_readme.contains("syntactically valid `Host`"));
+        assert!(package_readme.contains("authority with no userinfo"));
         assert!(package_readme.contains("unbracketed IPv6"));
         assert!(package_readme.contains("Incomplete header blocks"));
         assert!(package_readme.contains("Duplicate MCP control headers"));

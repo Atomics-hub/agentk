@@ -302,4 +302,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Use per-session runtime locks for MCP HTTP sessions.
 - [x] Count MCP HTTP stream framing rejections in readiness and metrics.
 - [x] Require valid Host authority on all dashboard and MCP HTTP requests.
+- [x] Reject MCP HTTP request bodies before unknown-route fallback.
 - [ ] Build production MCP gateway transport hardening.
