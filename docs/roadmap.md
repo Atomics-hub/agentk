@@ -280,4 +280,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject ambiguous dashboard admin token carriers.
 - [x] Reject ambiguous dashboard reviewer token carriers.
 - [x] Reject HTTP proxy authentication headers.
+- [x] Reject duplicate dashboard token carriers.
 - [ ] Build production MCP gateway transport hardening.

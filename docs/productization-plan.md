@@ -188,7 +188,8 @@ The safest first productization slice is the local team sidecar path:
     reads and probes cannot carry ignored payload bytes, and those write
     endpoints require `Content-Type: application/json`. When dashboard admin
     auth is enabled, write clients must choose one admin token carrier instead
-    of sending both `Authorization` and `X-AgentK-Admin-Token`.
+    of sending both `Authorization` and `X-AgentK-Admin-Token`, and duplicated
+    admin token carrier headers fail closed.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
     decisions, notification outbox rows, and reviewers. It remains
@@ -212,7 +213,7 @@ The safest first productization slice is the local team sidecar path:
     views use the same team-permission and reviewer-token checks as
     `/api/review?reviewer=<id>`. Token-protected reviewer reads reject requests
     that send both `X-AgentK-Reviewer-Token` and the `reviewer_token` query
-    parameter.
+    parameter, and duplicated reviewer token carriers fail closed.
 18. Trace events now carry hash-bound AgentK agent identity for new logs, while
     old logs without that field still verify. The served dashboard and review
     API use that identity for requester views at `/?requester=<agent-id>` and
