@@ -250,4 +250,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject ambiguous MCP HTTP control headers and invalid JSON media types.
 - [x] Enforce MCP HTTP Host header requirements for HTTP/1.1 requests.
 - [x] Reject incomplete MCP HTTP header blocks and fixed-length bodies.
+- [x] Reject unexpected bodies on non-POST MCP HTTP and operational requests.
 - [ ] Build production MCP gateway transport hardening.

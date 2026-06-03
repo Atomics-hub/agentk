@@ -230,7 +230,9 @@ The safest first productization slice is the local team sidecar path:
     POST media types before spawning downstream MCP work. HTTP/1.1 requests
     require exactly one nonblank `Host` header so gateway handling does not
     guess across ambiguous authority metadata. Truncated header sections and
-    short fixed-length bodies are rejected before request handling.
+    short fixed-length bodies are rejected before request handling. Request
+    bodies are accepted only on MCP `POST`, so preflight/probe/session-control
+    paths cannot smuggle ignored payload bytes.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 

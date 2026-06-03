@@ -139,7 +139,9 @@ MCP control headers used for
 auth/session/protocol/origin/media negotiation are rejected with sanitized 400
 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. POSTs require an exact `application/json`
-media type; parameters such as `charset` are allowed.
+media type; parameters such as `charset` are allowed. Request bodies are
+accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
+operational probes reject bodies before auth, session, or probe handling.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root
