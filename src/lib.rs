@@ -15521,14 +15521,14 @@ agentk permissions --path sidecar/team-permissions.toml
 ```
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
-`/api/approve` and `/api/deny` JSON endpoints. Set
-`AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
-`X-AgentK-Admin-Token`, on write requests. If a reviewer has `token_env` in
-`sidecar/team-permissions.toml`, write requests must also include
-`reviewer_token`. Decisions are appended to `sidecar/.agentk/approvals.jsonl`;
-the signed trace is not mutated. The packaged dashboard server also refreshes
-`sidecar/.agentk/team-store` so dashboard reads and reviewer decisions maintain
-the live durable team store.
+`/api/approve` and `/api/deny` JSON endpoints after running
+`bin/agentk-sidecar-check --json`. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require
+an admin bearer token, or `X-AgentK-Admin-Token`, on write requests. If a
+reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
+also include `reviewer_token`. Decisions are appended to
+`sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
+dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
+and reviewer decisions maintain the live durable team store.
 
 `bin/agentk-sidecar-tcp` listens on `127.0.0.1:9797` by default, accepts the
 configured number of newline-delimited MCP JSON-RPC TCP sessions, and proxies
@@ -15564,8 +15564,10 @@ processes that need stable current JSON and normalized JSONL tables.
 `--dry-run`, `--database-url-env`, and `--psql`.
 
 `deploy/` contains service/container templates wired to the packaged launchers.
-Treat them as reviewed starting points: set the real `agentk` binary path,
-environment variables, and downstream MCP server command before production use.
+The dashboard service/container path runs the package-local sidecar check before
+serving. Treat the templates as reviewed starting points: set the real `agentk`
+binary path, environment variables, and downstream MCP server command before
+production use.
 
 Edit `sidecar/agentk-sidecar.toml` to replace the starter downstream MCP server
 with your GitHub, Postgres, Slack, filesystem, or internal MCP server.
@@ -15766,6 +15768,7 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+"$DIR/agentk-sidecar-check" --json >/dev/null
 exec "$AGENTK_BIN" dashboard-serve "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
   --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
   --permissions "$ROOT/sidecar/team-permissions.toml" \
@@ -15932,6 +15935,10 @@ Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, for `/api/approve` and `/api/deny` writes. Reviewer
 `token_env` entries in `sidecar/team-permissions.toml` are still enforced after
 the dashboard admin token passes.
+
+The packaged dashboard launcher runs `bin/agentk-sidecar-check --json` before
+serving. Service and container starts fail closed when policy, permissions,
+secret references, or client snippets stop validating.
 
 ## systemd user service
 
@@ -16976,6 +16983,7 @@ can_deny = ["*"]
         let dashboard_server = fs::read_to_string(out.join("bin/agentk-dashboard-server"))
             .expect("dashboard server should read");
         assert!(dashboard_server.contains("dashboard-serve"));
+        assert!(dashboard_server.contains("agentk-sidecar-check"));
         assert!(dashboard_server.contains("AGENTK_BIN"));
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
@@ -17015,6 +17023,9 @@ can_deny = ["*"]
             fs::read_to_string(out.join("deploy/docker/compose.yml")).expect("compose should read");
         assert!(compose.contains("agentk-dashboard"));
         assert!(compose.contains("127.0.0.1:8765:8765"));
+        let deploy_readme =
+            fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
+        assert!(deploy_readme.contains("agentk-sidecar-check --json"));
         assert!(!out.join("sidecar/.agentk").exists());
 
         fs::remove_dir_all(root).ok();
