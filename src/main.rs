@@ -3538,11 +3538,7 @@ struct McpHttpSession {
 }
 
 fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentKError> {
-    if !config.endpoint.starts_with('/') {
-        return Err(AgentKError::InvalidMcpRequest(
-            "MCP HTTP endpoint must start with /".to_string(),
-        ));
-    }
+    validate_mcp_http_endpoint(&config.endpoint)?;
     if config.max_concurrent_requests == 0 {
         return Err(AgentKError::InvalidMcpRequest(
             "MCP HTTP max-concurrent-requests must be positive".to_string(),
@@ -3628,6 +3624,33 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         config.max_requests,
         config.max_concurrent_requests,
     )
+}
+
+fn validate_mcp_http_endpoint(endpoint: &str) -> Result<(), AgentKError> {
+    if endpoint.is_empty() || !endpoint.starts_with('/') {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP endpoint must be an origin-form path beginning with /".to_string(),
+        ));
+    }
+    if endpoint.contains('?') || endpoint.contains('#') {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP endpoint must not include query strings or fragments".to_string(),
+        ));
+    }
+    if endpoint
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP endpoint must not include whitespace or control characters".to_string(),
+        ));
+    }
+    if matches!(endpoint, "/healthz" | "/readyz" | "/metrics") {
+        return Err(AgentKError::InvalidMcpRequest(
+            "MCP HTTP endpoint must not overlap operational probe paths".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_mcp_http_bind_security(
@@ -5624,6 +5647,42 @@ done
             session_report_out,
             Some(PathBuf::from(".agentk/runs/http.session.json"))
         );
+    }
+
+    #[test]
+    fn mcp_http_endpoint_validation_accepts_origin_form_paths() {
+        for endpoint in ["/", "/mcp", "/mcp/v1", "/agentk_mcp", "/mcp%20path"] {
+            validate_mcp_http_endpoint(endpoint).expect("endpoint path should be accepted");
+        }
+    }
+
+    #[test]
+    fn mcp_http_endpoint_validation_rejects_unsafe_paths() {
+        let cases = [
+            ("", "origin-form path"),
+            ("mcp", "origin-form path"),
+            ("http://127.0.0.1/mcp", "origin-form path"),
+            ("/mcp?value=QUERY_SHOULD_NOT_REFLECT", "query strings"),
+            ("/mcp#FRAGMENT_SHOULD_NOT_REFLECT", "fragments"),
+            ("/m cp", "whitespace"),
+            ("/mcp\nCONTROL_SHOULD_NOT_REFLECT", "control characters"),
+            ("/healthz", "operational probe paths"),
+            ("/readyz", "operational probe paths"),
+            ("/metrics", "operational probe paths"),
+        ];
+
+        for (endpoint, expected_message) in cases {
+            let error =
+                validate_mcp_http_endpoint(endpoint).expect_err("endpoint path should be rejected");
+            let error = error.to_string();
+            assert!(
+                error.contains(expected_message),
+                "expected {error:?} to contain {expected_message:?}"
+            );
+            assert!(!error.contains("QUERY_SHOULD_NOT_REFLECT"));
+            assert!(!error.contains("FRAGMENT_SHOULD_NOT_REFLECT"));
+            assert!(!error.contains("CONTROL_SHOULD_NOT_REFLECT"));
+        }
     }
 
     #[cfg(unix)]

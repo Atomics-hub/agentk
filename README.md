@@ -321,7 +321,10 @@ or session handling. Unsupported preflight methods or headers return sanitized
 400 responses with CORS visibility for allowed origins. Idle sessions are reaped
 after the configured timeout so abandoned clients do not hold downstream
 processes forever. The MCP endpoint path is matched exactly; query strings are
-rejected before auth or session handling.
+rejected before auth or session handling. Configured endpoints must be clean
+origin-form paths beginning with `/`, without query strings, fragments,
+whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
+`/metrics`.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
@@ -444,8 +447,11 @@ control headers and dual token-carrier headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
 truncated headers or bodies are rejected before request handling. Request bodies
 are accepted only on MCP `POST`, and CORS preflights are limited to `POST`,
-`DELETE`, and known MCP HTTP headers. LAN/public exposure is therefore an
-explicit authenticated operator choice. Set
+`DELETE`, and known MCP HTTP headers. The configured endpoint must be a clean
+origin-form path beginning with `/`, without query strings, fragments,
+whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
+`/metrics`. LAN/public exposure is therefore an explicit authenticated operator
+choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,

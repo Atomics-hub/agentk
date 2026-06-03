@@ -151,7 +151,10 @@ Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers; unsupported requested methods or headers return sanitized 400
 responses with CORS visibility for allowed origins. The configured MCP endpoint
 path is matched exactly; query strings on that endpoint return sanitized 400
-responses before auth, session, or CORS handling.
+responses before auth, session, or CORS handling. Configured endpoints must be
+clean origin-form paths beginning with `/`, without query strings, fragments,
+whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
+`/metrics`.
 `--stream-timeout-ms` applies read/write deadlines to accepted HTTP connections
 so stalled clients do not hold gateway worker threads indefinitely. Use
 `sidecar-serve-http --root
