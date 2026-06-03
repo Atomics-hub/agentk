@@ -16096,7 +16096,10 @@ type. Request bodies are accepted only on MCP `POST`.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers.
 The configured MCP endpoint path is matched exactly; query strings are rejected
-before auth or session handling.
+before auth or session handling. The configured endpoint must be a clean
+origin-form path beginning with `/`, without query strings, fragments,
+whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
+`/metrics`.
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values allow approved non-local
 browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
@@ -17703,6 +17706,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("accepted only on MCP `POST`"));
         assert!(package_readme.contains("preflights must request `POST` or `DELETE`"));
         assert!(package_readme.contains("endpoint path is matched exactly"));
+        assert!(package_readme.contains("origin-form path beginning with `/`"));
         assert!(package_readme.contains("fixed-length"));
         let package_manifest =
             fs::read_to_string(out.join("manifest.json")).expect("manifest should read");

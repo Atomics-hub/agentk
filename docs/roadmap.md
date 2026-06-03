@@ -259,4 +259,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject unexpected bodies on non-POST MCP HTTP and operational requests.
 - [x] Validate MCP HTTP CORS preflight requested methods and headers.
 - [x] Reject query strings on the MCP HTTP endpoint path.
+- [x] Validate MCP HTTP endpoint configuration before bind.
 - [ ] Build production MCP gateway transport hardening.
