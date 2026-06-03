@@ -291,7 +291,7 @@ The safest first productization slice is the local team sidecar path:
     fixed-length. WebSocket handshake headers are rejected because the
     gateway is a Streamable HTTP adapter, not a WebSocket transport. Method
     override headers are rejected so routes cannot be reinterpreted by
-    intermediaries.
+    intermediaries. Proxy and trace methods are rejected before route handling.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
     rejected before request handling. Forwarded proxy metadata such as
