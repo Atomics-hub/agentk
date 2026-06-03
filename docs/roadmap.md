@@ -293,4 +293,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add accepted-stream I/O timeouts to the dashboard server.
 - [x] Enforce MCP/dashboard HTTP header byte caps during line reads.
 - [x] Use per-session runtime locks for MCP HTTP sessions.
+- [x] Count MCP HTTP stream framing rejections in readiness and metrics.
 - [ ] Build production MCP gateway transport hardening.
