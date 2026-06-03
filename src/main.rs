@@ -1653,7 +1653,7 @@ fn read_dashboard_http_request_with_limits(
     if bytes == 0 {
         return Ok(None);
     }
-    let (method, target, version) = parse_dashboard_http_request_line(&request_line)?;
+    let (method, target, _version) = parse_dashboard_http_request_line(&request_line)?;
     let mut content_length = 0usize;
     let mut content_length_seen = false;
     let mut host_seen = false;
@@ -1743,7 +1743,7 @@ fn read_dashboard_http_request_with_limits(
         headers.push((name, value));
     }
 
-    if version == "HTTP/1.1" && !host_seen {
+    if !host_seen {
         return Err(AgentKError::InvalidMcpRequest(
             "HTTP host header is required".to_string(),
         ));
@@ -8807,6 +8807,30 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_missing_host_for_all_versions() {
+        for raw_request in [
+            b"GET /healthz HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.0\r\n\r\n".as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(
+                raw_request,
+                DASHBOARD_HTTP_MAX_BODY_BYTES,
+                DASHBOARD_HTTP_MAX_HEADER_BYTES,
+            );
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid dashboard HTTP request"));
+        }
+
+        let valid_http10 = dashboard_http_stream_response_for(
+            b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n",
+            DASHBOARD_HTTP_MAX_BODY_BYTES,
+            DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        );
+        assert!(valid_http10.starts_with("HTTP/1.1 200 OK"));
+        assert!(valid_http10.ends_with("{\"ok\":true}"));
+    }
+
+    #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
@@ -8975,6 +8999,7 @@ done
             b"GET /mcp HTTP/1.1 \r\n\r\n".as_slice(),
             b"GET /\tmcp HTTP/1.1\r\n\r\n".as_slice(),
             b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.0\r\n\r\n".as_slice(),
             b"GET //example.invalid/mcp HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
             b"GET /mcp#FRAGMENT_SHOULD_NOT_REFLECT HTTP/1.1\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
@@ -9047,6 +9072,13 @@ done
         assert!(close_response.ends_with("{\"ok\":true}"));
         assert_eq!(close_metrics.client_error_responses, 0);
         assert_eq!(close_metrics.invalid_framing_responses, 0);
+
+        let (http10_response, http10_metrics) =
+            response_for(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n");
+        assert!(http10_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(http10_response.ends_with("{\"ok\":true}"));
+        assert_eq!(http10_metrics.client_error_responses, 0);
+        assert_eq!(http10_metrics.invalid_framing_responses, 0);
     }
 
     #[test]

@@ -322,10 +322,9 @@ and `Trailer` are rejected, as are proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate`. Request lines must be exactly
 space-delimited, request targets must begin with exactly one `/` and must not
 contain fragments, and header names must be token-shaped without whitespace
-before `:`. HTTP/1.1 requests must
-include exactly one syntactically valid `Host` authority with no userinfo,
-wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
-literals.
+before `:`. All HTTP gateway requests must include exactly one syntactically
+valid `Host` authority with no userinfo, wildcards, paths, queries, fragments,
+invalid ports, or unbracketed IPv6 literals.
 Incomplete header blocks and short fixed-length bodies are rejected before
 request handling. Request bodies are accepted only on MCP `POST`; operational
 probes and other MCP methods reject bodies before auth or session handling.
