@@ -3171,6 +3171,12 @@ fn dashboard_http_decision(
 fn dashboard_http_json_content_type_error(
     request: &DashboardHttpRequest,
 ) -> Option<DashboardHttpResponse> {
+    if request.header_count("content-type") > 1 {
+        return Some(dashboard_http_text(
+            "400 Bad Request",
+            "dashboard decision Content-Type header must appear at most once\n",
+        ));
+    }
     if request
         .header("content-type")
         .is_some_and(|value| http_media_type_matches(value, "application/json"))
@@ -10608,6 +10614,39 @@ can_deny = []
         let invalid_media_type_body =
             String::from_utf8(invalid_media_type.body).expect("media type body should be utf8");
         assert!(invalid_media_type_body.contains("dashboard decision API"));
+
+        let duplicate_content_type = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [
+                    ("Content-Type", "application/json"),
+                    (
+                        "Content-Type",
+                        "text/plain; marker=VALUE_SHOULD_NOT_REFLECT",
+                    ),
+                ],
+                serde_json::json!({
+                    "id": approval_id,
+                    "reviewer": "tom",
+                    "reason": "duplicate dashboard content type",
+                    "reviewer_token": "dashboard-token"
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(duplicate_content_type.status, "400 Bad Request");
+        let duplicate_content_type_body =
+            String::from_utf8(duplicate_content_type.body).expect("content-type body should utf8");
+        assert!(duplicate_content_type_body.contains("dashboard decision Content-Type"));
+        assert!(duplicate_content_type_body.contains("at most once"));
+        assert!(!duplicate_content_type_body.contains("VALUE_SHOULD_NOT_REFLECT"));
 
         for target in [
             "/api/approve?ignored=QUERY_SHOULD_NOT_REFLECT",

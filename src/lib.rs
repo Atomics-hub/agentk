@@ -16380,7 +16380,7 @@ and gives the team a policy file they can review before agents touch real tools.
 
    The local dashboard server exposes `/api/review` and permission-checked
    `/api/approve` and `/api/deny` JSON endpoints for appending decisions.
-   Dashboard write requests require `Content-Type: application/json`.
+   Dashboard write requests require exactly one `Content-Type: application/json`.
    Add `token_env = "AGENTK_REVIEWER_NAME_TOKEN"` to a user to require
    `reviewer_token` in dashboard write requests.
 
@@ -16538,9 +16538,10 @@ tune packaged request caps. Oversized bodies return sanitized 413 responses,
 and oversized request lines or headers return sanitized 431 responses.
 Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
-reads and probes cannot smuggle ignored payload bytes. Decision endpoint paths
-are matched exactly and reject query strings. Dashboard decision JSON object keys
-must be unique and limited to `id`, `reviewer`, `reason`, and `reviewer_token`. Set
+reads and probes cannot smuggle ignored payload bytes. Duplicate `Content-Type` headers
+fail closed before decision parsing. Decision endpoint paths are matched
+exactly and reject query strings. Dashboard decision JSON object keys must be
+unique and limited to `id`, `reviewer`, `reason`, and `reviewer_token`. Set
 `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, on write requests; clients must choose one admin token
 carrier, not both, and the chosen carrier may appear only once. If a
@@ -17298,7 +17299,7 @@ Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, for `/api/approve` and `/api/deny` writes. Reviewer
 `token_env` entries in `sidecar/team-permissions.toml` are still enforced after
 the dashboard admin token passes. Dashboard write requests require
-`Content-Type: application/json`, and clients must choose one admin token
+exactly one `Content-Type: application/json`, and clients must choose one admin token
 carrier instead of sending both supported admin headers.
 
 The packaged sidecar gateway and dashboard launchers run
@@ -18427,6 +18428,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("sanitized 413"));
         assert!(package_readme.contains("sanitized 431"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
+        assert!(package_readme.contains("Duplicate `Content-Type` headers"));
         assert!(package_readme.contains("Decision endpoint paths"));
         assert!(package_readme.contains("decision JSON"));
         assert!(package_readme.contains("limited to `id`, `reviewer`, `reason`"));
