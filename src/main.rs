@@ -3220,6 +3220,7 @@ struct McpHttpGatewayConfig {
 struct McpHttpGatewayState {
     proxy: McpSubprocessProxyConfig,
     endpoint: String,
+    max_concurrent_requests: usize,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
     trace_out: Option<PathBuf>,
@@ -3264,6 +3265,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
     let state = Arc::new(McpHttpGatewayState {
         proxy: config.proxy,
         endpoint: config.endpoint,
+        max_concurrent_requests: config.max_concurrent_requests,
         allow_origins: config.allow_origins,
         auth_token: config.auth_token,
         trace_out: config.trace_out,
@@ -3363,6 +3365,13 @@ fn mcp_http_response(
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
     let path = request.target.split('?').next().unwrap_or_default();
+    if path == "/healthz" || path == "/readyz" {
+        let mut response = mcp_http_operational_response(request, state, path)?;
+        if request.method == "HEAD" {
+            response.body.clear();
+        }
+        return Ok(response);
+    }
     if path != state.endpoint {
         return Ok(dashboard_http_text("404 Not Found", "not found\n"));
     }
@@ -3403,6 +3412,47 @@ fn mcp_http_response(
             Ok(response)
         }
     }
+}
+
+fn mcp_http_operational_response(
+    request: &DashboardHttpRequest,
+    state: &Arc<McpHttpGatewayState>,
+    path: &str,
+) -> Result<DashboardHttpResponse, AgentKError> {
+    if request.method != "GET" && request.method != "HEAD" {
+        let mut response = dashboard_http_text("405 Method Not Allowed", "method not allowed\n");
+        response
+            .headers
+            .push(("Allow".to_string(), "GET, HEAD".to_string()));
+        return Ok(response);
+    }
+
+    if path == "/healthz" {
+        return Ok(DashboardHttpResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            headers: Vec::new(),
+            body: br#"{"ok":true}"#.to_vec(),
+        });
+    }
+
+    let active_sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))?
+        .len();
+    Ok(DashboardHttpResponse {
+        status: "200 OK",
+        content_type: "application/json",
+        headers: Vec::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "ready": true,
+            "endpoint": state.endpoint.as_str(),
+            "active_sessions": active_sessions,
+            "max_concurrent_requests": state.max_concurrent_requests,
+            "auth_required": state.auth_token.is_some()
+        }))?,
+    })
 }
 
 fn mcp_http_post_response(
@@ -4427,6 +4477,7 @@ done
                 .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
                 .with_max_client_messages(10),
             endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -4506,6 +4557,7 @@ done
         let state = Arc::new(McpHttpGatewayState {
             proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
             endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
             allow_origins: Vec::new(),
             auth_token: None,
             trace_out: None,
@@ -4538,6 +4590,59 @@ done
         let missing_session_response =
             mcp_http_response(&missing_session, &state).expect("missing session should be handled");
         assert_eq!(missing_session_response.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn mcp_http_response_reports_operational_health_and_readiness() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+
+        let health = mcp_http_response(
+            &dashboard_test_request("GET", "/healthz", Vec::new()),
+            &state,
+        )
+        .expect("healthz should respond");
+        assert_eq!(health.status, "200 OK");
+        assert_eq!(health.content_type, "application/json");
+        assert_eq!(health.body, br#"{"ok":true}"#);
+
+        let ready = mcp_http_response(
+            &dashboard_test_request("GET", "/readyz?probe=1", Vec::new()),
+            &state,
+        )
+        .expect("readyz should respond");
+        assert_eq!(ready.status, "200 OK");
+        let ready_json: serde_json::Value =
+            serde_json::from_slice(&ready.body).expect("readyz should be JSON");
+        assert_eq!(ready_json["ready"], serde_json::json!(true));
+        assert_eq!(ready_json["endpoint"], serde_json::json!("/mcp"));
+        assert_eq!(ready_json["active_sessions"], serde_json::json!(0));
+        assert_eq!(ready_json["max_concurrent_requests"], serde_json::json!(8));
+        assert_eq!(ready_json["auth_required"], serde_json::json!(true));
+
+        let ready_head = mcp_http_response(
+            &dashboard_test_request("HEAD", "/readyz", Vec::new()),
+            &state,
+        )
+        .expect("readyz HEAD should respond");
+        assert_eq!(ready_head.status, "200 OK");
+        assert!(ready_head.body.is_empty());
+
+        let unsupported = mcp_http_response(
+            &dashboard_test_request("POST", "/readyz", Vec::new()),
+            &state,
+        )
+        .expect("unsupported operational method should be handled");
+        assert_eq!(unsupported.status, "405 Method Not Allowed");
+        assert_eq!(response_header(&unsupported, "Allow"), Some("GET, HEAD"));
     }
 
     #[test]

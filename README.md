@@ -305,7 +305,8 @@ cargo run -- mcp-proxy-http --host 127.0.0.1 --port 9798 --endpoint /mcp --max-c
 The HTTP gateway validates Origin headers, supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN`, returns `Mcp-Session-Id` on initialize, accepts
 subsequent POSTs with that session id, returns direct JSON responses, and
-rejects GET/SSE streams with 405 until resumable SSE support lands.
+rejects GET/SSE streams with 405 until resumable SSE support lands. It also
+serves local `GET`/`HEAD` operational probes at `/healthz` and `/readyz`.
 
 The subprocess proxy operator contract lives in
 [docs/mcp-proxy.md](docs/mcp-proxy.md).
@@ -383,7 +384,8 @@ For MCP clients or adapters that support Streamable HTTP POST locally, run
 `dist/agentk-sidecar/bin/agentk-sidecar-http`; it loads the same reviewed
 bundle, binds localhost by default, requires `AGENTK_MCP_HTTP_TOKEN` when that
 environment variable is set, enforces origin/session checks, and writes the
-same trace/session evidence. This is a bounded local adapter, not a hosted
+same trace/session evidence. It serves local `GET`/`HEAD` operational probes at
+`/healthz` and `/readyz`. This is a bounded local adapter, not a hosted
 production HTTP/SSE control plane.
 `dist/agentk-sidecar/bin/agentk-dashboard-server` serves the local review UI and
 `/api/review` JSON endpoint on `127.0.0.1:8765`. Reviewers can record

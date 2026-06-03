@@ -109,11 +109,13 @@ cargo run -- mcp-proxy-http \
 The HTTP adapter accepts local POST requests at the configured endpoint, rejects
 unsafe origins unless they are explicitly allowed, requires a bearer token when
 the configured token environment variable is set, and maps initialized MCP
-sessions onto the same subprocess mediation path. Use `sidecar-serve-http
---root <bundle>` or the packaged `bin/agentk-sidecar-http` launcher for a
-reviewed sidecar bundle. This is still a local adapter: it does not provide a
-hosted production control plane, TLS termination, SSE streaming, or external
-identity integration.
+sessions onto the same subprocess mediation path. It also serves local
+`GET`/`HEAD` probes at `/healthz` and `/readyz`; `/readyz` returns endpoint,
+active-session, request-concurrency, and auth-required metadata without raw MCP
+payloads. Use `sidecar-serve-http --root <bundle>` or the packaged
+`bin/agentk-sidecar-http` launcher for a reviewed sidecar bundle. This is still
+a local adapter: it does not provide a hosted production control plane, TLS
+termination, SSE streaming, or external identity integration.
 
 When the client closes stdin, AgentK closes the downstream server's stdin first
 and gives the child a short grace period to exit cleanly. If the child keeps

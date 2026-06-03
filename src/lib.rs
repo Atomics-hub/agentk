@@ -15541,9 +15541,10 @@ the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
 direct JSON responses, Origin validation, optional bearer-token auth from
 `AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
 `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`, and
-`AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` to tune the local service. GET/SSE
-streams are currently rejected with 405 until the gateway grows resumable SSE
-support.
+`AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` to tune the local service. Service
+supervisors can probe `GET /healthz` for liveness and `GET /readyz` for a
+redacted readiness summary. GET/SSE streams are currently rejected with 405
+until the gateway grows resumable SSE support.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push` are the packaged path from local review evidence to a
@@ -16927,6 +16928,10 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_PORT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ENDPOINT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
+        let package_readme =
+            fs::read_to_string(out.join("README.md")).expect("package README should read");
+        assert!(package_readme.contains("GET /healthz"));
+        assert!(package_readme.contains("GET /readyz"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));
