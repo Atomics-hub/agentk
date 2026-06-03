@@ -4708,14 +4708,13 @@ fn mcp_http_response_inner(
     if path != state.endpoint {
         return Ok(dashboard_http_text("404 Not Found", "not found\n"));
     }
-    let origin = request.header("origin");
-    if !mcp_http_origin_allowed(origin, &state.allow_origins) {
+    if !mcp_http_origin_allowed(request, &state.allow_origins) {
         return Ok(dashboard_http_text(
             "403 Forbidden",
             "origin is not allowed\n",
         ));
     }
-    let cors_origin = mcp_http_cors_origin(origin, &state.allow_origins);
+    let cors_origin = mcp_http_cors_origin(request, &state.allow_origins);
     if request.method == "OPTIONS" {
         let Some(origin) = cors_origin.as_deref() else {
             return Ok(dashboard_http_text(
@@ -5522,10 +5521,14 @@ fn mcp_http_validate_configured_origin(origin: &str) -> Result<(), AgentKError> 
     Ok(())
 }
 
-fn mcp_http_cors_origin(origin: Option<&str>, allow_origins: &[String]) -> Option<String> {
-    let origin = origin?.trim();
-    if mcp_http_is_builtin_local_origin(origin)
-        || allow_origins.iter().any(|allowed| allowed == origin)
+fn mcp_http_cors_origin(
+    request: &DashboardHttpRequest,
+    allow_origins: &[String],
+) -> Option<String> {
+    let origin = request.header("origin")?.trim();
+    if allow_origins.iter().any(|allowed| allowed == origin)
+        || (mcp_http_is_builtin_local_origin(origin)
+            && mcp_http_request_host_allows_builtin_origin(request))
     {
         return Some(origin.to_string());
     }
@@ -5546,6 +5549,30 @@ fn mcp_http_origin_matches_http_host(origin: &str, host: &str) -> bool {
     origin
         .strip_prefix(&format!("{prefix}:"))
         .is_some_and(mcp_http_is_valid_port)
+}
+
+fn mcp_http_request_host_allows_builtin_origin(request: &DashboardHttpRequest) -> bool {
+    request
+        .header("host")
+        .is_none_or(mcp_http_is_local_authority)
+}
+
+fn mcp_http_is_local_authority(authority: &str) -> bool {
+    if !is_valid_http_authority(authority) {
+        return false;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, _suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        return host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback());
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(authority);
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
 }
 
 fn mcp_http_is_valid_configured_origin(origin: &str) -> bool {
@@ -5617,11 +5644,11 @@ fn mcp_http_is_valid_port(port: &str) -> bool {
         && port.parse::<u16>().is_ok()
 }
 
-fn mcp_http_origin_allowed(origin: Option<&str>, allow_origins: &[String]) -> bool {
-    let Some(origin) = origin else {
+fn mcp_http_origin_allowed(request: &DashboardHttpRequest, allow_origins: &[String]) -> bool {
+    if request.header("origin").is_none() {
         return true;
-    };
-    mcp_http_cors_origin(Some(origin), allow_origins).is_some()
+    }
+    mcp_http_cors_origin(request, allow_origins).is_some()
 }
 
 fn mcp_http_auth_allowed(request: &DashboardHttpRequest, auth_token: Option<&str>) -> bool {
@@ -7109,6 +7136,103 @@ done
         assert_eq!(
             response_header(&allowed, "Access-Control-Allow-Origin"),
             Some("null")
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_requires_local_host_for_builtin_origin() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: vec!["https://console.example".to_string()],
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let local_origin_nonlocal_host = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Host", "agentk.example.invalid"),
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "POST"),
+            ],
+            Vec::new(),
+        );
+        let rejected = mcp_http_response(&local_origin_nonlocal_host, &state)
+            .expect("built-in local origin should require local Host");
+        assert_eq!(rejected.status, "403 Forbidden");
+        assert_eq!(
+            response_header(&rejected, "Access-Control-Allow-Origin"),
+            None
+        );
+        assert_eq!(
+            mcp_http_metrics_snapshot(&state)
+                .expect("metrics should snapshot")
+                .origin_rejections,
+            1
+        );
+
+        let configured_origin_nonlocal_host = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Host", "agentk.example.invalid"),
+                ("Origin", "https://console.example"),
+                ("Access-Control-Request-Method", "DELETE"),
+            ],
+            Vec::new(),
+        );
+        let configured = mcp_http_response(&configured_origin_nonlocal_host, &state)
+            .expect("configured origin should not require local Host");
+        assert_eq!(configured.status, "204 No Content");
+        assert_eq!(
+            response_header(&configured, "Access-Control-Allow-Origin"),
+            Some("https://console.example")
+        );
+
+        let local_origin_local_host = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Host", "127.0.0.1:9798"),
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "POST"),
+            ],
+            Vec::new(),
+        );
+        let local = mcp_http_response(&local_origin_local_host, &state)
+            .expect("built-in local origin should allow local Host");
+        assert_eq!(local.status, "204 No Content");
+        assert_eq!(
+            response_header(&local, "Access-Control-Allow-Origin"),
+            Some("http://localhost:5173")
+        );
+
+        let ipv6_local = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Host", "[::1]:9798"),
+                ("Origin", "http://[::1]:5173"),
+                ("Access-Control-Request-Method", "POST"),
+            ],
+            Vec::new(),
+        );
+        let ipv6 = mcp_http_response(&ipv6_local, &state)
+            .expect("built-in IPv6 local origin should allow IPv6 local Host");
+        assert_eq!(ipv6.status, "204 No Content");
+        assert_eq!(
+            response_header(&ipv6, "Access-Control-Allow-Origin"),
+            Some("http://[::1]:5173")
         );
     }
 

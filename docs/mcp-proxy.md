@@ -172,8 +172,10 @@ Additional `--allow-origin` or `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values must be
 exact `scheme://authority` origins or `null`; paths, queries, fragments,
 wildcards, whitespace, invalid ports, and unbracketed IPv6 literals are
 rejected before bind. Built-in localhost and loopback origins only match exact
-hosts with optional numeric ports. Sandboxed/file `Origin: null` requests are
-allowed only when `null` is explicitly configured.
+hosts with optional numeric ports and require a localhost/loopback `Host`
+authority on the request. Sandboxed/file `Origin: null` requests are allowed
+only when `null` is explicitly configured. Browser adapters that call a
+non-local gateway name must be listed explicitly.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or
 `DELETE`, and only known MCP HTTP headers; missing origins and unsupported
 requested methods or headers return sanitized 400 responses, with CORS
