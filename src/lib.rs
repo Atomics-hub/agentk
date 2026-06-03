@@ -16122,7 +16122,9 @@ the same bearer token as MCP requests; `GET /healthz` remains open for minimal
 liveness checks.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
-GET/SSE streams are currently rejected with 405 until the gateway grows
+SSE-shaped `GET` requests require `Accept: text/event-stream`, pass the same
+auth/origin/protocol/session-id checks, then fail closed with sanitized 501
+responses and a redacted unsupported-SSE counter until the gateway grows
 resumable SSE support.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
@@ -17707,6 +17709,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("redacted numeric gateway gauges"));
         assert!(package_readme.contains("same bearer token as MCP"));
         assert!(package_readme.contains("requests; `GET /healthz` remains open"));
+        assert!(package_readme.contains("Accept: text/event-stream"));
+        assert!(package_readme.contains("sanitized 501"));
+        assert!(package_readme.contains("unsupported-SSE counter"));
         assert!(package_readme.contains("Malformed request lines or header lines"));
         assert!(package_readme.contains("invalid UTF-8"));
         assert!(package_readme.contains("LF-only line endings"));
