@@ -219,7 +219,9 @@ The safest first productization slice is the local team sidecar path:
     closed.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
-    decisions, notification outbox rows, and reviewers. It remains
+    decisions, blocked rules, syscall summaries, evidence-ref summaries,
+    notification outbox rows, and reviewers. `store-export` writes matching
+    Postgres TSV/schema/load artifacts for the summary tables. It remains
     hash/evidence-first and does not store raw tool payloads or secret values.
 13. The subprocess MCP gateway has an operator-configurable
     `max_client_messages` cap, exposed on `mcp-proxy-stdio` and generated

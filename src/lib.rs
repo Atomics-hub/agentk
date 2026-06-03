@@ -6650,6 +6650,9 @@ pub fn sync_durable_audit_store(
                 "tables/traces.jsonl",
                 "tables/audit_events.jsonl",
                 "tables/approval_decisions.jsonl",
+                "tables/blocked_rules.jsonl",
+                "tables/syscall_summary.jsonl",
+                "tables/evidence_summary.jsonl",
                 "tables/notifications.jsonl",
                 "tables/team_reviewers.jsonl"
             ]
@@ -6679,6 +6682,21 @@ pub fn sync_durable_audit_store(
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?,
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/blocked_rules.jsonl",
+        durable_blocked_rule_rows(&trace_id, &inbox),
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/syscall_summary.jsonl",
+        durable_syscall_summary_rows(&trace_id, &inbox),
+    )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/evidence_summary.jsonl",
+        durable_evidence_summary_rows(&trace_id, &inbox),
     )?);
     files.push(write_store_jsonl(
         root,
@@ -15448,6 +15466,9 @@ fn audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> {
         "postgres/traces.tsv",
         "postgres/audit_events.tsv",
         "postgres/approval_decisions.tsv",
+        "postgres/blocked_rules.tsv",
+        "postgres/syscall_summary.tsv",
+        "postgres/evidence_summary.tsv",
         "postgres/team_users.tsv",
         "postgres/team_roles.tsv",
         "postgres/team_user_roles.tsv",
@@ -15481,6 +15502,9 @@ fn durable_audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> 
         "tables/traces.jsonl",
         "tables/audit_events.jsonl",
         "tables/approval_decisions.jsonl",
+        "tables/blocked_rules.jsonl",
+        "tables/syscall_summary.jsonl",
+        "tables/evidence_summary.jsonl",
         "tables/notifications.jsonl",
         "tables/team_reviewers.jsonl",
         "README.md",
@@ -15514,6 +15538,9 @@ fn check_audit_store_load_sql(root: &Path) -> ReadinessCheck {
         "\\copy agentk_traces",
         "\\copy agentk_audit_events",
         "\\copy agentk_approval_decisions",
+        "\\copy agentk_blocked_rules",
+        "\\copy agentk_syscall_summary",
+        "\\copy agentk_evidence_summary",
         "\\copy agentk_team_users",
         "\\copy agentk_team_roles",
         "\\copy agentk_team_user_roles",
@@ -15571,6 +15598,9 @@ fn check_durable_store_schema(root: &Path) -> ReadinessCheck {
         "tables/traces.jsonl",
         "tables/audit_events.jsonl",
         "tables/approval_decisions.jsonl",
+        "tables/blocked_rules.jsonl",
+        "tables/syscall_summary.jsonl",
+        "tables/evidence_summary.jsonl",
         "tables/notifications.jsonl",
         "tables/team_reviewers.jsonl",
     ];
@@ -15604,10 +15634,30 @@ fn check_durable_store_jsonl_counts(
     let traces = count_jsonl_rows(root.join("tables/traces.jsonl"));
     let events = count_jsonl_rows(root.join("tables/audit_events.jsonl"));
     let decisions = count_jsonl_rows(root.join("tables/approval_decisions.jsonl"));
+    let blocked_rules = count_jsonl_rows(root.join("tables/blocked_rules.jsonl"));
+    let syscalls = count_jsonl_rows(root.join("tables/syscall_summary.jsonl"));
+    let evidence = count_jsonl_rows(root.join("tables/evidence_summary.jsonl"));
     let notifications = count_jsonl_rows(root.join("tables/notifications.jsonl"));
     let reviewers = count_jsonl_rows(root.join("tables/team_reviewers.jsonl"));
-    let (Ok(traces), Ok(events), Ok(decisions), Ok(notifications), Ok(reviewers)) =
-        (traces, events, decisions, notifications, reviewers)
+    let (
+        Ok(traces),
+        Ok(events),
+        Ok(decisions),
+        Ok(blocked_rules),
+        Ok(syscalls),
+        Ok(evidence),
+        Ok(notifications),
+        Ok(reviewers),
+    ) = (
+        traces,
+        events,
+        decisions,
+        blocked_rules,
+        syscalls,
+        evidence,
+        notifications,
+        reviewers,
+    )
     else {
         return readiness_check(
             "durable jsonl rows",
@@ -15621,6 +15671,15 @@ fn check_durable_store_jsonl_counts(
     let expected_decisions = approvals
         .map(|approvals| approvals.decided_approvals.len())
         .unwrap_or(decisions);
+    let expected_blocked_rules = audit
+        .map(|audit| audit.blocked_rules.len())
+        .unwrap_or(blocked_rules);
+    let expected_syscalls = audit
+        .map(|audit| audit.syscall_summary.len())
+        .unwrap_or(syscalls);
+    let expected_evidence = audit
+        .map(|audit| audit.evidence_summary.len())
+        .unwrap_or(evidence);
     let expected_notifications = approvals
         .map(|approvals| approvals.open_approvals.len() + approvals.decided_approvals.len())
         .unwrap_or(notifications);
@@ -15631,6 +15690,9 @@ fn check_durable_store_jsonl_counts(
     if traces == 1
         && events == expected_events
         && decisions == expected_decisions
+        && blocked_rules == expected_blocked_rules
+        && syscalls == expected_syscalls
+        && evidence == expected_evidence
         && notifications == expected_notifications
         && reviewers == expected_reviewers
     {
@@ -15638,7 +15700,7 @@ fn check_durable_store_jsonl_counts(
             "durable jsonl rows",
             ReadinessStatus::Pass,
             format!(
-                "{traces} trace, {events} audit events, {decisions} decisions, {notifications} notifications, {reviewers} reviewers"
+                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries, {notifications} notifications, {reviewers} reviewers"
             ),
         )
     } else {
@@ -15646,7 +15708,7 @@ fn check_durable_store_jsonl_counts(
             "durable jsonl rows",
             ReadinessStatus::Fail,
             format!(
-                "expected 1/{expected_events}/{expected_decisions}/{expected_notifications}/{expected_reviewers} rows, found {traces}/{events}/{decisions}/{notifications}/{reviewers}"
+                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence}/{expected_notifications}/{expected_reviewers} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}/{notifications}/{reviewers}"
             ),
         )
     }
@@ -15660,7 +15722,12 @@ fn check_audit_store_tsv_counts(
     let traces = count_tsv_rows(root.join("postgres/traces.tsv"));
     let events = count_tsv_rows(root.join("postgres/audit_events.tsv"));
     let decisions = count_tsv_rows(root.join("postgres/approval_decisions.tsv"));
-    let (Ok(traces), Ok(events), Ok(decisions)) = (traces, events, decisions) else {
+    let blocked_rules = count_tsv_rows(root.join("postgres/blocked_rules.tsv"));
+    let syscalls = count_tsv_rows(root.join("postgres/syscall_summary.tsv"));
+    let evidence = count_tsv_rows(root.join("postgres/evidence_summary.tsv"));
+    let (Ok(traces), Ok(events), Ok(decisions), Ok(blocked_rules), Ok(syscalls), Ok(evidence)) =
+        (traces, events, decisions, blocked_rules, syscalls, evidence)
+    else {
         return readiness_check(
             "postgres tsv rows",
             ReadinessStatus::Fail,
@@ -15673,18 +15740,35 @@ fn check_audit_store_tsv_counts(
     let expected_decisions = approvals
         .map(|approvals| approvals.decided_approvals.len())
         .unwrap_or(decisions);
-    if traces == 1 && events == expected_events && decisions == expected_decisions {
+    let expected_blocked_rules = audit
+        .map(|audit| audit.blocked_rules.len())
+        .unwrap_or(blocked_rules);
+    let expected_syscalls = audit
+        .map(|audit| audit.syscall_summary.len())
+        .unwrap_or(syscalls);
+    let expected_evidence = audit
+        .map(|audit| audit.evidence_summary.len())
+        .unwrap_or(evidence);
+    if traces == 1
+        && events == expected_events
+        && decisions == expected_decisions
+        && blocked_rules == expected_blocked_rules
+        && syscalls == expected_syscalls
+        && evidence == expected_evidence
+    {
         readiness_check(
             "postgres tsv rows",
             ReadinessStatus::Pass,
-            format!("{traces} trace, {events} audit events, {decisions} decisions"),
+            format!(
+                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries"
+            ),
         )
     } else {
         readiness_check(
             "postgres tsv rows",
             ReadinessStatus::Fail,
             format!(
-                "expected 1/{expected_events}/{expected_decisions} rows, found {traces}/{events}/{decisions}"
+                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}"
             ),
         )
     }
@@ -15742,6 +15826,56 @@ fn durable_audit_event_rows(trace_id: &str, inbox: &AuditInboxReport) -> Vec<ser
                 "evidence_refs": item.evidence_refs
             })
         }))
+        .collect()
+}
+
+fn durable_blocked_rule_rows(trace_id: &str, inbox: &AuditInboxReport) -> Vec<serde_json::Value> {
+    inbox
+        .blocked_rules
+        .iter()
+        .map(|(rule, count)| {
+            serde_json::json!({
+                "trace_id": trace_id,
+                "rule_id": rule,
+                "blocked": count
+            })
+        })
+        .collect()
+}
+
+fn durable_syscall_summary_rows(
+    trace_id: &str,
+    inbox: &AuditInboxReport,
+) -> Vec<serde_json::Value> {
+    inbox
+        .syscall_summary
+        .iter()
+        .map(|(syscall, summary)| {
+            serde_json::json!({
+                "trace_id": trace_id,
+                "syscall": syscall,
+                "allowed": summary.allowed,
+                "blocked": summary.blocked,
+                "targets": summary.targets
+            })
+        })
+        .collect()
+}
+
+fn durable_evidence_summary_rows(
+    trace_id: &str,
+    inbox: &AuditInboxReport,
+) -> Vec<serde_json::Value> {
+    inbox
+        .evidence_summary
+        .iter()
+        .map(|(kind, count)| {
+            serde_json::json!({
+                "trace_id": trace_id,
+                "evidence_kind": kind,
+                "count": count
+            })
+        })
         .collect()
 }
 
@@ -15826,6 +15960,21 @@ fn write_postgres_store_files(
             root,
             "postgres/approval_decisions.tsv",
             &postgres_approval_decisions_tsv(review),
+        )?,
+        write_store_file(
+            root,
+            "postgres/blocked_rules.tsv",
+            &postgres_blocked_rules_tsv(&trace_id, inbox),
+        )?,
+        write_store_file(
+            root,
+            "postgres/syscall_summary.tsv",
+            &postgres_syscall_summary_tsv(&trace_id, inbox),
+        )?,
+        write_store_file(
+            root,
+            "postgres/evidence_summary.tsv",
+            &postgres_evidence_summary_tsv(&trace_id, inbox),
         )?,
         write_store_file(
             root,
@@ -15923,6 +16072,36 @@ fn postgres_approval_decisions_tsv(review: &ApprovalReviewReport) -> String {
     }))
 }
 
+fn postgres_blocked_rules_tsv(trace_id: &str, inbox: &AuditInboxReport) -> String {
+    postgres_tsv_rows(
+        inbox
+            .blocked_rules
+            .iter()
+            .map(|(rule, count)| [trace_id.to_string(), rule.clone(), count.to_string()]),
+    )
+}
+
+fn postgres_syscall_summary_tsv(trace_id: &str, inbox: &AuditInboxReport) -> String {
+    postgres_tsv_rows(inbox.syscall_summary.iter().map(|(syscall, summary)| {
+        [
+            trace_id.to_string(),
+            syscall.clone(),
+            summary.allowed.to_string(),
+            summary.blocked.to_string(),
+            summary.targets.to_string(),
+        ]
+    }))
+}
+
+fn postgres_evidence_summary_tsv(trace_id: &str, inbox: &AuditInboxReport) -> String {
+    postgres_tsv_rows(
+        inbox
+            .evidence_summary
+            .iter()
+            .map(|(kind, count)| [trace_id.to_string(), kind.clone(), count.to_string()]),
+    )
+}
+
 fn postgres_team_users_tsv(permissions: Option<&TeamPermissionsReport>) -> String {
     postgres_tsv_rows(
         permissions
@@ -16010,6 +16189,9 @@ fn postgres_load_sql() -> String {
 \copy agentk_traces(trace_id, trace_path, final_hash, events_checked, signatures_ok) from 'postgres/traces.tsv' with (format text, null '\N')
 \copy agentk_audit_events(event_hash, trace_id, agent_id, step, syscall, target, verdict, rule_id, reason, missing_capability, labels, evidence_refs) from 'postgres/audit_events.tsv' with (format text, null '\N')
 \copy agentk_approval_decisions(approval_id, event_hash, agent_id, trace_final_hash, decision, reviewer, reason, created_at_unix) from 'postgres/approval_decisions.tsv' with (format text, null '\N')
+\copy agentk_blocked_rules(trace_id, rule_id, blocked_count) from 'postgres/blocked_rules.tsv' with (format text, null '\N')
+\copy agentk_syscall_summary(trace_id, syscall, allowed_count, blocked_count, target_count) from 'postgres/syscall_summary.tsv' with (format text, null '\N')
+\copy agentk_evidence_summary(trace_id, evidence_kind, evidence_count) from 'postgres/evidence_summary.tsv' with (format text, null '\N')
 \copy agentk_team_users(user_id) from 'postgres/team_users.tsv' with (format text, null '\N')
 \copy agentk_team_roles(role_id) from 'postgres/team_roles.tsv' with (format text, null '\N')
 \copy agentk_team_user_roles(user_id, role_id) from 'postgres/team_user_roles.tsv' with (format text, null '\N')
@@ -16287,10 +16469,10 @@ MCP clients stable launcher scripts in `bin/`.
 - `bin/agentk-dashboard-server`: serves the same review surface and JSON API on
   localhost.
 - `bin/agentk-store-export`: writes `.agentk/store` from the package trace,
-  approvals, and permissions.
+  approvals, permissions, and redacted summary tables.
 - `bin/agentk-store-check`: validates `.agentk/store` before a Postgres load.
 - `bin/agentk-store-sync`: refreshes `.agentk/team-store` as the live durable
-  team dashboard store.
+  team dashboard store with normalized summary rows.
 - `bin/agentk-store-push`: preflights and loads `.agentk/store` with `psql`.
 - `clients/`: ready-to-copy client snippets.
 - `storage/postgres-schema.sql`: durable audit and approval store schema
@@ -16476,7 +16658,8 @@ counter until the gateway grows resumable SSE support.
 `bin/agentk-store-push` are the packaged path from local review evidence to a
 shared Postgres audit store. `bin/agentk-store-sync` maintains the live local
 team store under `sidecar/.agentk/team-store` for dashboard/control-plane
-processes that need stable current JSON and normalized JSONL tables.
+processes that need stable current JSON and normalized JSONL tables, including
+blocked-rule, syscall, and evidence-ref summaries.
 `agentk-store-push` accepts the same flags as `agentk store-push`, including
 `--dry-run`, `--database-url-env`, and `--psql`.
 
@@ -16545,7 +16728,8 @@ its local approval state.
   provided.
 - `postgres-schema.sql`: schema contract for a shared Postgres-backed store.
 - `postgres/*.tsv`: Postgres text-format rows for traces, audit events,
-  decisions, and reviewer metadata.
+  decisions, blocked rules, syscall summaries, evidence-ref summaries, and
+  reviewer metadata.
 - `postgres/load.sql`: psql load script. From this export directory, run
   `agentk store-check --root .`, then `agentk store-push --root . --dry-run`,
   then `agentk store-push --root .`.
@@ -16569,7 +16753,8 @@ or mirror into a database.
 - `current/notifications.json`: notification outbox counts for local bridges.
 - `current/permissions.json`: latest reviewer summary, when configured.
 - `tables/*.jsonl`: normalized row-shaped tables for traces, audit events,
-  approval decisions, notification outbox entries, and reviewers.
+  approval decisions, blocked rules, syscall summaries, evidence-ref summaries,
+  notification outbox entries, and reviewers.
 - `store-schema.json`: durable store contract and version.
 
 The store contains redacted evidence and hashes, not raw tool payloads or secret
@@ -16620,6 +16805,29 @@ create table if not exists agentk_approval_decisions (
   reason text not null,
   created_at_unix bigint not null,
   primary key (approval_id, trace_final_hash, created_at_unix)
+);
+
+create table if not exists agentk_blocked_rules (
+  trace_id text not null references agentk_traces(trace_id) on delete cascade,
+  rule_id text not null,
+  blocked_count bigint not null,
+  primary key (trace_id, rule_id)
+);
+
+create table if not exists agentk_syscall_summary (
+  trace_id text not null references agentk_traces(trace_id) on delete cascade,
+  syscall text not null,
+  allowed_count bigint not null,
+  blocked_count bigint not null,
+  target_count bigint not null,
+  primary key (trace_id, syscall)
+);
+
+create table if not exists agentk_evidence_summary (
+  trace_id text not null references agentk_traces(trace_id) on delete cascade,
+  evidence_kind text not null,
+  evidence_count bigint not null,
+  primary key (trace_id, evidence_kind)
 );
 
 create table if not exists agentk_team_users (
@@ -22860,7 +23068,7 @@ can_deny = ["*"]
         .expect("store export should write");
 
         assert_eq!(report.output_dir, output_dir);
-        assert_eq!(report.files.len(), 13);
+        assert_eq!(report.files.len(), 16);
         assert_eq!(report.open, 0);
         assert_eq!(report.denied, 1);
         assert!(report.signatures_ok);
@@ -22871,19 +23079,38 @@ can_deny = ["*"]
         assert!(output_dir.join("postgres/traces.tsv").exists());
         assert!(output_dir.join("postgres/audit_events.tsv").exists());
         assert!(output_dir.join("postgres/approval_decisions.tsv").exists());
+        assert!(output_dir.join("postgres/blocked_rules.tsv").exists());
+        assert!(output_dir.join("postgres/syscall_summary.tsv").exists());
+        assert!(output_dir.join("postgres/evidence_summary.tsv").exists());
         assert!(output_dir.join("postgres/team_users.tsv").exists());
         assert!(output_dir.join("postgres/load.sql").exists());
         let schema = fs::read_to_string(output_dir.join("postgres-schema.sql"))
             .expect("schema should be readable");
         assert!(schema.contains("create table if not exists agentk_traces"));
+        assert!(schema.contains("create table if not exists agentk_blocked_rules"));
+        assert!(schema.contains("create table if not exists agentk_syscall_summary"));
+        assert!(schema.contains("create table if not exists agentk_evidence_summary"));
         let load_sql =
             fs::read_to_string(output_dir.join("postgres/load.sql")).expect("load should read");
         assert!(load_sql.contains("\\ir ../postgres-schema.sql"));
         assert!(load_sql.contains("\\copy agentk_audit_events"));
+        assert!(load_sql.contains("\\copy agentk_blocked_rules"));
+        assert!(load_sql.contains("\\copy agentk_syscall_summary"));
+        assert!(load_sql.contains("\\copy agentk_evidence_summary"));
         let audit_events = fs::read_to_string(output_dir.join("postgres/audit_events.tsv"))
             .expect("audit event rows should read");
         assert!(audit_events.contains("slack.send_message"));
         assert!(audit_events.contains("tool.invoke:slack.send_message"));
+        let blocked_rules = fs::read_to_string(output_dir.join("postgres/blocked_rules.tsv"))
+            .expect("blocked rule rows should read");
+        assert!(blocked_rules.contains("tool-invoke-capability-missing"));
+        let syscall_summary = fs::read_to_string(output_dir.join("postgres/syscall_summary.tsv"))
+            .expect("syscall summary rows should read");
+        assert!(syscall_summary.contains("tool.invoke"));
+        assert!(syscall_summary.contains("\t0\t1\t1\n"));
+        let evidence_summary = fs::read_to_string(output_dir.join("postgres/evidence_summary.tsv"))
+            .expect("evidence summary rows should read");
+        assert!(evidence_summary.contains("input_sha256"));
         let decision_rows = fs::read_to_string(output_dir.join("postgres/approval_decisions.tsv"))
             .expect("decision rows should read");
         assert!(decision_rows.contains("not approved for export test"));
@@ -22972,7 +23199,7 @@ can_deny = ["*"]
         .expect("durable store should sync");
 
         assert_eq!(report.root, store_dir);
-        assert_eq!(report.files.len(), 11);
+        assert_eq!(report.files.len(), 14);
         assert_eq!(report.open, 0);
         assert_eq!(report.approved, 1);
         assert_eq!(report.reviewers, 1);
@@ -22985,17 +23212,35 @@ can_deny = ["*"]
         assert!(store_dir.join("tables/traces.jsonl").exists());
         assert!(store_dir.join("tables/audit_events.jsonl").exists());
         assert!(store_dir.join("tables/approval_decisions.jsonl").exists());
+        assert!(store_dir.join("tables/blocked_rules.jsonl").exists());
+        assert!(store_dir.join("tables/syscall_summary.jsonl").exists());
+        assert!(store_dir.join("tables/evidence_summary.jsonl").exists());
         assert!(store_dir.join("tables/notifications.jsonl").exists());
         assert!(store_dir.join("tables/team_reviewers.jsonl").exists());
         let schema =
             fs::read_to_string(store_dir.join("store-schema.json")).expect("schema should read");
         assert!(schema.contains("\"raw_payloads\": false"));
+        assert!(schema.contains("tables/blocked_rules.jsonl"));
+        assert!(schema.contains("tables/syscall_summary.jsonl"));
+        assert!(schema.contains("tables/evidence_summary.jsonl"));
         assert!(schema.contains("tables/notifications.jsonl"));
         let audit_events = fs::read_to_string(store_dir.join("tables/audit_events.jsonl"))
             .expect("audit events should read");
         assert!(audit_events.contains("slack.send_message"));
         assert!(audit_events.contains(&report.trace_id));
         assert!(!audit_events.contains("send support reply"));
+        let blocked_rules = fs::read_to_string(store_dir.join("tables/blocked_rules.jsonl"))
+            .expect("blocked rule rows should read");
+        assert!(blocked_rules.contains("\"rule_id\":\"tool-invoke-capability-missing\""));
+        assert!(blocked_rules.contains("\"blocked\":1"));
+        let syscall_summary = fs::read_to_string(store_dir.join("tables/syscall_summary.jsonl"))
+            .expect("syscall summary rows should read");
+        assert!(syscall_summary.contains("\"syscall\":\"tool.invoke\""));
+        assert!(syscall_summary.contains("\"blocked\":1"));
+        let evidence_summary = fs::read_to_string(store_dir.join("tables/evidence_summary.jsonl"))
+            .expect("evidence summary rows should read");
+        assert!(evidence_summary.contains("\"evidence_kind\":\"input_sha256\""));
+        assert!(evidence_summary.contains("\"count\":1"));
         let decisions = fs::read_to_string(store_dir.join("tables/approval_decisions.jsonl"))
             .expect("decision rows should read");
         assert!(decisions.contains("approved for durable store test"));

@@ -318,10 +318,12 @@ store-sync <trace> --permissions <bundle>/team-permissions.toml --root
 <bundle>/.agentk/team-store` can also refresh the same live local durable store
 with current redacted JSON snapshots, normalized JSONL tables, and a
 credential-free notification outbox at `tables/notifications.jsonl` for pending
-approval requests and recorded decisions. `agentk store-export
+approval requests and recorded decisions. The store also writes normalized
+blocked-rule, syscall, and evidence-ref summary rows for dashboard and reporting
+queries. `agentk store-export
 <trace> --permissions <bundle>/team-permissions.toml` writes normalized JSON
 plus a Postgres schema contract, TSV rows, and `postgres/load.sql` for a shared
-audit store.
+audit store, including the same summary tables.
 The served browser dashboard includes a reviewer view that calls the same
 scoped review API and redraws the approval and decision tables with only the
 items that reviewer is authorized to see. Direct scoped HTML views are also
