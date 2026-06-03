@@ -16057,7 +16057,8 @@ demo evidence end to end.
 `/readyz` for service supervisors. Dashboard probe paths are matched exactly and
 reject query strings. Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
-reads and probes cannot smuggle ignored payload bytes. Set
+reads and probes cannot smuggle ignored payload bytes. Dashboard decision JSON
+object keys must be unique. Set
 `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, on write requests; clients must choose one admin token
 carrier, not both, and the chosen carrier may appear only once. If a
@@ -17711,6 +17712,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
         assert!(package_readme.contains("reject query strings"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
+        assert!(package_readme.contains("decision JSON"));
         assert!(package_readme.contains("choose one admin token"));
         assert!(package_readme.contains("reviewer token carrier"));
         assert!(package_readme.contains("may appear only once"));

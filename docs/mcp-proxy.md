@@ -258,7 +258,8 @@ server also accepts permission-checked JSON decisions at `/api/approve` and
 to the local decision log without mutating the signed trace and refreshing the
 durable team store. Dashboard request bodies are accepted only on those decision
 endpoints and must declare `Content-Type: application/json`, so review reads and
-probes cannot smuggle ignored payload bytes. Set `AGENTK_DASHBOARD_ADMIN_TOKEN`
+probes cannot smuggle ignored payload bytes. Dashboard decision JSON object
+keys must be unique. Set `AGENTK_DASHBOARD_ADMIN_TOKEN`
 to require an admin bearer token or `X-AgentK-Admin-Token` header on dashboard
 write requests; clients must choose one admin token carrier, not both, and the
 chosen carrier may appear only once.
