@@ -121,6 +121,7 @@ Status: in progress.
 - [x] Add a killer MCP demo where poisoned output tries exfiltration and an unsafe patch, then AgentK blocks both follow-up calls with trace evidence.
 - [x] Add a one-command MCP killer demo runner for reviewable redacted traces.
 - [x] Add a before/after MCP shim eval scorecard comparing baseline passthrough with AgentK mediation.
+- [x] Add redacted subprocess MCP session summaries for gateway observability.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.
@@ -191,3 +192,37 @@ Status: in progress.
 - [x] Run a signed release checklist dry run against current master.
 - [x] Prepare v0.1 release notes draft with accepted limits.
 - [ ] Run the signed release checklist against the final v0.1 commit.
+
+## Milestone 7: Team Product Sidecar
+
+The post-v0.1 productization plan lives in
+[`docs/productization-plan.md`](productization-plan.md). The product wedge is an
+agent action firewall and flight recorder for MCP/tool-call governance. The
+gateway is the delivery surface, not a pivot into a generic AI gateway.
+
+- [x] Generate a team sidecar starter bundle for MCP client onboarding.
+- [x] Add a sidecar preflight checker for generated bundles.
+- [x] Add a CLI audit inbox for pending approvals and allowed side effects.
+- [x] Package a no-credential GitHub/Postgres/Slack/filesystem safe-agent demo.
+- [x] Add config-driven sidecar launch for generated bundles.
+- [x] Add a local audit and approval review surface.
+- [x] Add local multi-user permissions for approval review.
+- [x] Add a local static HTML dashboard for approvals and audit review.
+- [x] Validate Claude/Codex/Cursor sidecar client snippets in sidecar checks.
+- [x] Add packaged sidecar launcher/client snippets for local deployment.
+- [x] Add a durable store export and Postgres schema contract.
+- [x] Add dashboard server UI for approvals and audit review.
+- [x] Add browser approve/deny controls to the served dashboard UI.
+- [x] Add deploy templates for packaged sidecar operation.
+- [x] Add live durable team audit and approval storage.
+- [x] Validate live durable team stores with store-check.
+- [x] Add reviewer-scoped dashboard API reads backed by team permissions.
+- [x] Add role-aware served dashboard views backed by reviewer scopes.
+- [x] Add requester-scoped dashboard views backed by signed agent identity.
+- [x] Add a credential-free durable notification outbox for approval events.
+- [x] Add a bounded TCP JSON-RPC sidecar gateway for internal adapters.
+- [x] Add explicit TCP gateway concurrency bounds for service operation.
+- [x] Add a subprocess MCP client message cap for runaway-session backpressure.
+- [x] Add graceful downstream subprocess shutdown on client EOF.
+- [x] Add a bounded localhost Streamable HTTP POST sidecar gateway for local adapters.
+- [ ] Build production MCP gateway transport hardening.
