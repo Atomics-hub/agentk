@@ -13896,6 +13896,7 @@ pub fn package_sidecar_bundle(
             "bin/agentk-sidecar-http",
             &sidecar_http_launcher_script(),
         )?,
+        write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
         write_packaged_sidecar_file(
             out,
@@ -13947,6 +13948,7 @@ pub fn package_sidecar_bundle(
             "bin/agentk-sidecar",
             "bin/agentk-sidecar-tcp",
             "bin/agentk-sidecar-http",
+            "bin/agentk-sidecar-check",
             "bin/agentk-dashboard",
             "bin/agentk-dashboard-server",
             "bin/agentk-store-export",
@@ -15484,6 +15486,8 @@ MCP clients stable launcher scripts in `bin/`.
   clients that cannot use stdio directly.
 - `bin/agentk-sidecar-http`: local Streamable HTTP MCP gateway launcher for
   clients that support the HTTP transport.
+- `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
+  launching or deploying it.
 - `bin/agentk-dashboard`: writes `.agentk/dashboard.html` from the package trace
   and approval decisions.
 - `bin/agentk-dashboard-server`: serves the same review surface and JSON API on
@@ -15506,13 +15510,13 @@ MCP clients stable launcher scripts in `bin/`.
 ./bin/agentk-sidecar
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
+./bin/agentk-sidecar-check
 ./bin/agentk-dashboard
 ./bin/agentk-dashboard-server
 ./bin/agentk-store-export
 ./bin/agentk-store-check
 ./bin/agentk-store-sync
 ./bin/agentk-store-push --dry-run
-agentk sidecar-check --root sidecar
 agentk permissions --path sidecar/team-permissions.toml
 ```
 
@@ -15727,6 +15731,17 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --max-active-sessions "${AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS:-32}" \
   --session-idle-timeout-ms "${AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS:-900000}" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}"
+"#
+    .to_string()
+}
+
+fn sidecar_check_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+exec "$AGENTK_BIN" sidecar-check --root "$ROOT/sidecar" "$@"
 "#
     .to_string()
 }
@@ -15976,6 +15991,9 @@ command: sh
 args:
   - {}
 
+# Package check:
+{}
+
 # Dashboard:
 {}
 
@@ -15989,6 +16007,7 @@ args:
 {}
 "#,
         package_root.join("bin/agentk-sidecar").display(),
+        package_root.join("bin/agentk-sidecar-check").display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-dashboard-server").display(),
         package_root.join("bin/agentk-store-export").display(),
@@ -16897,12 +16916,13 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 18);
+        assert_eq!(report.files.len(), 19);
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
         assert!(out.join("bin/agentk-sidecar").exists());
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
+        assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
         assert!(out.join("bin/agentk-dashboard-server").exists());
         assert!(out.join("bin/agentk-store-export").exists());
@@ -16939,8 +16959,13 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_BODY_BYTES"));
+        let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
+            .expect("check launcher should read");
+        assert!(check_launcher.contains("sidecar-check"));
+        assert!(check_launcher.contains("\"$@\""));
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
+        assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));
@@ -16977,6 +17002,7 @@ can_deny = ["*"]
         assert!(client.contains("bin/agentk-sidecar"));
         let command = fs::read_to_string(out.join("clients/codex-cursor-command.txt"))
             .expect("command snippet should read");
+        assert!(command.contains("agentk-sidecar-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));
         let service = fs::read_to_string(out.join("deploy/systemd/agentk-dashboard.service"))

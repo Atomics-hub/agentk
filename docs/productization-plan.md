@@ -151,7 +151,8 @@ The safest first productization slice is the local team sidecar path:
 8. `dashboard` writes a static local HTML approval dashboard from the signed
    trace, append-only decisions, and optional permissions manifest.
 9. `sidecar-package` validates a sidecar bundle and writes a local deployable
-   package with launcher scripts plus Claude/Codex/Cursor client snippets.
+   package with launcher scripts, a package-local `agentk-sidecar-check`
+   validator, and Claude/Codex/Cursor client snippets.
 10. `store-export` writes normalized audit, approval, and permission JSON plus a
     Postgres schema contract, psql-loadable TSV rows, and `postgres/load.sql`
     for teams that want a shared audit store. `store-check` validates both

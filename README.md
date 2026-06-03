@@ -382,6 +382,9 @@ dist/agentk-sidecar/bin/agentk-sidecar
 
 Packaged Claude Desktop and generic Codex/Cursor command snippets are written
 under `dist/agentk-sidecar/clients/`.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
+bundle to validate policy, permissions, secret references, and client snippets
+without spawning downstream tools.
 For internal adapters that need a local TCP JSONL endpoint instead of stdio, run
 `dist/agentk-sidecar/bin/agentk-sidecar-tcp`; it loads the same reviewed
 sidecar bundle, listens on `127.0.0.1:9797` by default, bounds concurrent
@@ -456,6 +459,7 @@ agentk store-push --root .
 Packaged installs include the same workflow as stable launchers:
 
 ```sh
+dist/agentk-sidecar/bin/agentk-sidecar-check
 dist/agentk-sidecar/bin/agentk-store-export
 dist/agentk-sidecar/bin/agentk-store-check
 dist/agentk-sidecar/bin/agentk-store-sync
