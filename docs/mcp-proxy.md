@@ -173,10 +173,11 @@ exact `scheme://authority` origins or `null`; paths, queries, fragments,
 wildcards, whitespace, invalid ports, and unbracketed IPv6 literals are
 rejected before bind. Built-in localhost and loopback origins only match exact
 hosts with optional numeric ports.
-Allowed browser preflights must request `POST` or `DELETE` and only known MCP
-HTTP headers; unsupported requested methods or headers return sanitized 400
-responses with CORS visibility for allowed origins. The configured MCP endpoint
-and operational probe paths are matched exactly; query strings on those paths
+Allowed browser preflights must include an allowed `Origin`, request `POST` or
+`DELETE`, and only known MCP HTTP headers; missing origins and unsupported
+requested methods or headers return sanitized 400 responses, with CORS
+visibility only for allowed origins. The configured MCP endpoint and
+operational probe paths are matched exactly; query strings on those paths
 return sanitized 400 responses before auth, session, probe, or CORS handling.
 Configured endpoints must be clean origin-form paths beginning with `/`,
 without query strings, fragments, whitespace, or control characters, and cannot

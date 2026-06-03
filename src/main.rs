@@ -4488,28 +4488,17 @@ fn mcp_http_response_inner(
     }
     let cors_origin = mcp_http_cors_origin(origin, &state.allow_origins);
     if request.method == "OPTIONS" {
-        if let Some(origin) = cors_origin.as_deref() {
-            if let Some(mut response) = mcp_http_preflight_error(request) {
-                mcp_http_apply_cors_headers(&mut response, origin);
-                return Ok(response);
-            }
-            return Ok(mcp_http_preflight_response(origin));
+        let Some(origin) = cors_origin.as_deref() else {
+            return Ok(dashboard_http_text(
+                "400 Bad Request",
+                "MCP HTTP CORS preflight requires an allowed Origin\n",
+            ));
+        };
+        if let Some(mut response) = mcp_http_preflight_error(request) {
+            mcp_http_apply_cors_headers(&mut response, origin);
+            return Ok(response);
         }
-        let mut response = dashboard_http_text("204 No Content", "");
-        response.body.clear();
-        response.headers.push((
-            "Access-Control-Allow-Methods".to_string(),
-            "POST, DELETE, OPTIONS".to_string(),
-        ));
-        response.headers.push((
-            "Access-Control-Allow-Headers".to_string(),
-            "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version"
-                .to_string(),
-        ));
-        response
-            .headers
-            .push(("Access-Control-Max-Age".to_string(), "600".to_string()));
-        return Ok(response);
+        return Ok(mcp_http_preflight_response(origin));
     }
     if !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
         let mut response = mcp_http_token_required_response();
@@ -6570,6 +6559,28 @@ done
         assert_eq!(
             response_header(&ipv6_local_response, "Access-Control-Allow-Origin"),
             Some("http://[::1]:5173")
+        );
+
+        let missing_origin = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [("Access-Control-Request-Method", "POST")],
+            Vec::new(),
+        );
+        let missing_origin_response = mcp_http_response(&missing_origin, &state)
+            .expect("preflight without origin should be rejected");
+        assert_eq!(missing_origin_response.status, "400 Bad Request");
+        assert_eq!(
+            response_header(&missing_origin_response, "Access-Control-Allow-Origin"),
+            None
+        );
+        assert_eq!(
+            response_header(&missing_origin_response, "Access-Control-Allow-Methods"),
+            None
+        );
+        assert!(
+            String::from_utf8_lossy(&missing_origin_response.body)
+                .contains("preflight requires an allowed Origin")
         );
 
         let unauthorized_post = dashboard_test_request_with_headers(

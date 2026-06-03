@@ -284,10 +284,11 @@ The safest first productization slice is the local team sidecar path:
     while each request line and header line is read, so oversized unterminated
     lines fail closed before unbounded buffering. Request
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control
-    paths cannot smuggle ignored payload bytes. Browser CORS preflights are
-    restricted to `POST`/`DELETE` and the known MCP HTTP header set. The MCP
-    endpoint and operational probe paths are matched exactly, and query strings
-    on those paths are rejected before auth, session, or probe handling. MCP
+    paths cannot smuggle ignored payload bytes. Browser CORS preflights must
+    include an allowed `Origin` and are restricted to `POST`/`DELETE` and the
+    known MCP HTTP header set. The MCP endpoint and operational probe paths are
+    matched exactly, and query strings on those paths are rejected before auth,
+    session, or probe handling. MCP
     HTTP `HEAD` responses omit bodies, while `HEAD` on the MCP endpoint remains
     an unsupported method response with the normal `Allow` header.
     Operator-configured endpoints are validated before bind and must be clean
