@@ -152,7 +152,9 @@ Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
-gateway is not an HTTP proxy credential boundary.
+gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata such
+as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
+explicit trusted-proxy mode.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid
 ports, invalid DNS labels, percent escapes, or unbracketed IPv6 literals.

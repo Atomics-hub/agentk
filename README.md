@@ -319,10 +319,12 @@ in header values, ambiguous MCP control headers, any `Transfer-Encoding` header,
 ambiguity. `Connection: close` is accepted, while other `Connection` values and
 hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
 and `Trailer` are rejected, as are proxy auth headers such as
-`Proxy-Authorization` and `Proxy-Authenticate`. Request lines must be exactly
-space-delimited, request targets must begin with exactly one `/` and must not
-contain fragments, and header names must be token-shaped without whitespace
-before `:`. All HTTP gateway requests must include exactly one syntactically
+`Proxy-Authorization` and `Proxy-Authenticate`. Forwarded proxy metadata such
+as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
+explicit trusted-proxy mode. Request lines must be exactly space-delimited,
+request targets must begin with exactly one `/` and must not contain fragments,
+and header names must be token-shaped without whitespace before `:`. All HTTP
+gateway requests must include exactly one syntactically
 valid `Host` authority with no userinfo, wildcards, paths, queries, fragments,
 invalid ports, invalid DNS labels, percent escapes, or unbracketed IPv6
 literals.
@@ -489,6 +491,8 @@ headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Expect`, or `Upgrade` header are rejected as invalid
 framing. Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
+Forwarded proxy metadata such as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
+is rejected until AgentK has an explicit trusted-proxy mode.
 Request lines must be exactly space-delimited, header names must be
 token-shaped without whitespace before `:`, request targets must begin with
 exactly one `/` and must not contain fragments, and duplicate MCP control
