@@ -16102,7 +16102,9 @@ CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
 request lines and token-shaped header names without whitespace before `:`.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
-unsupported hop-by-hop negotiation.
+unsupported hop-by-hop negotiation. Proxy auth headers such as
+`Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
+gateway is not an HTTP proxy credential boundary.
 HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
@@ -17717,6 +17719,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("invalid ports"));
         assert!(package_readme.contains("numeric ports"));
         assert!(package_readme.contains("unbracketed IPv6"));
+        assert!(package_readme.contains("Proxy-Authorization"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
