@@ -222,6 +222,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add a versioned package manifest for installable sidecar inventory.
 - [x] Add package self-checks for copied/deployed sidecar artifacts.
 - [x] Validate deploy-template hardening in package self-checks.
+- [x] Validate Dockerfile non-root runtime hardening in package self-checks.
 - [x] Preflight packaged sidecar launchers with the package validator.
 - [x] Preflight packaged demo/dashboard/store workflow launchers with the package validator.
 - [x] Add redacted dashboard readiness probes for service supervisors.

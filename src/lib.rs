@@ -14508,6 +14508,21 @@ fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
             ][..],
         ),
         (
+            "deploy/docker/Dockerfile",
+            &[
+                ("FROM debian:bookworm-slim", 1),
+                ("--no-install-recommends", 1),
+                ("rm -rf /var/lib/apt/lists/*", 1),
+                (
+                    "useradd --create-home --uid 10001 --shell /usr/sbin/nologin agentk",
+                    1,
+                ),
+                ("COPY --chown=agentk:agentk . /opt/agentk-sidecar", 1),
+                ("ENV AGENTK_BIN=/usr/local/bin/agentk", 1),
+                ("USER agentk", 1),
+            ][..],
+        ),
+        (
             "deploy/docker/compose.yml",
             &[
                 ("cap_drop:", 2),
@@ -16862,9 +16877,9 @@ fn sidecar_dockerfile() -> String {
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates postgresql-client \
   && rm -rf /var/lib/apt/lists/*
-RUN useradd --create-home --uid 10001 agentk
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin agentk
 WORKDIR /opt/agentk-sidecar
-COPY . /opt/agentk-sidecar
+COPY --chown=agentk:agentk . /opt/agentk-sidecar
 ENV AGENTK_BIN=/usr/local/bin/agentk
 USER agentk
 EXPOSE 8765
@@ -16945,7 +16960,9 @@ to validate the package manifest, launcher modes, deploy templates, storage
 schema, and embedded sidecar bundle. Service and container starts fail closed
 when policy, permissions, secret references, or client snippets stop validating.
 The systemd templates set no-new-privileges, private temp directories,
-SUID/SGID restrictions, and owner-only file creation masks. The Docker Compose
+SUID/SGID restrictions, and owner-only file creation masks. The Dockerfile uses
+a minimal Debian base, no recommended packages, apt-cache cleanup, and a
+non-login `agentk` user that owns the copied package. The Docker Compose
 template drops Linux capabilities, sets no-new-privileges, keeps a read-only container filesystem,
 uses `/tmp` as tmpfs, and keeps writable AgentK state in the mounted
 `sidecar/.agentk` directory.
@@ -18316,6 +18333,14 @@ can_deny = ["*"]
         let plist = fs::read_to_string(out.join("deploy/launchd/com.agentk.dashboard.plist"))
             .expect("plist should read");
         assert!(plist.contains("agentk-dashboard-server"));
+        let dockerfile = fs::read_to_string(out.join("deploy/docker/Dockerfile"))
+            .expect("Dockerfile should read");
+        assert!(dockerfile.contains("--no-install-recommends"));
+        assert!(dockerfile.contains("rm -rf /var/lib/apt/lists/*"));
+        assert!(dockerfile.contains("--shell /usr/sbin/nologin"));
+        assert!(dockerfile.contains("COPY --chown=agentk:agentk"));
+        assert!(dockerfile.contains("ENV AGENTK_BIN=/usr/local/bin/agentk"));
+        assert!(dockerfile.contains("USER agentk"));
         let compose =
             fs::read_to_string(out.join("deploy/docker/compose.yml")).expect("compose should read");
         assert!(compose.contains("agentk-sidecar-http"));
@@ -18340,6 +18365,7 @@ can_deny = ["*"]
         assert!(deploy_readme.contains("sidecar gateway and dashboard launchers"));
         assert!(deploy_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
         assert!(deploy_readme.contains("no-new-privileges"));
+        assert!(deploy_readme.contains("non-login `agentk` user"));
         assert!(deploy_readme.contains("read-only container filesystem"));
         assert!(deploy_readme.contains("Docker can route published ports"));
         assert!(!out.join("sidecar/.agentk").exists());
@@ -18409,6 +18435,20 @@ can_deny = ["*"]
             check.name == "package deploy templates"
                 && check.status == ReadinessStatus::Fail
                 && check.detail.contains("NoNewPrivileges=true")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let dockerfile_path = out.join("deploy/docker/Dockerfile");
+        let dockerfile = fs::read_to_string(&dockerfile_path).expect("Dockerfile should read");
+        fs::write(&dockerfile_path, dockerfile.replace("USER agentk\n", ""))
+            .expect("Dockerfile should write");
+        let unsafe_dockerfile_report =
+            check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_dockerfile_report.passed);
+        assert!(unsafe_dockerfile_report.checks.iter().any(|check| {
+            check.name == "package deploy templates"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("USER agentk")
         }));
 
         package_sidecar_bundle(&root, &out, true).expect("force should replace package");
