@@ -279,4 +279,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Require JSON media types on dashboard write requests.
 - [x] Reject ambiguous dashboard admin token carriers.
 - [x] Reject ambiguous dashboard reviewer token carriers.
+- [x] Reject HTTP proxy authentication headers.
 - [ ] Build production MCP gateway transport hardening.

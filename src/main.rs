@@ -1607,6 +1607,10 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP hop-by-hop headers are not supported".to_string(),
             ));
+        } else if matches!(name.as_str(), "proxy-authorization" | "proxy-authenticate") {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP proxy authentication headers are not supported".to_string(),
+            ));
         } else if name == "host" {
             if host_seen || !is_valid_http_host_header(&value) {
                 return Err(AgentKError::InvalidMcpRequest(
@@ -8112,6 +8116,10 @@ done
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nKeep-Alive: timeout=5\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nTE: trailers\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nTrailer: X-Later\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nProxy-Authorization: Basic PROXY_SECRET_SHOULD_NOT_REFLECT\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nProxy-Authenticate: Basic realm=\"PROXY_REALM_SHOULD_NOT_REFLECT\"\r\n\r\n"
+                .as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
             let response = response_for(raw_request);
@@ -8119,6 +8127,8 @@ done
             assert!(response.contains("invalid MCP HTTP request"));
             assert!(!response.contains("FRAGMENT_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("LENGTH_SHOULD_NOT_REFLECT"));
+            assert!(!response.contains("PROXY_SECRET_SHOULD_NOT_REFLECT"));
+            assert!(!response.contains("PROXY_REALM_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)

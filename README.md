@@ -317,7 +317,8 @@ in header values, ambiguous MCP control headers, any `Transfer-Encoding` header,
 `Expect`/`Upgrade` headers are rejected as invalid framing or control
 ambiguity. `Connection: close` is accepted, while other `Connection` values and
 hop-by-hop negotiation headers such as `Proxy-Connection`, `Keep-Alive`, `TE`,
-and `Trailer` are rejected. Request lines must be exactly
+and `Trailer` are rejected, as are proxy auth headers such as
+`Proxy-Authorization` and `Proxy-Authenticate`. Request lines must be exactly
 space-delimited, request targets must begin with exactly one `/` and must not
 contain fragments, and header names must be token-shaped without whitespace
 before `:`. HTTP/1.1 requests must

@@ -250,7 +250,8 @@ The safest first productization slice is the local team sidecar path:
     transfer-encoding header, expectation header, or upgrade header with
     sanitized 400 responses.
     Only `Connection: close` is accepted; other connection values and
-    hop-by-hop negotiation headers are rejected. Request lines must be exactly
+    hop-by-hop negotiation headers are rejected, and proxy auth headers are
+    rejected before request handling. Request lines must be exactly
     space-delimited, request targets must begin with exactly one `/` and cannot
     contain fragments, and header names cannot carry whitespace before `:`. The
     HTTP gateway validates configured
