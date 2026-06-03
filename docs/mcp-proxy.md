@@ -245,7 +245,9 @@ evidence, `agentk dashboard-serve <trace> --permissions
 an interactive local review UI and `/api/review` JSON endpoint on localhost.
 It also exposes `/healthz` and a redacted `/readyz` that reports trace,
 decision-log, permissions, store, and admin-auth readiness without local paths or
-approval payloads.
+approval payloads. Dashboard probe paths are matched exactly and reject query
+strings; reviewer and requester query parameters remain scoped to the review
+HTML/API routes.
 Dashboard and MCP HTTP responses include no-store, no-sniff, no-referrer,
 anti-framing, and local-only CSP headers for browser-facing deployments.
 Reviewers can record approve/deny decisions from the browser page, and the

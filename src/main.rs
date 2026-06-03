@@ -1812,7 +1812,16 @@ fn dashboard_http_response(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    let route = request.target.split('?').next().unwrap_or(&request.target);
+    let (route, has_query) = match request.target.split_once('?') {
+        Some((route, _)) => (route, true),
+        None => (request.target.as_str(), false),
+    };
+    if has_query && dashboard_http_is_operational_path(route) {
+        return dashboard_http_text(
+            "400 Bad Request",
+            "dashboard operational probes must not include query strings\n",
+        );
+    }
     let mut response = match (request.method.as_str(), route) {
         ("GET" | "HEAD", "/" | "/index.html") => dashboard_http_html(
             request,
@@ -1867,6 +1876,10 @@ fn dashboard_http_response(
         response.body.clear();
     }
     response
+}
+
+fn dashboard_http_is_operational_path(path: &str) -> bool {
+    matches!(path, "/healthz" | "/readyz")
 }
 
 fn dashboard_http_ready_response(
@@ -8864,6 +8877,25 @@ can_deny = []
         );
         assert_eq!(ready_head.status, "200 OK");
         assert!(ready_head.body.is_empty());
+
+        for target in [
+            "/healthz?probe=QUERY_SHOULD_NOT_REFLECT",
+            "/readyz?probe=QUERY_SHOULD_NOT_REFLECT",
+        ] {
+            let query_probe = dashboard_http_response(
+                &dashboard_test_request("GET", target, Vec::new()),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                Some("server-admin"),
+                Some(&store_root),
+            );
+            assert_eq!(query_probe.status, "400 Bad Request");
+            let query_probe_body =
+                String::from_utf8(query_probe.body).expect("query probe body should be utf8");
+            assert!(query_probe_body.contains("dashboard operational probes"));
+            assert!(!query_probe_body.contains("QUERY_SHOULD_NOT_REFLECT"));
+        }
 
         let not_ready = dashboard_http_response(
             &dashboard_test_request("GET", "/readyz", Vec::new()),

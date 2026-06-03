@@ -16053,8 +16053,9 @@ demo evidence end to end.
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
 `bin/agentk-package-check --json`. It also serves `/healthz` and a redacted
-`/readyz` for service supervisors. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require
-an admin bearer token, or `X-AgentK-Admin-Token`, on write requests. If a
+`/readyz` for service supervisors. Dashboard probe paths are matched exactly and
+reject query strings. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin
+bearer token, or `X-AgentK-Admin-Token`, on write requests. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
@@ -17696,6 +17697,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
+        assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
+        assert!(package_readme.contains("reject query strings"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));
