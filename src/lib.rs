@@ -15564,6 +15564,8 @@ exposure an explicit operator choice, and those binds also require a non-empty
 that includes the supported MCP protocol version, active-session cap, idle
 timeout, request body cap, request header cap, configured stream-timeout, and
 allowed-origin counts without raw origin values.
+When the bounded HTTP gateway exits, it drains any still-active initialized
+sessions and writes their redacted trace/session reports.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 
@@ -17005,6 +17007,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
+        assert!(package_readme.contains("still-active initialized"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_TOKEN"));

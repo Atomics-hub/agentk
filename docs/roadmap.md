@@ -242,4 +242,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add browser safety headers to dashboard and MCP HTTP responses.
 - [x] Add accepted-stream I/O timeouts to the MCP HTTP gateway.
 - [x] Add configurable MCP HTTP header byte bounds.
+- [x] Drain active MCP HTTP sessions on bounded gateway shutdown.
 - [ ] Build production MCP gateway transport hardening.
