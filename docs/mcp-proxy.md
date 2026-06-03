@@ -131,6 +131,10 @@ sessions and excess initialize requests return 429.
 downstream process/capacity. `--max-body-bytes` bounds the POST body read before
 JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
+SSE-shaped `GET` requests to the MCP endpoint require `Accept:
+text/event-stream`, pass the same auth/origin/protocol/session-id checks, and
+then fail closed with sanitized 501 responses plus a redacted
+unsupported-SSE counter until resumable SSE support lands.
 Malformed request lines or header lines, including invalid UTF-8, duplicate
 `Content-Length` headers, LF-only line endings, control characters in header
 values, and any `Transfer-Encoding` header are rejected with sanitized 400
@@ -175,7 +179,8 @@ it drains any still-active initialized sessions and writes their redacted
 trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
-rejections, and session create/delete/expire/not-found totals.
+rejections, unsupported-SSE totals, and session create/delete/expire/not-found
+totals.
 This is still a local adapter: it does not provide a hosted production control
 plane, TLS termination, SSE streaming, or external identity integration.
 

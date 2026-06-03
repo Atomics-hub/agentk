@@ -3557,6 +3557,7 @@ struct McpHttpGatewayMetrics {
     auth_rejections: usize,
     origin_rejections: usize,
     method_rejections: usize,
+    sse_unsupported_requests: usize,
     sessions_created: usize,
     sessions_deleted: usize,
     sessions_expired: usize,
@@ -4040,16 +4041,7 @@ fn mcp_http_response_inner(
 
     let mut response = match request.method.as_str() {
         "POST" => mcp_http_post_response(request, state),
-        "GET" => {
-            let mut response = dashboard_http_text(
-                "405 Method Not Allowed",
-                "SSE streams are not enabled for this AgentK gateway yet\n",
-            );
-            response
-                .headers
-                .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
-            Ok(response)
-        }
+        "GET" => mcp_http_sse_response(request),
         "DELETE" => mcp_http_delete_response(request, state),
         _ => {
             let mut response =
@@ -4090,6 +4082,12 @@ fn mcp_http_record_response_metrics(
             "401 Unauthorized" => metrics.auth_rejections += 1,
             "403 Forbidden" => metrics.origin_rejections += 1,
             "405 Method Not Allowed" => metrics.method_rejections += 1,
+            "501 Not Implemented"
+                if request.method == "GET"
+                    && request.target.split('?').next() == Some(state.endpoint.as_str()) =>
+            {
+                metrics.sse_unsupported_requests += 1;
+            }
             "404 Not Found"
                 if request.target.split('?').next() == Some(state.endpoint.as_str()) =>
             {
@@ -4234,6 +4232,7 @@ fn mcp_http_operational_response(
             "auth_rejections": metrics.auth_rejections,
             "origin_rejections": metrics.origin_rejections,
             "method_rejections": metrics.method_rejections,
+            "sse_unsupported_requests": metrics.sse_unsupported_requests,
             "sessions_created": metrics.sessions_created,
             "sessions_deleted": metrics.sessions_deleted,
             "sessions_expired": metrics.sessions_expired,
@@ -4315,6 +4314,9 @@ agentk_mcp_http_origin_rejections_total {origin_rejections}\n\
 # HELP agentk_mcp_http_method_rejections_total Requests rejected because the HTTP method is not allowed.\n\
 # TYPE agentk_mcp_http_method_rejections_total counter\n\
 agentk_mcp_http_method_rejections_total {method_rejections}\n\
+# HELP agentk_mcp_http_sse_unsupported_requests_total GET requests shaped like MCP SSE streams while SSE is not implemented.\n\
+# TYPE agentk_mcp_http_sse_unsupported_requests_total counter\n\
+agentk_mcp_http_sse_unsupported_requests_total {sse_unsupported_requests}\n\
 # HELP agentk_mcp_http_sessions_created_total Initialized MCP HTTP sessions created by this gateway.\n\
 # TYPE agentk_mcp_http_sessions_created_total counter\n\
 agentk_mcp_http_sessions_created_total {sessions_created}\n\
@@ -4346,6 +4348,7 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         auth_rejections = metrics.auth_rejections,
         origin_rejections = metrics.origin_rejections,
         method_rejections = metrics.method_rejections,
+        sse_unsupported_requests = metrics.sse_unsupported_requests,
         sessions_created = metrics.sessions_created,
         sessions_deleted = metrics.sessions_deleted,
         sessions_expired = metrics.sessions_expired,
@@ -4435,6 +4438,34 @@ fn mcp_http_unexpected_body_error(
         "400 Bad Request",
         "MCP HTTP request bodies are only accepted on POST\n",
     ))
+}
+
+fn mcp_http_sse_response(
+    request: &DashboardHttpRequest,
+) -> Result<DashboardHttpResponse, AgentKError> {
+    if !mcp_http_accepts(request, "text/event-stream") {
+        return Ok(dashboard_http_text(
+            "406 Not Acceptable",
+            "MCP HTTP GET requires Accept: text/event-stream\n",
+        ));
+    }
+    if let Some(response) = mcp_http_protocol_version_error(request, None) {
+        return Ok(response);
+    }
+    if let Some(session_id) = request.header("mcp-session-id")
+        && let Some(response) = mcp_http_validate_session_id(session_id)
+    {
+        return Ok(response);
+    }
+
+    let mut response = dashboard_http_text(
+        "501 Not Implemented",
+        "MCP HTTP SSE streams are not implemented for this AgentK gateway yet\n",
+    );
+    response
+        .headers
+        .push(("Allow".to_string(), "POST, DELETE, OPTIONS".to_string()));
+    Ok(response)
 }
 
 fn mcp_http_post_response(
@@ -6177,6 +6208,133 @@ done
     }
 
     #[test]
+    fn mcp_http_response_rejects_sse_gets_without_spawning() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+
+        let unauthorized = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Origin", "http://localhost:5173"),
+            ],
+            Vec::new(),
+        );
+        let unauthorized_response =
+            mcp_http_response(&unauthorized, &state).expect("unauthorized SSE should fail");
+        assert_eq!(unauthorized_response.status, "401 Unauthorized");
+        assert_eq!(
+            response_header(&unauthorized_response, "Access-Control-Allow-Origin"),
+            Some("http://localhost:5173")
+        );
+
+        let missing_accept = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [("Authorization", "Bearer secret")],
+            Vec::new(),
+        );
+        let missing_accept_response =
+            mcp_http_response(&missing_accept, &state).expect("missing Accept should fail");
+        assert_eq!(missing_accept_response.status, "406 Not Acceptable");
+        assert!(
+            String::from_utf8_lossy(&missing_accept_response.body)
+                .contains("Accept: text/event-stream")
+        );
+
+        let bad_protocol = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("MCP-Protocol-Version", "BAD_PROTOCOL_SHOULD_NOT_REFLECT"),
+            ],
+            Vec::new(),
+        );
+        let bad_protocol_response =
+            mcp_http_response(&bad_protocol, &state).expect("bad protocol should fail");
+        assert_eq!(bad_protocol_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_protocol_response.body)
+                .contains("BAD_PROTOCOL_SHOULD_NOT_REFLECT")
+        );
+
+        let bad_session = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("Mcp-Session-Id", "BAD_SESSION_SHOULD_NOT_REFLECT"),
+            ],
+            Vec::new(),
+        );
+        let bad_session_response =
+            mcp_http_response(&bad_session, &state).expect("bad session should fail");
+        assert_eq!(bad_session_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_session_response.body)
+                .contains("BAD_SESSION_SHOULD_NOT_REFLECT")
+        );
+
+        let unsupported_sse = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Authorization", "Bearer secret"),
+                ("Origin", "http://127.0.0.1:5173"),
+            ],
+            Vec::new(),
+        );
+        let unsupported_sse_response =
+            mcp_http_response(&unsupported_sse, &state).expect("SSE should fail closed");
+        assert_eq!(unsupported_sse_response.status, "501 Not Implemented");
+        assert_eq!(
+            response_header(&unsupported_sse_response, "Allow"),
+            Some("POST, DELETE, OPTIONS")
+        );
+        assert_eq!(
+            response_header(&unsupported_sse_response, "Access-Control-Allow-Origin"),
+            Some("http://127.0.0.1:5173")
+        );
+        assert!(
+            String::from_utf8_lossy(&unsupported_sse_response.body)
+                .contains("SSE streams are not implemented")
+        );
+
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.requests_total, 5);
+        assert_eq!(metrics.get_requests, 5);
+        assert_eq!(metrics.auth_rejections, 1);
+        assert_eq!(metrics.sse_unsupported_requests, 1);
+        assert_eq!(metrics.sessions_created, 0);
+    }
+
+    #[test]
     fn mcp_http_auth_accepts_supported_token_headers() {
         let bearer = dashboard_test_request_with_headers(
             "GET",
@@ -7222,6 +7380,7 @@ done
         assert_eq!(ready_json["get_requests"], serde_json::json!(2));
         assert_eq!(ready_json["auth_rejections"], serde_json::json!(1));
         assert_eq!(ready_json["client_error_responses"], serde_json::json!(1));
+        assert_eq!(ready_json["sse_unsupported_requests"], serde_json::json!(0));
         assert_eq!(ready_json["sessions_created"], serde_json::json!(0));
         assert_eq!(ready_json["session_not_found"], serde_json::json!(0));
 
@@ -7257,6 +7416,7 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_get_requests_total 4\n"));
         assert!(metrics_body.contains("agentk_mcp_http_client_error_responses_total 2\n"));
         assert!(metrics_body.contains("agentk_mcp_http_auth_rejections_total 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_unsupported_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sessions_created_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_session_not_found_total 0\n"));
         assert!(

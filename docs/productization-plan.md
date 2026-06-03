@@ -257,7 +257,10 @@ The safest first productization slice is the local team sidecar path:
     endpoint path is matched exactly and query strings are rejected before auth
     or session handling. Operator-configured endpoints are validated before
     bind and must be clean origin-form paths that do not overlap operational
-    probes.
+    probes. SSE-shaped `GET` requests require `Accept: text/event-stream`,
+    pass the same auth/origin/protocol/session-id checks, and fail closed with
+    sanitized 501 responses plus redacted unsupported-SSE metrics until
+    resumable SSE support exists.
     Full hosted HTTP/SSE transport, TLS, and external identity remain future
     production-gateway work.
 
