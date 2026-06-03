@@ -210,7 +210,9 @@ The safest first productization slice is the local team sidecar path:
 17. The served dashboard now has role-aware reviewer views. Reviewers can load
     their scoped inbox from the browser page, and direct `/?reviewer=<id>` HTML
     views use the same team-permission and reviewer-token checks as
-    `/api/review?reviewer=<id>`.
+    `/api/review?reviewer=<id>`. Token-protected reviewer reads reject requests
+    that send both `X-AgentK-Reviewer-Token` and the `reviewer_token` query
+    parameter.
 18. Trace events now carry hash-bound AgentK agent identity for new logs, while
     old logs without that field still verify. The served dashboard and review
     API use that identity for requester views at `/?requester=<agent-id>` and

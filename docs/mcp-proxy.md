@@ -274,8 +274,9 @@ The served browser dashboard includes a reviewer view that calls the same
 scoped review API and redraws the approval and decision tables with only the
 items that reviewer is authorized to see. Direct scoped HTML views are also
 available at `/?reviewer=<id>`; token-protected reviewers must provide their
-reviewer token by header or query parameter for that view. The same dashboard
-also supports requester views at `/?requester=<agent-id>` and
+reviewer token by header or query parameter for that view, choosing one carrier
+instead of sending both. The same dashboard also supports requester views at
+`/?requester=<agent-id>` and
 `/api/review?requester=<agent-id>`, filtering approvals and decisions by the
 signed AgentK agent identity recorded in each event.
 `agentk store-check --root <store>` validates either the exported Postgres
