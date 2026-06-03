@@ -502,6 +502,9 @@ redacted trace/session reports.
 `/api/review` JSON endpoint on `127.0.0.1:8765` after running the packaged
 sidecar check. It also serves `/healthz` and a redacted `/readyz` for service
 supervisors; dashboard probe paths are matched exactly and reject query strings.
+The dashboard server binds to `127.0.0.1` by default; non-loopback binds require
+`--allow-non-local-bind` plus a non-empty dashboard admin token so exposing the
+review UI is an explicit authenticated operator choice.
 Reviewers can record approve/deny decisions from the browser page, and the same
 permission-checked JSON decision API is available at
 `/api/approve` and `/api/deny`. Dashboard request bodies are accepted only on

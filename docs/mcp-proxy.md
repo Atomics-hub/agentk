@@ -249,7 +249,10 @@ It also exposes `/healthz` and a redacted `/readyz` that reports trace,
 decision-log, permissions, store, and admin-auth readiness without local paths or
 approval payloads. Dashboard probe paths are matched exactly and reject query
 strings; reviewer and requester query parameters remain scoped to the review
-HTML/API routes.
+HTML/API routes. The dashboard server binds to `127.0.0.1` by default;
+non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
+admin token so exposing the review UI is an explicit authenticated operator
+choice.
 Dashboard and MCP HTTP responses include no-store, no-sniff, no-referrer,
 anti-framing, and local-only CSP headers for browser-facing deployments.
 Reviewers can record approve/deny decisions from the browser page, and the
