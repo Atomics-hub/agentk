@@ -2,20 +2,21 @@ use agentk::{
     AgentKError, ApprovalDecision, ApprovalDecisionRecord, ApprovalReviewReport, AuditApprovalItem,
     MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
     TeamPermissionsReport, Verdict, approval_review_jsonl, audit_inbox_jsonl, check_audit_store,
-    check_audit_store_export, check_sidecar_bundle, default_log_path, export_audit_store,
-    fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file, init_sidecar_bundle,
-    inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
-    mediate_mcp_json_reader, mediate_mcp_json_stream, package_sidecar_bundle, readiness_report,
-    record_approval_decision_jsonl, record_approval_decision_jsonl_with_permissions,
-    release_audit_report, replay_jsonl, rotate_signing_key_file, run_mcp_killer_demo,
-    run_mcp_security_shim_eval, run_poisoned_webpage_demo, run_safe_agent_demo,
-    scope_approval_review_for_reviewer, secret_reference_env_store_report_from_path,
-    secret_reference_manifest_report_from_path, sidecar_run_config, signing_key_status,
-    sync_durable_audit_store, team_permissions_report_from_path,
-    trusted_signing_key_manifest_keys_from_path, trusted_signing_key_manifest_report_from_path,
-    verify_jsonl, verify_signatures_jsonl, verify_signatures_jsonl_with_trusted_keys,
-    verify_signing_key_rotation_manifest_file, verify_team_reviewer_token,
-    write_approval_dashboard_html, write_events_jsonl, write_latest_copy,
+    check_audit_store_export, check_sidecar_bundle, check_sidecar_package, default_log_path,
+    export_audit_store, fork_replay_behavior_jsonl, fork_replay_jsonl, generate_signing_key_file,
+    init_sidecar_bundle, inspect_jsonl, mcp_proxy_from_path, mcp_server_json_stream,
+    mcp_subprocess_proxy_json_stream, mediate_mcp_json_reader, mediate_mcp_json_stream,
+    package_sidecar_bundle, readiness_report, record_approval_decision_jsonl,
+    record_approval_decision_jsonl_with_permissions, release_audit_report, replay_jsonl,
+    rotate_signing_key_file, run_mcp_killer_demo, run_mcp_security_shim_eval,
+    run_poisoned_webpage_demo, run_safe_agent_demo, scope_approval_review_for_reviewer,
+    secret_reference_env_store_report_from_path, secret_reference_manifest_report_from_path,
+    sidecar_run_config, signing_key_status, sync_durable_audit_store,
+    team_permissions_report_from_path, trusted_signing_key_manifest_keys_from_path,
+    trusted_signing_key_manifest_report_from_path, verify_jsonl, verify_signatures_jsonl,
+    verify_signatures_jsonl_with_trusted_keys, verify_signing_key_rotation_manifest_file,
+    verify_team_reviewer_token, write_approval_dashboard_html, write_events_jsonl,
+    write_latest_copy,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -571,6 +572,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate a packaged sidecar directory after copy/install.
+    SidecarPackageCheck {
+        /// Root directory containing manifest.json and sidecar/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Emit the package check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the active proof-signing public key and source.
     SigningKey {
         /// Emit the signer status as JSON.
@@ -935,6 +945,7 @@ fn run() -> Result<(), AgentKError> {
             force,
             json,
         } => sidecar_package(root, out, force, json),
+        Command::SidecarPackageCheck { root, json } => sidecar_package_check(root, json),
         Command::SigningKey { json } => signing_key(json),
         Command::Keygen { out, force, json } => keygen(out, force, json),
         Command::KeyRotate {
@@ -4830,6 +4841,38 @@ fn sidecar_package(
     Ok(())
 }
 
+fn sidecar_package_check(root: PathBuf, json: bool) -> Result<(), AgentKError> {
+    let report = check_sidecar_package(&root)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK team sidecar package check");
+        println!("root      {}", report.root.display());
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package preflight failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn signing_key(json: bool) -> Result<(), AgentKError> {
     let status = signing_key_status();
 
@@ -7191,6 +7234,24 @@ done
         assert_eq!(root, PathBuf::from("agentk-sidecar"));
         assert_eq!(out, PathBuf::from("dist/agentk-sidecar"));
         assert!(force);
+    }
+
+    #[test]
+    fn sidecar_package_check_accepts_root() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-check",
+            "--root",
+            "dist/agentk-sidecar",
+            "--json",
+        ])
+        .expect("sidecar-package-check should parse");
+
+        let Some(Command::SidecarPackageCheck { root, json }) = cli.command else {
+            panic!("expected sidecar-package-check command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert!(json);
     }
 
     #[test]

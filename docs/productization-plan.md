@@ -155,7 +155,9 @@ The safest first productization slice is the local team sidecar path:
    validator, Claude/Codex/Cursor client snippets, and a relative-path
    `manifest.json` that records the AgentK version, schema version, launchers,
    local transports, store workflow, and deploy artifacts for support and
-   inventory checks.
+   inventory checks. A package-local `agentk-package-check` launcher validates
+   the manifest, package artifacts, launcher modes, and embedded sidecar bundle
+   after copy/deploy/image-build steps.
 10. `store-export` writes normalized audit, approval, and permission JSON plus a
     Postgres schema contract, psql-loadable TSV rows, and `postgres/load.sql`
     for teams that want a shared audit store. `store-check` validates both

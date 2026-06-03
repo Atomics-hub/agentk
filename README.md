@@ -401,7 +401,9 @@ under `dist/agentk-sidecar/clients/`. The package also writes a relative-path
 `manifest.json` with the AgentK version, schema version, stable launchers,
 client snippets, local transports, store workflow, and deploy artifacts; run
 `dist/agentk-sidecar/bin/agentk-package-info` to print it after copying or
-installing the package.
+installing the package. Run `dist/agentk-sidecar/bin/agentk-package-check` to
+validate the manifest, package artifacts, launcher modes, and embedded sidecar
+bundle after a copy, deploy, or image build.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
 bundle to validate policy, permissions, secret references, and client snippets
 without spawning downstream tools.
@@ -502,6 +504,7 @@ Packaged installs include the same workflow as stable launchers:
 
 ```sh
 dist/agentk-sidecar/bin/agentk-package-info
+dist/agentk-sidecar/bin/agentk-package-check
 dist/agentk-sidecar/bin/agentk-sidecar-check
 dist/agentk-sidecar/bin/agentk-store-export
 dist/agentk-sidecar/bin/agentk-store-check
