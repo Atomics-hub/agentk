@@ -182,7 +182,8 @@ The safest first productization slice is the local team sidecar path:
     With `--store-root`, dashboard reads and reviewer decisions refresh the
     durable team store. The packaged dashboard server launcher runs the
     package-local package validator before serving. The server exposes
-    `/healthz` and redacted `/readyz` probes for service supervisors.
+    `/healthz` and redacted `/readyz` probes for service supervisors, and those
+    probe paths are matched exactly with query strings rejected.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
     decisions, notification outbox rows, and reviewers. It remains
