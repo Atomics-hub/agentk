@@ -14063,6 +14063,7 @@ pub fn check_sidecar_package(
     checks.extend(check_sidecar_package_manifest(root));
     checks.push(check_sidecar_package_launcher_modes(root));
     checks.push(check_sidecar_package_launcher_preflights(root));
+    checks.push(check_sidecar_package_agentk_bin_guard(root));
     checks.push(check_sidecar_package_deploy_templates(root));
     checks.push(check_sidecar_package_sidecar_bundle(root));
 
@@ -14481,6 +14482,36 @@ fn check_sidecar_package_launcher_preflights(root: &Path) -> ReadinessCheck {
             SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS.len()
         ),
     )
+}
+
+fn check_sidecar_package_agentk_bin_guard(root: &Path) -> ReadinessCheck {
+    let relative = "bin/agentk-package-check";
+    let content = match fs::read_to_string(root.join(relative)) {
+        Ok(content) => content,
+        Err(error) => {
+            return sidecar_check(
+                "package AgentK binary guard",
+                ReadinessStatus::Fail,
+                format!("{relative} could not be read: {error}"),
+            );
+        }
+    };
+    if content.contains("command -v \"$AGENTK_BIN\"")
+        && content.contains("set AGENTK_BIN")
+        && content.contains("agentk binary not found")
+    {
+        sidecar_check(
+            "package AgentK binary guard",
+            ReadinessStatus::Pass,
+            "package check verifies AGENTK_BIN before delegated commands",
+        )
+    } else {
+        sidecar_check(
+            "package AgentK binary guard",
+            ReadinessStatus::Fail,
+            "bin/agentk-package-check must verify AGENTK_BIN before delegated commands",
+        )
+    }
 }
 
 fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
@@ -16150,7 +16181,8 @@ MCP clients stable launcher scripts in `bin/`.
   and inventory checks.
 - `bin/agentk-package-check`: validates `manifest.json`, package artifacts,
   launcher modes, launcher preflights, deploy-template hardening, and the
-  embedded sidecar bundle.
+  embedded sidecar bundle. It also verifies `AGENTK_BIN` resolves before any
+  packaged runtime delegates to AgentK.
 - `bin/agentk-safe-agent-demo`: runs the no-credential GitHub/Postgres/Slack/
   filesystem demo and writes a package-local trace for audit review.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
@@ -16202,7 +16234,9 @@ Every packaged runtime launcher other than `bin/agentk-package-info` and
 `bin/agentk-package-check` runs `bin/agentk-package-check --json` before it
 launches, serves, writes demo traces, renders dashboards, or updates store
 artifacts. This catches copied or edited packages before a team depends on stale
-policy, permissions, client snippets, or deploy templates.
+policy, permissions, client snippets, deploy templates, or a missing AgentK
+binary. Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk`
+is not on the service account's `PATH`.
 
 `bin/agentk-safe-agent-demo` runs the credential-free GitHub/Postgres/Slack/
 filesystem workflow and writes
@@ -16556,6 +16590,10 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+if ! command -v "$AGENTK_BIN" >/dev/null 2>&1; then
+  printf '%s\n' "agentk binary not found; install agentk or set AGENTK_BIN to the reviewed AgentK executable" >&2
+  exit 127
+fi
 exec "$AGENTK_BIN" sidecar-package-check --root "$ROOT" "$@"
 "#
     .to_string()
@@ -18061,6 +18099,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("runs the package self-check before launch"));
+        assert!(package_readme.contains("verifies `AGENTK_BIN`"));
+        assert!(package_readme.contains("missing AgentK"));
         assert!(package_readme.contains("launcher preflights"));
         assert!(package_readme.contains("Every packaged runtime launcher"));
         assert!(package_readme.contains("updates store"));
@@ -18246,7 +18286,21 @@ can_deny = ["*"]
         let package_check = fs::read_to_string(out.join("bin/agentk-package-check"))
             .expect("package check should read");
         assert!(package_check.contains("sidecar-package-check"));
+        assert!(package_check.contains("command -v \"$AGENTK_BIN\""));
+        assert!(package_check.contains("agentk binary not found"));
         assert!(package_check.contains("\"$@\""));
+        #[cfg(unix)]
+        {
+            let missing_bin = out.join("missing-agentk-binary");
+            let output = Command::new(out.join("bin/agentk-package-check"))
+                .env("AGENTK_BIN", &missing_bin)
+                .output()
+                .expect("package check should execute");
+            assert_eq!(output.status.code(), Some(127));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("agentk binary not found"));
+            assert!(!stderr.contains(&missing_bin.display().to_string()));
+        }
         let safe_agent_demo = fs::read_to_string(out.join("bin/agentk-safe-agent-demo"))
             .expect("safe-agent demo launcher should read");
         assert!(safe_agent_demo.contains("safe-agent-demo"));
@@ -18406,6 +18460,9 @@ can_deny = ["*"]
             check.name == "package launcher preflights" && check.status == ReadinessStatus::Pass
         }));
         assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package AgentK binary guard" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
             check.name == "package deploy templates" && check.status == ReadinessStatus::Pass
         }));
 
@@ -18489,6 +18546,23 @@ can_deny = ["*"]
             check.name == "package launcher preflights"
                 && check.status == ReadinessStatus::Fail
                 && check.detail.contains("bin/agentk-dashboard")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let package_check_path = out.join("bin/agentk-package-check");
+        let package_check = fs::read_to_string(&package_check_path).expect("check should read");
+        fs::write(
+            &package_check_path,
+            package_check.replace("if ! command -v \"$AGENTK_BIN\" >/dev/null 2>&1; then\n  printf '%s\\n' \"agentk binary not found; install agentk or set AGENTK_BIN to the reviewed AgentK executable\" >&2\n  exit 127\nfi\n", ""),
+        )
+        .expect("package check should write");
+        let unsafe_agentk_bin_report =
+            check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_agentk_bin_report.passed);
+        assert!(unsafe_agentk_bin_report.checks.iter().any(|check| {
+            check.name == "package AgentK binary guard"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("AGENTK_BIN")
         }));
 
         fs::remove_dir_all(root).ok();
