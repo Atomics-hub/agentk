@@ -619,7 +619,9 @@ dist/agentk-sidecar/bin/agentk-store-push --dry-run
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged MCP HTTP sidecar gateway, dashboard, and
 store workflow after review; the sidecar gateway and dashboard launchers run
-the package self-check before serving.
+the package self-check before serving. `agentk-package-check` also verifies
+baseline deploy-template hardening markers, including no-new-privileges systemd
+services and loopback-published, capability-dropped, read-only Compose services.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.

@@ -14049,6 +14049,7 @@ pub fn check_sidecar_package(
     }
     checks.extend(check_sidecar_package_manifest(root));
     checks.push(check_sidecar_package_launcher_modes(root));
+    checks.push(check_sidecar_package_deploy_templates(root));
     checks.push(check_sidecar_package_sidecar_bundle(root));
 
     let passed = checks
@@ -14435,6 +14436,87 @@ fn check_sidecar_package_launcher_modes(root: &Path) -> ReadinessCheck {
             "launcher execute bits are not checked on this platform",
         )
     }
+}
+
+fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
+    let requirements = [
+        (
+            "deploy/systemd/agentk-sidecar-http.service",
+            &[
+                ("NoNewPrivileges=true", 1),
+                ("PrivateTmp=true", 1),
+                ("RestrictSUIDSGID=true", 1),
+                ("UMask=0077", 1),
+                ("agentk-sidecar-http", 1),
+                ("AGENTK_MCP_HTTP_TOKEN", 1),
+            ][..],
+        ),
+        (
+            "deploy/systemd/agentk-dashboard.service",
+            &[
+                ("NoNewPrivileges=true", 1),
+                ("PrivateTmp=true", 1),
+                ("RestrictSUIDSGID=true", 1),
+                ("UMask=0077", 1),
+                ("agentk-dashboard-server", 1),
+                ("AGENTK_DASHBOARD_ADMIN_TOKEN", 1),
+            ][..],
+        ),
+        (
+            "deploy/docker/compose.yml",
+            &[
+                ("cap_drop:", 2),
+                ("- ALL", 2),
+                ("read_only: true", 2),
+                ("security_opt:", 2),
+                ("no-new-privileges:true", 2),
+                ("AGENTK_MCP_HTTP_TOKEN:?", 1),
+                ("AGENTK_DASHBOARD_ADMIN_TOKEN:?", 1),
+                ("127.0.0.1:9798:9798", 1),
+                ("127.0.0.1:8765:8765", 1),
+            ][..],
+        ),
+        (
+            "deploy/README.md",
+            &[
+                ("agentk-package-check --json", 1),
+                ("no-new-privileges", 1),
+                ("read-only container filesystem", 1),
+                ("loopback", 1),
+            ][..],
+        ),
+    ];
+
+    for (relative, required_text) in requirements {
+        let content = match fs::read_to_string(root.join(relative)) {
+            Ok(content) => content,
+            Err(error) => {
+                return sidecar_check(
+                    "package deploy templates",
+                    ReadinessStatus::Fail,
+                    format!("{relative} could not be read: {error}"),
+                );
+            }
+        };
+        for (needle, min_count) in required_text {
+            let count = content.matches(needle).count();
+            if count < *min_count {
+                return sidecar_check(
+                    "package deploy templates",
+                    ReadinessStatus::Fail,
+                    format!(
+                        "{relative} needs at least {min_count} deploy hardening marker(s) for {needle}"
+                    ),
+                );
+            }
+        }
+    }
+
+    sidecar_check(
+        "package deploy templates",
+        ReadinessStatus::Pass,
+        "systemd and Docker templates include baseline hardening markers",
+    )
 }
 
 fn check_sidecar_package_sidecar_bundle(root: &Path) -> ReadinessCheck {
@@ -16601,6 +16683,11 @@ Environment=AGENTK_BIN=agentk
 ExecStart={}
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -16620,11 +16707,16 @@ After=network-online.target
 Type=simple
 WorkingDirectory={}
 Environment=AGENTK_BIN=agentk
-# Set this in an EnvironmentFile to require write API auth.
+# Set AGENTK_DASHBOARD_ADMIN_TOKEN in an EnvironmentFile to require write API auth.
 # EnvironmentFile=%h/.config/agentk/dashboard.env
 ExecStart={}
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -16736,6 +16828,13 @@ fn sidecar_docker_compose() -> String {
       AGENTK_MCP_HTTP_TOKEN: ${AGENTK_MCP_HTTP_TOKEN:?Set AGENTK_MCP_HTTP_TOKEN before running Docker Compose}
     ports:
       - "127.0.0.1:9798:9798"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ../../sidecar/.agentk:/opt/agentk-sidecar/sidecar/.agentk
     command: ["./bin/agentk-sidecar-http"]
@@ -16752,6 +16851,13 @@ fn sidecar_docker_compose() -> String {
       DATABASE_URL: ${DATABASE_URL:-}
     ports:
       - "127.0.0.1:8765:8765"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ../../sidecar/.agentk:/opt/agentk-sidecar/sidecar/.agentk
     command: ["./bin/agentk-dashboard-server"]
@@ -16779,6 +16885,11 @@ The packaged sidecar gateway and dashboard launchers run
 to validate the package manifest, launcher modes, deploy templates, storage
 schema, and embedded sidecar bundle. Service and container starts fail closed
 when policy, permissions, secret references, or client snippets stop validating.
+The systemd templates set no-new-privileges, private temp directories,
+SUID/SGID restrictions, and owner-only file creation masks. The Docker Compose
+template drops Linux capabilities, sets no-new-privileges, keeps a read-only container filesystem,
+uses `/tmp` as tmpfs, and keeps writable AgentK state in the mounted
+`sidecar/.agentk` directory.
 
 The sidecar HTTP service stays on `127.0.0.1:9798` by default. Set
 `AGENTK_MCP_HTTP_TOKEN` before enabling non-local binds, and keep TLS, external
@@ -18116,9 +18227,18 @@ can_deny = ["*"]
                 .expect("sidecar HTTP service should read");
         assert!(sidecar_http_service.contains("agentk-sidecar-http"));
         assert!(sidecar_http_service.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(sidecar_http_service.contains("NoNewPrivileges=true"));
+        assert!(sidecar_http_service.contains("PrivateTmp=true"));
+        assert!(sidecar_http_service.contains("RestrictSUIDSGID=true"));
+        assert!(sidecar_http_service.contains("UMask=0077"));
         let service = fs::read_to_string(out.join("deploy/systemd/agentk-dashboard.service"))
             .expect("service should read");
         assert!(service.contains("agentk-dashboard-server"));
+        assert!(service.contains("AGENTK_DASHBOARD_ADMIN_TOKEN"));
+        assert!(service.contains("NoNewPrivileges=true"));
+        assert!(service.contains("PrivateTmp=true"));
+        assert!(service.contains("RestrictSUIDSGID=true"));
+        assert!(service.contains("UMask=0077"));
         let sidecar_http_plist =
             fs::read_to_string(out.join("deploy/launchd/com.agentk.sidecar-http.plist"))
                 .expect("sidecar HTTP plist should read");
@@ -18134,15 +18254,24 @@ can_deny = ["*"]
         assert!(compose.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(compose.contains("AGENTK_MCP_HTTP_TOKEN:?"));
         assert!(compose.contains("127.0.0.1:9798:9798"));
+        assert!(compose.contains("cap_drop:"));
+        assert!(compose.contains("- ALL"));
+        assert!(compose.contains("security_opt:"));
+        assert!(compose.contains("no-new-privileges:true"));
+        assert!(compose.contains("read_only: true"));
+        assert!(compose.contains("tmpfs:"));
         assert!(compose.contains("agentk-dashboard"));
         assert!(compose.contains("AGENTK_DASHBOARD_HOST: 0.0.0.0"));
         assert!(compose.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
+        assert!(compose.contains("AGENTK_DASHBOARD_ADMIN_TOKEN:?"));
         assert!(compose.contains("127.0.0.1:8765:8765"));
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
         assert!(deploy_readme.contains("agentk-package-check --json"));
         assert!(deploy_readme.contains("sidecar gateway and dashboard launchers"));
         assert!(deploy_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(deploy_readme.contains("no-new-privileges"));
+        assert!(deploy_readme.contains("read-only container filesystem"));
         assert!(deploy_readme.contains("Docker can route published ports"));
         assert!(!out.join("sidecar/.agentk").exists());
         let package_check_report =
@@ -18153,6 +18282,9 @@ can_deny = ["*"]
         }));
         assert!(package_check_report.checks.iter().any(|check| {
             check.name == "package launcher modes" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package deploy templates" && check.status == ReadinessStatus::Pass
         }));
 
         fs::remove_dir_all(root).ok();
@@ -18192,6 +18324,19 @@ can_deny = ["*"]
             check.name == "package manifest paths"
                 && check.status == ReadinessStatus::Fail
                 && check.detail.contains("absolute paths")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let service_path = out.join("deploy/systemd/agentk-sidecar-http.service");
+        let service = fs::read_to_string(&service_path).expect("service should read");
+        fs::write(&service_path, service.replace("NoNewPrivileges=true\n", ""))
+            .expect("service should write");
+        let unsafe_deploy_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_deploy_report.passed);
+        assert!(unsafe_deploy_report.checks.iter().any(|check| {
+            check.name == "package deploy templates"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("NoNewPrivileges=true")
         }));
 
         fs::remove_dir_all(root).ok();

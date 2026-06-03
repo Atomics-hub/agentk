@@ -167,7 +167,10 @@ The safest first productization slice is the local team sidecar path:
    after copy/deploy/image-build steps, and packaged stdio/TCP/HTTP/dashboard
    launchers run that check before accepting clients.
    The package includes systemd, launchd, and Docker Compose templates for both
-   the MCP HTTP gateway and the dashboard.
+   the MCP HTTP gateway and the dashboard. Package checks now validate baseline
+   deploy-template hardening markers, including no-new-privileges systemd
+   services and loopback-published, capability-dropped, read-only Compose
+   services.
 10. `store-export` writes normalized audit, approval, and permission JSON plus a
     Postgres schema contract, psql-loadable TSV rows, and `postgres/load.sql`
     for teams that want a shared audit store. `store-check` validates both
