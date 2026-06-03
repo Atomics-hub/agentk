@@ -308,4 +308,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject MCP HTTP request bodies before unknown-route fallback.
 - [x] Require valid session ids on unsupported MCP HTTP SSE GET requests.
 - [x] Require existing sessions on unsupported MCP HTTP SSE GET requests.
+- [x] Require explicit opt-in for MCP HTTP `Origin: null` requests.
 - [ ] Build production MCP gateway transport hardening.
