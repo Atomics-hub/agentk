@@ -285,7 +285,8 @@ dashboard also supports requester views at
 `/?requester=<agent-id>` and
 `/api/review?requester=<agent-id>`, filtering approvals and decisions by the
 signed AgentK agent identity recorded in each event. Scoped `reviewer` and
-`requester` query parameters may appear only once.
+`requester` query parameters may appear only once and cannot be combined in one
+request.
 `agentk store-check --root <store>` validates either the exported Postgres
 artifacts or the live durable team store before a team relies on it. `agentk
 store-push --root <store>` accepts only the export shape, preflights again, and
