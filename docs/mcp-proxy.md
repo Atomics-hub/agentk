@@ -251,15 +251,16 @@ before the signed trace is reconciled. `agentk dashboard <trace> --permissions
 evidence, `agentk dashboard-serve <trace> --permissions
 <bundle>/team-permissions.toml --store-root <bundle>/.agentk/team-store` serves
 an interactive local review UI and `/api/review` JSON endpoint on localhost.
-It also exposes `/healthz` and a redacted `/readyz` that reports trace,
-decision-log, permissions, store, and admin-auth readiness without local paths or
-approval payloads. Dashboard probe paths are matched exactly and reject query
-strings; reviewer and requester query parameters remain scoped to the review
-HTML/API routes. The dashboard server binds to `127.0.0.1` by default;
+It also exposes `/healthz`, a redacted `/readyz` readiness response, and
+redacted `/metrics` gauges that report trace, decision-log, permissions, store,
+and admin-auth posture without local paths or approval payloads. Dashboard probe
+paths are matched exactly and reject query strings; reviewer and requester query
+parameters remain scoped to the review HTML/API routes. The dashboard server
+binds to `127.0.0.1` by default;
 non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
 admin token so exposing the review UI is an explicit authenticated operator
-choice. In that mode, dashboard reads and `/readyz` require the same admin
-token; `/healthz` remains open for liveness probes.
+choice. In that mode, dashboard reads, `/readyz`, and `/metrics` require the
+same admin token; `/healthz` remains open for liveness probes.
 Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
 `--stream-timeout-ms` or packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune
 deployments.

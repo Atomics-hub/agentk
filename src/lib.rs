@@ -16053,13 +16053,15 @@ demo evidence end to end.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
-`bin/agentk-package-check --json`. It also serves `/healthz` and a redacted
-`/readyz` for service supervisors. Dashboard probe paths are matched exactly and
-reject query strings. The dashboard server binds to `127.0.0.1` by default;
+`bin/agentk-package-check --json`. It also serves `/healthz`, a redacted
+`/readyz`, and redacted `/metrics` gauges for service supervisors. Dashboard
+probe paths are matched exactly and reject query strings. The dashboard server
+binds to `127.0.0.1` by default;
 non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
 admin token. Set `AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=1` for the packaged
-launcher to pass that opt-in. In that mode, dashboard reads and `/readyz`
-require the same admin token; `/healthz` remains open for liveness probes.
+launcher to pass that opt-in. In that mode, dashboard reads, `/readyz`, and
+`/metrics` require the same admin token; `/healthz` remains open for liveness
+probes.
 Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
 `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune packaged deployments.
 Dashboard request bodies are accepted only on approval
@@ -17731,10 +17733,11 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-check"));
         assert!(package_readme.contains("redacted"));
         assert!(package_readme.contains("/readyz"));
-        assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
+        assert!(package_readme.contains("redacted `/metrics` gauges"));
+        assert!(package_readme.contains("probe paths are matched exactly"));
         assert!(package_readme.contains("reject query strings"));
         assert!(package_readme.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
-        assert!(package_readme.contains("dashboard reads and `/readyz`"));
+        assert!(package_readme.contains("dashboard reads, `/readyz`, and"));
         assert!(package_readme.contains("`/healthz` remains open"));
         assert!(package_readme.contains("AGENTK_DASHBOARD_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));

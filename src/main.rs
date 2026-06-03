@@ -1937,6 +1937,18 @@ struct DashboardDecisionResponse<'a> {
     review: &'a ApprovalReviewReport,
 }
 
+struct DashboardOperationalState {
+    ready: bool,
+    trace_present: bool,
+    decision_log_present: bool,
+    permissions_configured: bool,
+    permissions_present: bool,
+    permissions_ready: bool,
+    store_root_configured: bool,
+    store_root_present: bool,
+    admin_required: bool,
+}
+
 #[cfg(test)]
 fn dashboard_http_response(
     request: &DashboardHttpRequest,
@@ -2060,6 +2072,13 @@ fn dashboard_http_route_response(
             admin_token,
             store_root,
         ),
+        ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(
+            trace_path,
+            decisions_path,
+            permissions_path,
+            admin_token,
+            store_root,
+        ),
         ("POST", "/api/approve") => dashboard_http_decision(
             request,
             trace_path,
@@ -2084,11 +2103,14 @@ fn dashboard_http_route_response(
 }
 
 fn dashboard_http_requires_admin_read(path: &str) -> bool {
-    matches!(path, "/" | "/index.html" | "/api/review" | "/readyz")
+    matches!(
+        path,
+        "/" | "/index.html" | "/api/review" | "/readyz" | "/metrics"
+    )
 }
 
 fn dashboard_http_is_operational_path(path: &str) -> bool {
-    matches!(path, "/healthz" | "/readyz")
+    matches!(path, "/healthz" | "/readyz" | "/metrics")
 }
 
 fn dashboard_http_is_decision_path(path: &str) -> bool {
@@ -2121,24 +2143,25 @@ fn dashboard_http_ready_response(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    let trace_present = trace_path.exists();
-    let decision_log_present = decisions_path.exists();
-    let permissions_present = permissions_path.is_some_and(|path| path.exists());
-    let store_present = store_root.is_some_and(|path| path.exists());
-    let permissions_ready = permissions_path.is_none() || permissions_present;
-    let ready = trace_present && permissions_ready;
+    let state = dashboard_operational_state(
+        trace_path,
+        decisions_path,
+        permissions_path,
+        admin_token,
+        store_root,
+    );
     match serde_json::to_vec(&serde_json::json!({
-        "ready": ready,
-        "trace_present": trace_present,
-        "decision_log_present": decision_log_present,
-        "permissions_configured": permissions_path.is_some(),
-        "permissions_present": permissions_present,
-        "store_root_configured": store_root.is_some(),
-        "store_root_present": store_present,
-        "admin_required": admin_token.is_some()
+        "ready": state.ready,
+        "trace_present": state.trace_present,
+        "decision_log_present": state.decision_log_present,
+        "permissions_configured": state.permissions_configured,
+        "permissions_present": state.permissions_present,
+        "store_root_configured": state.store_root_configured,
+        "store_root_present": state.store_root_present,
+        "admin_required": state.admin_required
     })) {
         Ok(body) => DashboardHttpResponse {
-            status: if ready {
+            status: if state.ready {
                 "200 OK"
             } else {
                 "503 Service Unavailable"
@@ -2149,6 +2172,96 @@ fn dashboard_http_ready_response(
         },
         Err(error) => dashboard_http_text("500 Internal Server Error", &format!("{error}\n")),
     }
+}
+
+fn dashboard_http_metrics_response(
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    store_root: Option<&PathBuf>,
+) -> DashboardHttpResponse {
+    let state = dashboard_operational_state(
+        trace_path,
+        decisions_path,
+        permissions_path,
+        admin_token,
+        store_root,
+    );
+    DashboardHttpResponse {
+        status: "200 OK",
+        content_type: "text/plain; version=0.0.4; charset=utf-8",
+        headers: Vec::new(),
+        body: dashboard_http_metrics_body(&state).into_bytes(),
+    }
+}
+
+fn dashboard_operational_state(
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    store_root: Option<&PathBuf>,
+) -> DashboardOperationalState {
+    let trace_present = trace_path.exists();
+    let decision_log_present = decisions_path.exists();
+    let permissions_configured = permissions_path.is_some();
+    let permissions_present = permissions_path.is_some_and(|path| path.exists());
+    let permissions_ready = !permissions_configured || permissions_present;
+    let store_root_configured = store_root.is_some();
+    let store_root_present = store_root.is_some_and(|path| path.exists());
+    DashboardOperationalState {
+        ready: trace_present && permissions_ready,
+        trace_present,
+        decision_log_present,
+        permissions_configured,
+        permissions_present,
+        permissions_ready,
+        store_root_configured,
+        store_root_present,
+        admin_required: admin_token.is_some(),
+    }
+}
+
+fn dashboard_http_metrics_body(state: &DashboardOperationalState) -> String {
+    format!(
+        "# HELP agentk_dashboard_ready Dashboard readiness state.\n\
+# TYPE agentk_dashboard_ready gauge\n\
+agentk_dashboard_ready {ready}\n\
+# HELP agentk_dashboard_trace_present Whether the configured dashboard trace path exists.\n\
+# TYPE agentk_dashboard_trace_present gauge\n\
+agentk_dashboard_trace_present {trace_present}\n\
+# HELP agentk_dashboard_decision_log_present Whether the configured dashboard decision log exists.\n\
+# TYPE agentk_dashboard_decision_log_present gauge\n\
+agentk_dashboard_decision_log_present {decision_log_present}\n\
+# HELP agentk_dashboard_permissions_configured Whether dashboard permissions were configured.\n\
+# TYPE agentk_dashboard_permissions_configured gauge\n\
+agentk_dashboard_permissions_configured {permissions_configured}\n\
+# HELP agentk_dashboard_permissions_present Whether the configured dashboard permissions file exists.\n\
+# TYPE agentk_dashboard_permissions_present gauge\n\
+agentk_dashboard_permissions_present {permissions_present}\n\
+# HELP agentk_dashboard_permissions_ready Whether dashboard permissions are absent or present.\n\
+# TYPE agentk_dashboard_permissions_ready gauge\n\
+agentk_dashboard_permissions_ready {permissions_ready}\n\
+# HELP agentk_dashboard_store_root_configured Whether dashboard durable store sync is configured.\n\
+# TYPE agentk_dashboard_store_root_configured gauge\n\
+agentk_dashboard_store_root_configured {store_root_configured}\n\
+# HELP agentk_dashboard_store_root_present Whether the configured dashboard durable store root exists.\n\
+# TYPE agentk_dashboard_store_root_present gauge\n\
+agentk_dashboard_store_root_present {store_root_present}\n\
+# HELP agentk_dashboard_admin_required Whether dashboard admin auth is configured.\n\
+# TYPE agentk_dashboard_admin_required gauge\n\
+agentk_dashboard_admin_required {admin_required}\n",
+        ready = usize::from(state.ready),
+        trace_present = usize::from(state.trace_present),
+        decision_log_present = usize::from(state.decision_log_present),
+        permissions_configured = usize::from(state.permissions_configured),
+        permissions_present = usize::from(state.permissions_present),
+        permissions_ready = usize::from(state.permissions_ready),
+        store_root_configured = usize::from(state.store_root_configured),
+        store_root_present = usize::from(state.store_root_present),
+        admin_required = usize::from(state.admin_required)
+    )
 }
 
 fn dashboard_http_html(
@@ -10023,6 +10136,45 @@ can_deny = []
         assert_eq!(ready_head.status, "200 OK");
         assert!(ready_head.body.is_empty());
 
+        let metrics = dashboard_http_response(
+            &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(metrics.status, "200 OK");
+        assert_eq!(
+            metrics.content_type,
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let metrics_body = String::from_utf8(metrics.body).expect("metrics should be utf8");
+        assert!(metrics_body.contains("agentk_dashboard_ready 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_trace_present 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_decision_log_present 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_permissions_configured 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_permissions_present 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_permissions_ready 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_store_root_configured 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_store_root_present 1\n"));
+        assert!(metrics_body.contains("agentk_dashboard_admin_required 1\n"));
+        assert!(!metrics_body.contains(&trace_path.display().to_string()));
+        assert!(!metrics_body.contains(&decisions_path.display().to_string()));
+        assert!(!metrics_body.contains(&permissions_path.display().to_string()));
+        assert!(!metrics_body.contains(&store_root.display().to_string()));
+
+        let metrics_head = dashboard_http_response(
+            &dashboard_test_request("HEAD", "/metrics", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(metrics_head.status, "200 OK");
+        assert!(metrics_head.body.is_empty());
+
         let nonlocal_read_missing_admin = dashboard_http_response_with_read_auth(
             &dashboard_test_request("GET", "/api/review", Vec::new()),
             &trace_path,
@@ -10123,6 +10275,33 @@ can_deny = []
         );
         assert_eq!(nonlocal_ready_ok.status, "200 OK");
 
+        let nonlocal_metrics_missing_admin = dashboard_http_response_with_read_auth(
+            &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_metrics_missing_admin.status, "401 Unauthorized");
+
+        let nonlocal_metrics_ok = dashboard_http_response_with_read_auth(
+            &dashboard_test_request_with_headers(
+                "GET",
+                "/metrics",
+                [("X-AgentK-Admin-Token", "server-admin")],
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            true,
+            Some(&store_root),
+        );
+        assert_eq!(nonlocal_metrics_ok.status, "200 OK");
+
         let nonlocal_health_open = dashboard_http_response_with_read_auth(
             &dashboard_test_request("GET", "/healthz", Vec::new()),
             &trace_path,
@@ -10170,6 +10349,7 @@ can_deny = []
             ("GET", "/"),
             ("GET", "/api/review"),
             ("GET", "/healthz"),
+            ("GET", "/metrics"),
             ("POST", "/api/review"),
             ("POST", "/missing"),
         ] {
@@ -10202,6 +10382,7 @@ can_deny = []
         for target in [
             "/healthz?probe=QUERY_SHOULD_NOT_REFLECT",
             "/readyz?probe=QUERY_SHOULD_NOT_REFLECT",
+            "/metrics?probe=QUERY_SHOULD_NOT_REFLECT",
         ] {
             let query_probe = dashboard_http_response(
                 &dashboard_test_request("GET", target, Vec::new()),
@@ -10231,6 +10412,20 @@ can_deny = []
             serde_json::from_slice(&not_ready.body).expect("not-ready response should be JSON");
         assert_eq!(not_ready_value["ready"], serde_json::json!(false));
         assert_eq!(not_ready_value["trace_present"], serde_json::json!(false));
+
+        let not_ready_metrics = dashboard_http_response(
+            &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &trace_path.with_extension("missing.jsonl"),
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            Some(&store_root),
+        );
+        assert_eq!(not_ready_metrics.status, "200 OK");
+        let not_ready_metrics_body =
+            String::from_utf8(not_ready_metrics.body).expect("metrics should be utf8");
+        assert!(not_ready_metrics_body.contains("agentk_dashboard_ready 0\n"));
+        assert!(not_ready_metrics_body.contains("agentk_dashboard_trace_present 0\n"));
 
         let permissions_not_ready = dashboard_http_response(
             &dashboard_test_request("GET", "/readyz", Vec::new()),
