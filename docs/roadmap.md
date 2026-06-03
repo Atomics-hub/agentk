@@ -216,6 +216,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Add browser approve/deny controls to the served dashboard UI.
 - [x] Add deploy templates for packaged sidecar operation.
 - [x] Preflight packaged dashboard service starts with the sidecar validator.
+- [x] Add redacted dashboard readiness probes for service supervisors.
 - [x] Add live durable team audit and approval storage.
 - [x] Validate live durable team stores with store-check.
 - [x] Add reviewer-scoped dashboard API reads backed by team permissions.

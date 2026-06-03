@@ -169,7 +169,8 @@ The safest first productization slice is the local team sidecar path:
     `AGENTK_DASHBOARD_ADMIN_TOKEN` can gate the write API at the server edge.
     With `--store-root`, dashboard reads and reviewer decisions refresh the
     durable team store. The packaged dashboard server launcher runs the
-    package-local sidecar validator before serving.
+    package-local sidecar validator before serving. The server exposes
+    `/healthz` and redacted `/readyz` probes for service supervisors.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
     decisions, notification outbox rows, and reviewers. It remains
