@@ -347,6 +347,8 @@ lands. It also serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
 gateway gauges and cumulative request/session counters for service supervisors.
+All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
+an unsupported method response with the normal `Allow` header.
 When `AGENTK_MCP_HTTP_TOKEN` is set, `/readyz` and `/metrics` require the same
 bearer token as MCP requests; `/healthz` remains open for minimal liveness
 checks.
@@ -487,7 +489,9 @@ LAN/public exposure is therefore an explicit authenticated operator choice. Set
 writes. SSE-shaped `GET` requests require `Accept: text/event-stream`, pass
 the same auth/origin/protocol/session-id checks, then fail closed with
 sanitized 501 responses and a redacted unsupported-SSE counter until resumable
-SSE support lands. This is a bounded local adapter, not a hosted production
+SSE support lands. All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP
+endpoint remains an unsupported method response with the normal `Allow` header.
+This is a bounded local adapter, not a hosted production
 HTTP/SSE control plane. Set comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS`
 when an approved browser adapter runs from a non-local origin. When the bounded
 HTTP gateway exits, it drains active initialized sessions and writes their

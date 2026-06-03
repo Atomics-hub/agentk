@@ -16123,6 +16123,8 @@ request/session counters. The readiness summary includes the supported MCP
 protocol version, active-session cap, idle timeout, request body cap, request
 header cap, configured stream-timeout, parsed request totals, rejection totals,
 session lifecycle totals, and allowed-origin counts without raw origin values.
+All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
+an unsupported method response with the normal `Allow` header.
 When `AGENTK_MCP_HTTP_TOKEN` is set, `GET /readyz` and `GET /metrics` require
 the same bearer token as MCP requests; `GET /healthz` remains open for minimal
 liveness checks.
@@ -17714,6 +17716,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("GET /readyz"));
         assert!(package_readme.contains("GET /metrics"));
         assert!(package_readme.contains("redacted numeric gateway gauges"));
+        assert!(package_readme.contains("`HEAD` responses omit bodies"));
+        assert!(package_readme.contains("normal `Allow` header"));
         assert!(package_readme.contains("same bearer token as MCP"));
         assert!(package_readme.contains("requests; `GET /healthz` remains open"));
         assert!(package_readme.contains("Accept: text/event-stream"));

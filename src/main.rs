@@ -3989,8 +3989,11 @@ fn mcp_http_response(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
-    let response = mcp_http_response_inner(request, state)?;
+    let mut response = mcp_http_response_inner(request, state)?;
     mcp_http_record_response_metrics(request, &response, state)?;
+    if request.method == "HEAD" {
+        response.body.clear();
+    }
     Ok(response)
 }
 
@@ -4020,15 +4023,12 @@ fn mcp_http_response_inner(
         return Ok(response);
     }
     if mcp_http_is_operational_path(path) {
-        let mut response =
+        let response =
             if path != "/healthz" && !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
                 mcp_http_token_required_response()
             } else {
                 mcp_http_operational_response(request, state, path)?
             };
-        if request.method == "HEAD" {
-            response.body.clear();
-        }
         return Ok(response);
     }
     if path != state.endpoint {
@@ -6647,12 +6647,6 @@ done
             ),
             dashboard_test_request("GET", "/healthz", "BODY_SHOULD_NOT_REFLECT"),
             dashboard_test_request_with_headers(
-                "HEAD",
-                "/readyz",
-                [("Authorization", "Bearer secret")],
-                "BODY_SHOULD_NOT_REFLECT",
-            ),
-            dashboard_test_request_with_headers(
                 "GET",
                 "/metrics",
                 [("Authorization", "Bearer secret")],
@@ -6675,6 +6669,17 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+
+        let head_with_body = dashboard_test_request_with_headers(
+            "HEAD",
+            "/readyz",
+            [("Authorization", "Bearer secret")],
+            "BODY_SHOULD_NOT_REFLECT",
+        );
+        let head_response =
+            mcp_http_response(&head_with_body, &state).expect("HEAD body should fail closed");
+        assert_eq!(head_response.status, "400 Bad Request");
+        assert!(head_response.body.is_empty());
     }
 
     #[test]
@@ -7512,6 +7517,23 @@ done
         .expect("readyz HEAD should respond");
         assert_eq!(ready_head.status, "200 OK");
         assert!(ready_head.body.is_empty());
+
+        let unsupported_endpoint_head = mcp_http_response(
+            &dashboard_test_request_with_headers(
+                "HEAD",
+                "/mcp",
+                [("Authorization", "Bearer secret")],
+                Vec::new(),
+            ),
+            &state,
+        )
+        .expect("endpoint HEAD should be handled");
+        assert_eq!(unsupported_endpoint_head.status, "405 Method Not Allowed");
+        assert_eq!(
+            response_header(&unsupported_endpoint_head, "Allow"),
+            Some("POST, DELETE, OPTIONS")
+        );
+        assert!(unsupported_endpoint_head.body.is_empty());
 
         let unsupported = mcp_http_response(
             &dashboard_test_request_with_headers(
