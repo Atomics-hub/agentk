@@ -4715,9 +4715,9 @@ fn mcp_http_parse_allow_origin_env(value: &str) -> Result<Vec<String>, AgentKErr
 }
 
 fn mcp_http_validate_configured_origin(origin: &str) -> Result<(), AgentKError> {
-    if origin.chars().any(char::is_control) {
+    if !mcp_http_is_valid_configured_origin(origin) {
         return Err(AgentKError::InvalidMcpRequest(
-            "MCP HTTP allowed origins must not contain control characters".to_string(),
+            "MCP HTTP allowed origins must be clean scheme://authority values or null".to_string(),
         ));
     }
     Ok(())
@@ -4725,16 +4725,91 @@ fn mcp_http_validate_configured_origin(origin: &str) -> Result<(), AgentKError> 
 
 fn mcp_http_cors_origin(origin: Option<&str>, allow_origins: &[String]) -> Option<String> {
     let origin = origin?.trim();
-    if origin == "null"
-        || origin == "http://127.0.0.1"
-        || origin.starts_with("http://127.0.0.1:")
-        || origin == "http://localhost"
-        || origin.starts_with("http://localhost:")
+    if mcp_http_is_builtin_local_origin(origin)
         || allow_origins.iter().any(|allowed| allowed == origin)
     {
         return Some(origin.to_string());
     }
     None
+}
+
+fn mcp_http_is_builtin_local_origin(origin: &str) -> bool {
+    origin == "null"
+        || mcp_http_origin_matches_http_host(origin, "127.0.0.1")
+        || mcp_http_origin_matches_http_host(origin, "localhost")
+        || mcp_http_origin_matches_http_host(origin, "[::1]")
+}
+
+fn mcp_http_origin_matches_http_host(origin: &str, host: &str) -> bool {
+    let prefix = format!("http://{host}");
+    if origin == prefix {
+        return true;
+    }
+    origin
+        .strip_prefix(&format!("{prefix}:"))
+        .is_some_and(mcp_http_is_valid_port)
+}
+
+fn mcp_http_is_valid_configured_origin(origin: &str) -> bool {
+    if origin == "null" {
+        return true;
+    }
+    if origin.is_empty()
+        || origin.trim() != origin
+        || origin == "*"
+        || origin
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == b',')
+    {
+        return false;
+    }
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    is_valid_origin_scheme(scheme) && is_valid_origin_authority(authority)
+}
+
+fn is_valid_origin_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn is_valid_origin_authority(authority: &str) -> bool {
+    if authority.is_empty()
+        || authority
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@'))
+    {
+        return false;
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        if host.is_empty() {
+            return false;
+        }
+        return suffix.is_empty() || suffix.strip_prefix(':').is_some_and(mcp_http_is_valid_port);
+    }
+
+    if authority.contains('[') || authority.contains(']') {
+        return false;
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        return !host.is_empty() && mcp_http_is_valid_port(port);
+    }
+    true
+}
+
+fn mcp_http_is_valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 fn mcp_http_origin_allowed(origin: Option<&str>, allow_origins: &[String]) -> bool {
@@ -5927,6 +6002,23 @@ done
             Some("https://console.example")
         );
 
+        let ipv6_local_origin = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "http://[::1]:5173"),
+                ("Access-Control-Request-Method", "POST"),
+            ],
+            Vec::new(),
+        );
+        let ipv6_local_response = mcp_http_response(&ipv6_local_origin, &state)
+            .expect("IPv6 loopback origin preflight should be handled");
+        assert_eq!(ipv6_local_response.status, "204 No Content");
+        assert_eq!(
+            response_header(&ipv6_local_response, "Access-Control-Allow-Origin"),
+            Some("http://[::1]:5173")
+        );
+
         let unauthorized_post = dashboard_test_request_with_headers(
             "POST",
             "/mcp",
@@ -5971,6 +6063,33 @@ done
         let localhost_suffix_response = mcp_http_response(&localhost_suffix, &state)
             .expect("localhost suffix origin should be rejected");
         assert_eq!(localhost_suffix_response.status, "403 Forbidden");
+        for malformed_origin in [
+            "http://localhost:",
+            "http://localhost:abc",
+            "http://localhost:5173/path",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:5173/path",
+            "http://[::1]:abc",
+            "http://[::1]:5173/path",
+        ] {
+            let malformed_origin_request = dashboard_test_request_with_headers(
+                "OPTIONS",
+                "/mcp",
+                [("Origin", malformed_origin)],
+                Vec::new(),
+            );
+            let malformed_origin_response = mcp_http_response(&malformed_origin_request, &state)
+                .expect("malformed local origin should be rejected");
+            assert_eq!(
+                malformed_origin_response.status, "403 Forbidden",
+                "{malformed_origin} should be rejected"
+            );
+            assert_eq!(
+                response_header(&malformed_origin_response, "Access-Control-Allow-Origin"),
+                None
+            );
+        }
         let missing_preflight_method = dashboard_test_request_with_headers(
             "OPTIONS",
             "/mcp",
@@ -6421,7 +6540,7 @@ done
     #[test]
     fn mcp_http_allow_origin_env_parses_comma_separated_origins() {
         let origins = mcp_http_parse_allow_origin_env(
-            " https://console.example, http://localhost:5173 , null, vscode-webview://agentk ",
+            " https://console.example, http://localhost:5173 , null, vscode-webview://agentk, http://[::1]:5173 ",
         )
         .expect("allow-origin env should parse");
         assert_eq!(
@@ -6431,9 +6550,31 @@ done
                 "http://localhost:5173".to_string(),
                 "null".to_string(),
                 "vscode-webview://agentk".to_string(),
+                "http://[::1]:5173".to_string(),
             ]
         );
         assert!(mcp_http_parse_allow_origin_env("https://bad.exa\nmple").is_err());
+        for bad_origin in [
+            "",
+            "*",
+            " https://console.example",
+            "https://console.example ",
+            "https://console.example/path",
+            "https://console.example?debug=1",
+            "https://console.example#fragment",
+            "https://user@console.example",
+            "https://console.example:",
+            "https://console.example:99999",
+            "http://[::1",
+            "http://[::1]:bad",
+            "console.example",
+            "1bad://console.example",
+        ] {
+            assert!(
+                mcp_http_validate_configured_origin(bad_origin).is_err(),
+                "{bad_origin:?} should be rejected"
+            );
+        }
     }
 
     #[test]

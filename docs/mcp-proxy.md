@@ -149,6 +149,11 @@ exact `application/json` media type; parameters such as `charset` are allowed.
 Request bodies are
 accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
 operational probes reject bodies before auth, session, or probe handling.
+Additional `--allow-origin` or `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values must be
+exact `scheme://authority` origins or `null`; paths, queries, fragments,
+wildcards, whitespace, and invalid ports are rejected before bind. Built-in
+localhost and loopback origins only match exact hosts with optional numeric
+ports.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
 HTTP headers; unsupported requested methods or headers return sanitized 400
 responses with CORS visibility for allowed origins. The configured MCP endpoint

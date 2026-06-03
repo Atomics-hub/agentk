@@ -241,9 +241,11 @@ The safest first productization slice is the local team sidecar path:
     headers, control characters in header values, and any transfer-encoding
     header with sanitized 400 responses. Request lines must be exactly
     space-delimited and header names cannot carry whitespace before `:`. The
-    HTTP gateway rejects ambiguous duplicate MCP control headers, dual
-    token-carrier headers, and invalid JSON POST media types before spawning
-    downstream MCP work. Follow-up
+    HTTP gateway validates configured browser origins before bind, matches
+    built-in localhost/loopback origins only with optional numeric ports,
+    rejects ambiguous duplicate MCP control headers, dual token-carrier
+    headers, and invalid JSON POST media types before spawning downstream MCP
+    work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
     shape before lookup. HTTP/1.1 requests
     require exactly one nonblank `Host` header so gateway handling does not
