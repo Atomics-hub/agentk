@@ -16060,6 +16060,8 @@ non-loopback binds require `--allow-non-local-bind` plus a non-empty dashboard
 admin token. Set `AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=1` for the packaged
 launcher to pass that opt-in. In that mode, dashboard reads and `/readyz`
 require the same admin token; `/healthz` remains open for liveness probes.
+Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
+`AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune packaged deployments.
 Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
 reads and probes cannot smuggle ignored payload bytes. Decision endpoint paths
@@ -16464,6 +16466,7 @@ STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
 HOST="${AGENTK_DASHBOARD_HOST:-127.0.0.1}"
 PORT="${AGENTK_DASHBOARD_PORT:-8765}"
 ADMIN_TOKEN_ENV="${AGENTK_DASHBOARD_ADMIN_TOKEN_ENV:-AGENTK_DASHBOARD_ADMIN_TOKEN}"
+STREAM_TIMEOUT_MS="${AGENTK_DASHBOARD_STREAM_TIMEOUT_MS:-30000}"
 if [ "${AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND:-0}" = "1" ]; then
   set -- --allow-non-local-bind "$@"
 fi
@@ -16474,6 +16477,7 @@ exec "$AGENTK_BIN" dashboard-serve "$TRACE" \
   --host "$HOST" \
   --port "$PORT" \
   --admin-token-env "$ADMIN_TOKEN_ENV" \
+  --stream-timeout-ms "$STREAM_TIMEOUT_MS" \
   --store-root "$STORE_ROOT" \
   "$@"
 "#
@@ -17727,6 +17731,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("dashboard reads and `/readyz`"));
         assert!(package_readme.contains("`/healthz` remains open"));
+        assert!(package_readme.contains("AGENTK_DASHBOARD_STREAM_TIMEOUT_MS"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
         assert!(package_readme.contains("Decision endpoint paths"));
         assert!(package_readme.contains("decision JSON"));
@@ -17878,8 +17883,10 @@ can_deny = ["*"]
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_HOST"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_PORT"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_ADMIN_TOKEN_ENV"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_STREAM_TIMEOUT_MS"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(dashboard_server.contains("--allow-non-local-bind"));
+        assert!(dashboard_server.contains("--stream-timeout-ms"));
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
         assert!(dashboard_server.contains("\"$@\""));

@@ -186,9 +186,11 @@ The safest first productization slice is the local team sidecar path:
     probe paths are matched exactly with query strings rejected. Non-loopback
     dashboard binds require explicit `--allow-non-local-bind` opt-in plus a
     non-empty dashboard admin token, and then require that admin token for
-    dashboard reads and `/readyz` while leaving `/healthz` open. Dashboard
-    request bodies are accepted only on approval decision endpoints, so review
-    reads and probes cannot carry ignored payload bytes, and those write
+    dashboard reads and `/readyz` while leaving `/healthz` open. Accepted
+    dashboard connections use an operator-tunable read/write timeout via
+    `--stream-timeout-ms` and packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS`.
+    Dashboard request bodies are accepted only on approval decision endpoints,
+    so review reads and probes cannot carry ignored payload bytes, and those write
     endpoints require `Content-Type: application/json`. Decision endpoint paths
     are matched exactly and reject query strings. Dashboard decision JSON object
     keys must be unique and limited to `id`, `reviewer`, `reason`, and
