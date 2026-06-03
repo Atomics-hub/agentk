@@ -443,8 +443,9 @@ client snippets, local transports, store workflow, and deploy artifacts; run
 `dist/agentk-sidecar/bin/agentk-package-info` to print it after copying or
 installing the package. Run `dist/agentk-sidecar/bin/agentk-package-check` to
 validate the manifest, package artifacts, launcher modes, launcher preflights,
-deploy-template hardening, and embedded sidecar bundle after a copy, deploy, or
-image build.
+deploy-template hardening, the configured `AGENTK_BIN`, and embedded sidecar
+bundle after a copy, deploy, or image build. Set `AGENTK_BIN` to the reviewed
+AgentK executable path when `agentk` is not on the service account's `PATH`.
 Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
 credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
 install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
@@ -633,7 +634,7 @@ Packaged installs include the same workflow as stable launchers:
 
 ```sh
 dist/agentk-sidecar/bin/agentk-package-info
-dist/agentk-sidecar/bin/agentk-package-check
+AGENTK_BIN="$(command -v agentk)" dist/agentk-sidecar/bin/agentk-package-check
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json

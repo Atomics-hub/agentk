@@ -164,10 +164,10 @@ The safest first productization slice is the local team sidecar path:
    local transports, store workflow, and deploy artifacts for support and
    inventory checks. A package-local `agentk-package-check` launcher validates
    the manifest, package artifacts, launcher modes, launcher preflights,
-   deploy-template hardening, and embedded sidecar bundle after
-   copy/deploy/image-build steps. Packaged runtime launchers run that check
-   before launching, serving, writing demo traces, rendering dashboards, or
-   updating store artifacts.
+   deploy-template hardening, the configured `AGENTK_BIN`, and embedded sidecar
+   bundle after copy/deploy/image-build steps. Packaged runtime launchers run
+   that check before launching, serving, writing demo traces, rendering
+   dashboards, or updating store artifacts.
    The package includes systemd, launchd, and Docker Compose templates for both
    the MCP HTTP gateway and the dashboard. Package checks now validate baseline
    deploy-template hardening markers, including no-new-privileges systemd
