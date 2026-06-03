@@ -44,6 +44,19 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-store-sync",
     "bin/agentk-store-push",
 ];
+const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
+    "bin/agentk-safe-agent-demo",
+    "bin/agentk-sidecar",
+    "bin/agentk-sidecar-tcp",
+    "bin/agentk-sidecar-http",
+    "bin/agentk-sidecar-check",
+    "bin/agentk-dashboard",
+    "bin/agentk-dashboard-server",
+    "bin/agentk-store-export",
+    "bin/agentk-store-check",
+    "bin/agentk-store-sync",
+    "bin/agentk-store-push",
+];
 const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
     "clients/claude-desktop.mcp.json",
     "clients/codex-cursor-command.txt",
@@ -14049,6 +14062,7 @@ pub fn check_sidecar_package(
     }
     checks.extend(check_sidecar_package_manifest(root));
     checks.push(check_sidecar_package_launcher_modes(root));
+    checks.push(check_sidecar_package_launcher_preflights(root));
     checks.push(check_sidecar_package_deploy_templates(root));
     checks.push(check_sidecar_package_sidecar_bundle(root));
 
@@ -14436,6 +14450,37 @@ fn check_sidecar_package_launcher_modes(root: &Path) -> ReadinessCheck {
             "launcher execute bits are not checked on this platform",
         )
     }
+}
+
+fn check_sidecar_package_launcher_preflights(root: &Path) -> ReadinessCheck {
+    for relative in SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS {
+        let content = match fs::read_to_string(root.join(relative)) {
+            Ok(content) => content,
+            Err(error) => {
+                return sidecar_check(
+                    "package launcher preflights",
+                    ReadinessStatus::Fail,
+                    format!("{relative} could not be read: {error}"),
+                );
+            }
+        };
+        if !content.contains("agentk-package-check") || !content.contains("--json") {
+            return sidecar_check(
+                "package launcher preflights",
+                ReadinessStatus::Fail,
+                format!("{relative} must run agentk-package-check --json before work"),
+            );
+        }
+    }
+
+    sidecar_check(
+        "package launcher preflights",
+        ReadinessStatus::Pass,
+        format!(
+            "{} runtime launchers run package preflight checks",
+            SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS.len()
+        ),
+    )
 }
 
 fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
@@ -16089,7 +16134,8 @@ MCP clients stable launcher scripts in `bin/`.
 - `bin/agentk-package-info`: prints `manifest.json` for support, deployment,
   and inventory checks.
 - `bin/agentk-package-check`: validates `manifest.json`, package artifacts,
-  launcher modes, and the embedded sidecar bundle.
+  launcher modes, launcher preflights, deploy-template hardening, and the
+  embedded sidecar bundle.
 - `bin/agentk-safe-agent-demo`: runs the no-credential GitHub/Postgres/Slack/
   filesystem demo and writes a package-local trace for audit review.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
@@ -16136,6 +16182,12 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-store-push --dry-run
 agentk permissions --path sidecar/team-permissions.toml
 ```
+
+Every packaged runtime launcher other than `bin/agentk-package-info` and
+`bin/agentk-package-check` runs `bin/agentk-package-check --json` before it
+launches, serves, writes demo traces, renders dashboards, or updates store
+artifacts. This catches copied or edited packages before a team depends on stale
+policy, permissions, client snippets, or deploy templates.
 
 `bin/agentk-safe-agent-demo` runs the credential-free GitHub/Postgres/Slack/
 filesystem workflow and writes
@@ -16491,6 +16543,7 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 TRACE_OUT="${AGENTK_SAFE_AGENT_DEMO_TRACE_OUT:-$ROOT/sidecar/.agentk/runs/safe-agent-demo.jsonl}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" safe-agent-demo --trace-out "$TRACE_OUT" "$@"
 "#
     .to_string()
@@ -16547,6 +16600,7 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-check --root "$ROOT/sidecar" "$@"
 "#
     .to_string()
@@ -16562,6 +16616,7 @@ TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
 DASHBOARD_OUT="${AGENTK_DASHBOARD_OUT:-$ROOT/sidecar/.agentk/dashboard.html}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" dashboard "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
@@ -16616,6 +16671,7 @@ TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
 STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-export "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
@@ -16632,6 +16688,7 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-check --root "$STORE_EXPORT_ROOT" "$@"
 "#
     .to_string()
@@ -16647,6 +16704,7 @@ TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
 STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-sync "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
@@ -16663,6 +16721,7 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-push --root "$STORE_EXPORT_ROOT" "$@"
 "#
     .to_string()
@@ -17967,6 +18026,7 @@ can_deny = ["*"]
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
+        assert!(check_launcher.contains("agentk-package-check"));
         assert!(check_launcher.contains("\"$@\""));
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
@@ -17974,6 +18034,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("runs the package self-check before launch"));
+        assert!(package_readme.contains("launcher preflights"));
+        assert!(package_readme.contains("Every packaged runtime launcher"));
+        assert!(package_readme.contains("updates store"));
         assert!(package_readme.contains("before binding"));
         assert!(package_readme.contains("MCP HTTP sidecar gateway"));
         assert!(package_readme.contains("bin/agentk-safe-agent-demo"));
@@ -18149,6 +18212,7 @@ can_deny = ["*"]
         assert!(safe_agent_demo.contains("safe-agent-demo.jsonl"));
         assert!(safe_agent_demo.contains("AGENTK_SAFE_AGENT_DEMO_TRACE_OUT"));
         assert!(safe_agent_demo.contains("AGENTK_BIN"));
+        assert!(safe_agent_demo.contains("agentk-package-check"));
         assert!(safe_agent_demo.contains("\"$@\""));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
@@ -18158,6 +18222,7 @@ can_deny = ["*"]
         assert!(dashboard.contains("AGENTK_DECISIONS"));
         assert!(dashboard.contains("AGENTK_PERMISSIONS"));
         assert!(dashboard.contains("AGENTK_DASHBOARD_OUT"));
+        assert!(dashboard.contains("agentk-package-check"));
         assert!(dashboard.contains("\"$@\""));
         let dashboard_server = fs::read_to_string(out.join("bin/agentk-dashboard-server"))
             .expect("dashboard server should read");
@@ -18190,11 +18255,13 @@ can_deny = ["*"]
         assert!(store_export.contains("AGENTK_PERMISSIONS"));
         assert!(store_export.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_export.contains("team-permissions.toml"));
+        assert!(store_export.contains("agentk-package-check"));
         assert!(store_export.contains("\"$@\""));
         let store_check = fs::read_to_string(out.join("bin/agentk-store-check"))
             .expect("store check should read");
         assert!(store_check.contains("store-check"));
         assert!(store_check.contains("AGENTK_STORE_EXPORT_ROOT"));
+        assert!(store_check.contains("agentk-package-check"));
         assert!(store_check.contains("\"$@\""));
         let store_sync =
             fs::read_to_string(out.join("bin/agentk-store-sync")).expect("store sync should read");
@@ -18204,11 +18271,13 @@ can_deny = ["*"]
         assert!(store_sync.contains("AGENTK_PERMISSIONS"));
         assert!(store_sync.contains("AGENTK_STORE_ROOT"));
         assert!(store_sync.contains("team-store"));
+        assert!(store_sync.contains("agentk-package-check"));
         assert!(store_sync.contains("\"$@\""));
         let store_push =
             fs::read_to_string(out.join("bin/agentk-store-push")).expect("store push should read");
         assert!(store_push.contains("store-push"));
         assert!(store_push.contains("AGENTK_STORE_EXPORT_ROOT"));
+        assert!(store_push.contains("agentk-package-check"));
         assert!(store_push.contains("\"$@\""));
         let client = fs::read_to_string(out.join("clients/claude-desktop.mcp.json"))
             .expect("client should read");
@@ -18284,6 +18353,9 @@ can_deny = ["*"]
             check.name == "package launcher modes" && check.status == ReadinessStatus::Pass
         }));
         assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package launcher preflights" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
             check.name == "package deploy templates" && check.status == ReadinessStatus::Pass
         }));
 
@@ -18337,6 +18409,22 @@ can_deny = ["*"]
             check.name == "package deploy templates"
                 && check.status == ReadinessStatus::Fail
                 && check.detail.contains("NoNewPrivileges=true")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let dashboard_path = out.join("bin/agentk-dashboard");
+        let dashboard = fs::read_to_string(&dashboard_path).expect("dashboard should read");
+        fs::write(
+            &dashboard_path,
+            dashboard.replace("\"$DIR/agentk-package-check\" --json >/dev/null\n", ""),
+        )
+        .expect("dashboard should write");
+        let unsafe_launcher_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_launcher_report.passed);
+        assert!(unsafe_launcher_report.checks.iter().any(|check| {
+            check.name == "package launcher preflights"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("bin/agentk-dashboard")
         }));
 
         fs::remove_dir_all(root).ok();

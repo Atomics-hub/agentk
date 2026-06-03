@@ -431,8 +431,9 @@ under `dist/agentk-sidecar/clients/`. The package also writes a relative-path
 client snippets, local transports, store workflow, and deploy artifacts; run
 `dist/agentk-sidecar/bin/agentk-package-info` to print it after copying or
 installing the package. Run `dist/agentk-sidecar/bin/agentk-package-check` to
-validate the manifest, package artifacts, launcher modes, and embedded sidecar
-bundle after a copy, deploy, or image build.
+validate the manifest, package artifacts, launcher modes, launcher preflights,
+deploy-template hardening, and embedded sidecar bundle after a copy, deploy, or
+image build.
 Run `dist/agentk-sidecar/bin/agentk-safe-agent-demo --json` to exercise the
 credential-free GitHub/Postgres/Slack/filesystem workflow from the packaged
 install; it writes `dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl`
@@ -441,7 +442,9 @@ for audit review. Set `AGENTK_TRACE` to that path when running
 `dist/agentk-sidecar/bin/agentk-dashboard-server`,
 `dist/agentk-sidecar/bin/agentk-store-export`, or
 `dist/agentk-sidecar/bin/agentk-store-sync` to review or store the packaged
-demo trace instead of the default team-sidecar trace.
+demo trace instead of the default team-sidecar trace. Those packaged demo,
+dashboard, sidecar-check, and store workflow launchers run the package
+self-check before touching package-local evidence or store artifacts.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
 bundle to validate policy, permissions, secret references, and client snippets
 without spawning downstream tools.
@@ -618,8 +621,9 @@ dist/agentk-sidecar/bin/agentk-store-push --dry-run
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged MCP HTTP sidecar gateway, dashboard, and
-store workflow after review; the sidecar gateway and dashboard launchers run
-the package self-check before serving. `agentk-package-check` also verifies
+store workflow after review; packaged runtime launchers run the package
+self-check before launching, serving, writing demo traces, rendering dashboards,
+or updating store artifacts. `agentk-package-check` also verifies
 baseline deploy-template hardening markers, including no-new-privileges systemd
 services and loopback-published, capability-dropped, read-only Compose services.
 
