@@ -16064,6 +16064,10 @@ launcher to pass that opt-in. In that mode, dashboard reads, `/readyz`, and
 probes.
 Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
 `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune packaged deployments.
+Dashboard HTTP request buffering is bounded; set
+`AGENTK_DASHBOARD_MAX_BODY_BYTES` and `AGENTK_DASHBOARD_MAX_HEADER_BYTES` to
+tune packaged request caps. Oversized bodies return sanitized 413 responses,
+and oversized request lines or headers return sanitized 431 responses.
 Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
 reads and probes cannot smuggle ignored payload bytes. Decision endpoint paths
@@ -16474,6 +16478,8 @@ HOST="${AGENTK_DASHBOARD_HOST:-127.0.0.1}"
 PORT="${AGENTK_DASHBOARD_PORT:-8765}"
 ADMIN_TOKEN_ENV="${AGENTK_DASHBOARD_ADMIN_TOKEN_ENV:-AGENTK_DASHBOARD_ADMIN_TOKEN}"
 STREAM_TIMEOUT_MS="${AGENTK_DASHBOARD_STREAM_TIMEOUT_MS:-30000}"
+MAX_BODY_BYTES="${AGENTK_DASHBOARD_MAX_BODY_BYTES:-8192}"
+MAX_HEADER_BYTES="${AGENTK_DASHBOARD_MAX_HEADER_BYTES:-16384}"
 if [ "${AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND:-0}" = "1" ]; then
   set -- --allow-non-local-bind "$@"
 fi
@@ -16485,6 +16491,8 @@ exec "$AGENTK_BIN" dashboard-serve "$TRACE" \
   --port "$PORT" \
   --admin-token-env "$ADMIN_TOKEN_ENV" \
   --stream-timeout-ms "$STREAM_TIMEOUT_MS" \
+  --max-body-bytes "$MAX_BODY_BYTES" \
+  --max-header-bytes "$MAX_HEADER_BYTES" \
   --store-root "$STORE_ROOT" \
   "$@"
 "#
@@ -17740,6 +17748,10 @@ can_deny = ["*"]
         assert!(package_readme.contains("dashboard reads, `/readyz`, and"));
         assert!(package_readme.contains("`/healthz` remains open"));
         assert!(package_readme.contains("AGENTK_DASHBOARD_STREAM_TIMEOUT_MS"));
+        assert!(package_readme.contains("AGENTK_DASHBOARD_MAX_BODY_BYTES"));
+        assert!(package_readme.contains("AGENTK_DASHBOARD_MAX_HEADER_BYTES"));
+        assert!(package_readme.contains("sanitized 413"));
+        assert!(package_readme.contains("sanitized 431"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
         assert!(package_readme.contains("Decision endpoint paths"));
         assert!(package_readme.contains("decision JSON"));
@@ -17898,9 +17910,13 @@ can_deny = ["*"]
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_PORT"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_ADMIN_TOKEN_ENV"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_STREAM_TIMEOUT_MS"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_MAX_BODY_BYTES"));
+        assert!(dashboard_server.contains("AGENTK_DASHBOARD_MAX_HEADER_BYTES"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(dashboard_server.contains("--allow-non-local-bind"));
         assert!(dashboard_server.contains("--stream-timeout-ms"));
+        assert!(dashboard_server.contains("--max-body-bytes"));
+        assert!(dashboard_server.contains("--max-header-bytes"));
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
         assert!(dashboard_server.contains("\"$@\""));

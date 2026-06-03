@@ -264,6 +264,11 @@ same admin token; `/healthz` remains open for liveness probes.
 Accepted dashboard HTTP connections use a 30000 ms read/write timeout; set
 `--stream-timeout-ms` or packaged `AGENTK_DASHBOARD_STREAM_TIMEOUT_MS` to tune
 deployments.
+Dashboard request buffering is bounded; set `--max-body-bytes`,
+`--max-header-bytes`, or packaged `AGENTK_DASHBOARD_MAX_BODY_BYTES` and
+`AGENTK_DASHBOARD_MAX_HEADER_BYTES` to tune deployments. Oversized dashboard
+request bodies return sanitized 413 responses, and oversized request lines or
+headers return sanitized 431 responses.
 Dashboard and MCP HTTP responses include no-store, no-sniff, no-referrer,
 anti-framing, and local-only CSP headers for browser-facing deployments.
 Reviewers can record approve/deny decisions from the browser page, and the

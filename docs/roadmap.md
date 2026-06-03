@@ -294,6 +294,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Gate non-loopback dashboard reads with admin auth.
 - [x] Add accepted-stream I/O timeouts to the dashboard server.
 - [x] Add redacted dashboard metrics gauges for service supervisors.
+- [x] Add tunable dashboard HTTP body/header caps with sanitized 413/431 responses.
 - [x] Enforce MCP/dashboard HTTP header byte caps during line reads.
 - [x] Use per-session runtime locks for MCP HTTP sessions.
 - [x] Count MCP HTTP stream framing rejections in readiness and metrics.

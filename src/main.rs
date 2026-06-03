@@ -190,6 +190,12 @@ enum Command {
         /// Milliseconds before an accepted dashboard HTTP connection read/write operation times out.
         #[arg(long, default_value_t = DASHBOARD_HTTP_DEFAULT_STREAM_TIMEOUT_MS)]
         stream_timeout_ms: u64,
+        /// Maximum accepted dashboard HTTP request body bytes.
+        #[arg(long, default_value_t = DASHBOARD_HTTP_MAX_BODY_BYTES)]
+        max_body_bytes: usize,
+        /// Maximum accepted dashboard HTTP request header bytes.
+        #[arg(long, default_value_t = DASHBOARD_HTTP_MAX_HEADER_BYTES)]
+        max_header_bytes: usize,
         /// Allow binding the dashboard server to a non-loopback host.
         #[arg(long)]
         allow_non_local_bind: bool,
@@ -759,6 +765,8 @@ fn run() -> Result<(), AgentKError> {
             port,
             admin_token_env,
             stream_timeout_ms,
+            max_body_bytes,
+            max_header_bytes,
             allow_non_local_bind,
             store_root,
         } => dashboard_serve(
@@ -769,6 +777,8 @@ fn run() -> Result<(), AgentKError> {
             port,
             admin_token_env,
             stream_timeout_ms,
+            max_body_bytes,
+            max_header_bytes,
             allow_non_local_bind,
             store_root,
         ),
@@ -1412,6 +1422,8 @@ fn dashboard_serve(
     port: u16,
     admin_token_env: String,
     stream_timeout_ms: u64,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     allow_non_local_bind: bool,
     store_root: Option<PathBuf>,
 ) -> Result<(), AgentKError> {
@@ -1426,6 +1438,7 @@ fn dashboard_serve(
         .filter(|value| !value.is_empty());
     let stream_timeout = Duration::from_millis(stream_timeout_ms);
     validate_dashboard_stream_timeout(stream_timeout)?;
+    validate_dashboard_http_size_limits(max_body_bytes, max_header_bytes)?;
     validate_dashboard_bind_security(&host, allow_non_local_bind, admin_token.is_some())?;
     let admin_read_required = !is_loopback_bind_host(&host);
     let bind = format!("{host}:{port}");
@@ -1435,6 +1448,8 @@ fn dashboard_serve(
     println!("trace      {}", path.display());
     println!("decisions  {}", decisions.display());
     println!("stream ms  {}", stream_timeout.as_millis());
+    println!("body bytes {}", max_body_bytes);
+    println!("header bytes {}", max_header_bytes);
     if let Some(path) = &store_root {
         println!("store      {}", path.display());
     }
@@ -1462,6 +1477,8 @@ fn dashboard_serve(
                             permissions.as_ref(),
                             admin_token.as_deref(),
                             admin_read_required,
+                            max_body_bytes,
+                            max_header_bytes,
                             store_root.as_ref(),
                         )
                     });
@@ -1480,6 +1497,23 @@ fn validate_dashboard_stream_timeout(stream_timeout: Duration) -> Result<(), Age
     if stream_timeout.is_zero() {
         return Err(AgentKError::InvalidMcpRequest(
             "dashboard stream-timeout-ms must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dashboard_http_size_limits(
+    max_body_bytes: usize,
+    max_header_bytes: usize,
+) -> Result<(), AgentKError> {
+    if max_body_bytes == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard max-body-bytes must be positive".to_string(),
+        ));
+    }
+    if max_header_bytes == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard max-header-bytes must be positive".to_string(),
         ));
     }
     Ok(())
@@ -1523,30 +1557,63 @@ fn handle_dashboard_http_stream(
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
     admin_read_required: bool,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> Result<(), AgentKError> {
-    let request = match read_dashboard_http_request(stream) {
-        Ok(Some(request)) => request,
-        Ok(None) => return Ok(()),
-        Err(AgentKError::InvalidMcpRequest(_)) => {
-            let response =
-                dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
-            write_dashboard_http_response(stream, &response)?;
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    let response = dashboard_http_response_with_read_auth(
+    let request =
+        match read_dashboard_http_request_with_limits(stream, max_body_bytes, max_header_bytes) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(AgentKError::InvalidMcpRequest(message))
+                if message == "HTTP request headers are too large" =>
+            {
+                let response = dashboard_http_headers_too_large_response(max_header_bytes);
+                write_dashboard_http_response(stream, &response)?;
+                return Ok(());
+            }
+            Err(AgentKError::InvalidMcpRequest(message))
+                if message == "HTTP request body is too large" =>
+            {
+                let response = dashboard_http_payload_too_large_response(max_body_bytes);
+                write_dashboard_http_response(stream, &response)?;
+                return Ok(());
+            }
+            Err(AgentKError::InvalidMcpRequest(_)) => {
+                let response =
+                    dashboard_http_text("400 Bad Request", "invalid dashboard HTTP request\n");
+                write_dashboard_http_response(stream, &response)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+    let response = dashboard_http_response_with_read_auth_and_limits(
         &request,
         trace_path,
         decisions_path,
         permissions_path,
         admin_token,
         admin_read_required,
+        max_body_bytes,
+        max_header_bytes,
         store_root,
     );
     write_dashboard_http_response(stream, &response)?;
     Ok(())
+}
+
+fn dashboard_http_payload_too_large_response(max_body_bytes: usize) -> DashboardHttpResponse {
+    dashboard_http_text(
+        "413 Payload Too Large",
+        &format!("dashboard HTTP request body must be at most {max_body_bytes} bytes\n"),
+    )
+}
+
+fn dashboard_http_headers_too_large_response(max_header_bytes: usize) -> DashboardHttpResponse {
+    dashboard_http_text(
+        "431 Request Header Fields Too Large",
+        &format!("dashboard HTTP request headers must be at most {max_header_bytes} bytes\n"),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1573,16 +1640,6 @@ impl DashboardHttpRequest {
             .filter(|(candidate, _)| candidate == &name)
             .count()
     }
-}
-
-fn read_dashboard_http_request(
-    stream: &mut TcpStream,
-) -> Result<Option<DashboardHttpRequest>, AgentKError> {
-    read_dashboard_http_request_with_limits(
-        stream,
-        DASHBOARD_HTTP_MAX_BODY_BYTES,
-        DASHBOARD_HTTP_MAX_HEADER_BYTES,
-    )
 }
 
 fn read_dashboard_http_request_with_limits(
@@ -1947,6 +2004,8 @@ struct DashboardOperationalState {
     store_root_configured: bool,
     store_root_present: bool,
     admin_required: bool,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
 }
 
 #[cfg(test)]
@@ -1958,17 +2017,20 @@ fn dashboard_http_response(
     admin_token: Option<&str>,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
-    dashboard_http_response_with_read_auth(
+    dashboard_http_response_with_read_auth_and_limits(
         request,
         trace_path,
         decisions_path,
         permissions_path,
         admin_token,
         false,
+        DASHBOARD_HTTP_MAX_BODY_BYTES,
+        DASHBOARD_HTTP_MAX_HEADER_BYTES,
         store_root,
     )
 }
 
+#[cfg(test)]
 fn dashboard_http_response_with_read_auth(
     request: &DashboardHttpRequest,
     trace_path: &PathBuf,
@@ -1976,6 +2038,30 @@ fn dashboard_http_response_with_read_auth(
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
     admin_read_required: bool,
+    store_root: Option<&PathBuf>,
+) -> DashboardHttpResponse {
+    dashboard_http_response_with_read_auth_and_limits(
+        request,
+        trace_path,
+        decisions_path,
+        permissions_path,
+        admin_token,
+        admin_read_required,
+        DASHBOARD_HTTP_MAX_BODY_BYTES,
+        DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        store_root,
+    )
+}
+
+fn dashboard_http_response_with_read_auth_and_limits(
+    request: &DashboardHttpRequest,
+    trace_path: &PathBuf,
+    decisions_path: &PathBuf,
+    permissions_path: Option<&PathBuf>,
+    admin_token: Option<&str>,
+    admin_read_required: bool,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     let (route, has_query) = match request.target.split_once('?') {
@@ -2009,6 +2095,8 @@ fn dashboard_http_response_with_read_auth(
                         decisions_path,
                         permissions_path,
                         admin_token,
+                        max_body_bytes,
+                        max_header_bytes,
                         store_root,
                     )
                 }
@@ -2025,6 +2113,8 @@ fn dashboard_http_response_with_read_auth(
             decisions_path,
             permissions_path,
             admin_token,
+            max_body_bytes,
+            max_header_bytes,
             store_root,
         )
     };
@@ -2042,6 +2132,8 @@ fn dashboard_http_route_response(
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     match (request.method.as_str(), route) {
@@ -2070,6 +2162,8 @@ fn dashboard_http_route_response(
             decisions_path,
             permissions_path,
             admin_token,
+            max_body_bytes,
+            max_header_bytes,
             store_root,
         ),
         ("GET" | "HEAD", "/metrics") => dashboard_http_metrics_response(
@@ -2077,6 +2171,8 @@ fn dashboard_http_route_response(
             decisions_path,
             permissions_path,
             admin_token,
+            max_body_bytes,
+            max_header_bytes,
             store_root,
         ),
         ("POST", "/api/approve") => dashboard_http_decision(
@@ -2141,6 +2237,8 @@ fn dashboard_http_ready_response(
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     let state = dashboard_operational_state(
@@ -2148,6 +2246,8 @@ fn dashboard_http_ready_response(
         decisions_path,
         permissions_path,
         admin_token,
+        max_body_bytes,
+        max_header_bytes,
         store_root,
     );
     match serde_json::to_vec(&serde_json::json!({
@@ -2158,7 +2258,9 @@ fn dashboard_http_ready_response(
         "permissions_present": state.permissions_present,
         "store_root_configured": state.store_root_configured,
         "store_root_present": state.store_root_present,
-        "admin_required": state.admin_required
+        "admin_required": state.admin_required,
+        "max_body_bytes": state.max_body_bytes,
+        "max_header_bytes": state.max_header_bytes
     })) {
         Ok(body) => DashboardHttpResponse {
             status: if state.ready {
@@ -2179,6 +2281,8 @@ fn dashboard_http_metrics_response(
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> DashboardHttpResponse {
     let state = dashboard_operational_state(
@@ -2186,6 +2290,8 @@ fn dashboard_http_metrics_response(
         decisions_path,
         permissions_path,
         admin_token,
+        max_body_bytes,
+        max_header_bytes,
         store_root,
     );
     DashboardHttpResponse {
@@ -2201,6 +2307,8 @@ fn dashboard_operational_state(
     decisions_path: &PathBuf,
     permissions_path: Option<&PathBuf>,
     admin_token: Option<&str>,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
     store_root: Option<&PathBuf>,
 ) -> DashboardOperationalState {
     let trace_present = trace_path.exists();
@@ -2220,6 +2328,8 @@ fn dashboard_operational_state(
         store_root_configured,
         store_root_present,
         admin_required: admin_token.is_some(),
+        max_body_bytes,
+        max_header_bytes,
     }
 }
 
@@ -2251,7 +2361,13 @@ agentk_dashboard_store_root_configured {store_root_configured}\n\
 agentk_dashboard_store_root_present {store_root_present}\n\
 # HELP agentk_dashboard_admin_required Whether dashboard admin auth is configured.\n\
 # TYPE agentk_dashboard_admin_required gauge\n\
-agentk_dashboard_admin_required {admin_required}\n",
+agentk_dashboard_admin_required {admin_required}\n\
+# HELP agentk_dashboard_max_body_bytes Configured dashboard maximum HTTP request body bytes.\n\
+# TYPE agentk_dashboard_max_body_bytes gauge\n\
+agentk_dashboard_max_body_bytes {max_body_bytes}\n\
+# HELP agentk_dashboard_max_header_bytes Configured dashboard maximum HTTP request header bytes.\n\
+# TYPE agentk_dashboard_max_header_bytes gauge\n\
+agentk_dashboard_max_header_bytes {max_header_bytes}\n",
         ready = usize::from(state.ready),
         trace_present = usize::from(state.trace_present),
         decision_log_present = usize::from(state.decision_log_present),
@@ -2260,7 +2376,9 @@ agentk_dashboard_admin_required {admin_required}\n",
         permissions_ready = usize::from(state.permissions_ready),
         store_root_configured = usize::from(state.store_root_configured),
         store_root_present = usize::from(state.store_root_present),
-        admin_required = usize::from(state.admin_required)
+        admin_required = usize::from(state.admin_required),
+        max_body_bytes = state.max_body_bytes,
+        max_header_bytes = state.max_header_bytes
     )
 }
 
@@ -8626,6 +8744,68 @@ done
         drop(client);
     }
 
+    fn dashboard_http_stream_response_for(
+        raw_request: &[u8],
+        max_body_bytes: usize,
+        max_header_bytes: usize,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let server = thread::spawn(move || {
+            let trace_path = PathBuf::from("dashboard-stream-trace.jsonl");
+            let decisions_path = PathBuf::from("dashboard-stream-approvals.jsonl");
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            handle_dashboard_http_stream(
+                &mut stream,
+                &trace_path,
+                &decisions_path,
+                None,
+                None,
+                false,
+                max_body_bytes,
+                max_header_bytes,
+                None,
+            )
+            .expect("dashboard stream response should write");
+        });
+        let mut client = TcpStream::connect(addr).expect("test client should connect");
+        client
+            .write_all(raw_request)
+            .expect("test request should write");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("test response should read");
+        server.join().expect("server thread should finish");
+        response
+    }
+
+    #[test]
+    fn dashboard_http_stream_returns_431_for_oversized_headers() {
+        for raw_request in [
+            b"GET /readyz HTTP/1.1\r\nX-Long: 123456789012345678901234567890\r\n\r\n".as_slice(),
+            b"GET /readyz?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"
+                .as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(raw_request, 1024, 32);
+            assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
+            assert!(response.contains("dashboard HTTP request headers must be at most 32 bytes"));
+        }
+    }
+
+    #[test]
+    fn dashboard_http_stream_returns_413_for_declared_oversized_body() {
+        let response = dashboard_http_stream_response_for(
+            b"POST /api/approve HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\n",
+            8,
+            DASHBOARD_HTTP_MAX_HEADER_BYTES,
+        );
+        assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+        assert!(response.contains("dashboard HTTP request body must be at most 8 bytes"));
+    }
+
     #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
@@ -9012,6 +9192,10 @@ done
             "8787",
             "--stream-timeout-ms",
             "12000",
+            "--max-body-bytes",
+            "1234",
+            "--max-header-bytes",
+            "4321",
             "--store-root",
             "agentk-sidecar/.agentk/team-store",
         ])
@@ -9024,6 +9208,8 @@ done
             port,
             admin_token_env,
             stream_timeout_ms,
+            max_body_bytes,
+            max_header_bytes,
             allow_non_local_bind,
             store_root,
         }) = dashboard_serve.command
@@ -9042,6 +9228,8 @@ done
         assert_eq!(port, 8787);
         assert_eq!(admin_token_env, "AGENTK_DASHBOARD_ADMIN_TOKEN");
         assert_eq!(stream_timeout_ms, 12000);
+        assert_eq!(max_body_bytes, 1234);
+        assert_eq!(max_header_bytes, 4321);
         assert!(!allow_non_local_bind);
         assert_eq!(
             store_root,
@@ -9065,6 +9253,17 @@ done
             panic!("expected dashboard-serve command");
         };
         assert!(allow_non_local_bind);
+
+        validate_dashboard_http_size_limits(1, 1)
+            .expect("positive dashboard HTTP bounds should pass");
+        let missing_body_limit = validate_dashboard_http_size_limits(0, 1)
+            .expect_err("zero body limit should fail")
+            .to_string();
+        assert!(missing_body_limit.contains("max-body-bytes"));
+        let missing_header_limit = validate_dashboard_http_size_limits(1, 0)
+            .expect_err("zero header limit should fail")
+            .to_string();
+        assert!(missing_header_limit.contains("max-header-bytes"));
 
         validate_dashboard_bind_security("127.0.0.1", false, false)
             .expect("loopback dashboard bind should not require auth");
@@ -10119,6 +10318,14 @@ can_deny = []
         );
         assert_eq!(ready_value["store_root_present"], serde_json::json!(true));
         assert_eq!(ready_value["admin_required"], serde_json::json!(true));
+        assert_eq!(
+            ready_value["max_body_bytes"],
+            serde_json::json!(DASHBOARD_HTTP_MAX_BODY_BYTES)
+        );
+        assert_eq!(
+            ready_value["max_header_bytes"],
+            serde_json::json!(DASHBOARD_HTTP_MAX_HEADER_BYTES)
+        );
         let ready_body = String::from_utf8(ready.body).expect("ready body should be utf8");
         assert!(!ready_body.contains(&trace_path.display().to_string()));
         assert!(!ready_body.contains(&decisions_path.display().to_string()));
@@ -10159,6 +10366,14 @@ can_deny = []
         assert!(metrics_body.contains("agentk_dashboard_store_root_configured 1\n"));
         assert!(metrics_body.contains("agentk_dashboard_store_root_present 1\n"));
         assert!(metrics_body.contains("agentk_dashboard_admin_required 1\n"));
+        assert!(metrics_body.contains(&format!(
+            "agentk_dashboard_max_body_bytes {}\n",
+            DASHBOARD_HTTP_MAX_BODY_BYTES
+        )));
+        assert!(metrics_body.contains(&format!(
+            "agentk_dashboard_max_header_bytes {}\n",
+            DASHBOARD_HTTP_MAX_HEADER_BYTES
+        )));
         assert!(!metrics_body.contains(&trace_path.display().to_string()));
         assert!(!metrics_body.contains(&decisions_path.display().to_string()));
         assert!(!metrics_body.contains(&permissions_path.display().to_string()));
