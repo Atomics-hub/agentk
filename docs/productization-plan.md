@@ -250,8 +250,9 @@ The safest first productization slice is the local team sidecar path:
     optional bearer token from environment, enforces HTTP protocol-version
     headers, supports env-configured additional browser origins, caps active
     sessions, reaps idle sessions, bounds request bodies and headers, applies
-    accepted connection read/write timeouts, reports local health/readiness for
-    service supervisors with redacted origin-count
+    accepted connection read/write timeouts, uses per-session runtime locks so
+    one busy downstream session does not block unrelated sessions, reports local
+    health/readiness for service supervisors with redacted origin-count
     metadata, requires an explicit authenticated opt-in for non-loopback HTTP
     bind hosts, emits browser safety headers, drains active sessions on bounded
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics

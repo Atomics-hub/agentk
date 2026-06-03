@@ -16148,6 +16148,8 @@ request/session counters. The readiness summary includes the supported MCP
 protocol version, active-session cap, idle timeout, request body cap, request
 header cap, configured stream-timeout, parsed request totals, rejection totals,
 session lifecycle totals, and allowed-origin counts without raw origin values.
+Initialized HTTP sessions use per-session runtime locks, so one busy downstream
+session does not block unrelated sessions from initializing or progressing.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
 an unsupported method response with the normal `Allow` header.
 When `AGENTK_MCP_HTTP_TOKEN` is set, `GET /readyz` and `GET /metrics` require
@@ -17755,6 +17757,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_MAX_HEADER_BYTES"));
         assert!(package_readme.contains("stream-timeout"));
         assert!(package_readme.contains("unbounded buffering"));
+        assert!(package_readme.contains("per-session runtime locks"));
         assert!(package_readme.contains("still-active initialized"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));

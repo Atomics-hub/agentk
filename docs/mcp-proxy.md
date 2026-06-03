@@ -130,7 +130,9 @@ requests; `/healthz` remains open for minimal liveness checks.
 `--max-active-sessions` caps initialized MCP HTTP
 sessions and excess initialize requests return 429.
 `--session-idle-timeout-ms` reaps idle initialized sessions and releases their
-downstream process/capacity. `--max-body-bytes` bounds the POST body read before
+downstream process/capacity. Initialized HTTP sessions use per-session runtime
+locks, so one busy downstream session does not block unrelated sessions from
+initializing or progressing. `--max-body-bytes` bounds the POST body read before
 JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
 SSE-shaped `GET` requests to the MCP endpoint require `Accept:
