@@ -210,10 +210,12 @@ The safest first productization slice is the local team sidecar path:
     oversized bodies, request lines, or headers.
     Dashboard request bodies are accepted only on approval decision endpoints,
     so review reads and probes cannot carry ignored payload bytes, and those write
-    endpoints require `Content-Type: application/json`. Decision endpoint paths
-    are matched exactly and reject query strings. Dashboard decision JSON object
-    keys must be unique and limited to `id`, `reviewer`, `reason`, and
-    `reviewer_token`. When dashboard admin auth is enabled, write clients must
+    endpoints require `Content-Type: application/json`. Duplicate
+    `Content-Type` headers fail closed before decision parsing. Decision
+    endpoint paths are matched exactly and reject query strings. Dashboard
+    decision JSON object keys must be unique and limited to `id`, `reviewer`,
+    `reason`, and `reviewer_token`. When dashboard admin auth is enabled, write
+    clients must
     choose one admin token carrier instead of sending both `Authorization` and
     `X-AgentK-Admin-Token`, and duplicated admin token carrier headers fail
     closed.
