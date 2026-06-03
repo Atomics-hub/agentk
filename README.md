@@ -447,13 +447,15 @@ bundle to validate policy, permissions, secret references, and client snippets
 without spawning downstream tools.
 For internal adapters that need a local TCP JSONL endpoint instead of stdio, run
 `dist/agentk-sidecar/bin/agentk-sidecar-tcp`; it loads the same reviewed
-sidecar bundle, listens on `127.0.0.1:9797` by default, bounds concurrent
-sessions with `AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS`, and writes per-session
-trace/session reports.
+sidecar bundle, runs the package self-check before binding, listens on
+`127.0.0.1:9797` by default, bounds concurrent sessions with
+`AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS`, and writes per-session trace/session
+reports.
 For MCP clients or adapters that support Streamable HTTP POST locally, run
 `dist/agentk-sidecar/bin/agentk-sidecar-http`; it loads the same reviewed
-bundle, binds localhost by default, answers allowed browser preflights, requires
-`AGENTK_MCP_HTTP_TOKEN` when that environment variable is set, enforces
+bundle, runs the package self-check before binding, binds localhost by default,
+answers allowed browser preflights, requires `AGENTK_MCP_HTTP_TOKEN` when that
+environment variable is set, enforces
 origin/session checks, rejects malformed `Mcp-Session-Id` values before
 lookup, and writes the same trace/session evidence. It serves local `GET`/`HEAD`
 operational probes at `/healthz`, `/readyz`, and `/metrics`,
@@ -613,7 +615,8 @@ dist/agentk-sidecar/bin/agentk-store-push --dry-run
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged dashboard and store workflow after review;
-the dashboard launcher runs the package self-check before serving.
+the sidecar gateway and dashboard launchers run the package self-check before
+serving.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.
