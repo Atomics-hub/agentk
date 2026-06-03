@@ -307,9 +307,10 @@ preflights for `POST`/`DELETE` plus known MCP headers without requiring auth,
 supports optional bearer auth via
 `AGENTK_MCP_HTTP_TOKEN` with one token header per request, returns
 `Mcp-Session-Id` on initialize, accepts subsequent POSTs with that session id,
-rejects unsupported `MCP-Protocol-Version` headers, returns direct JSON
-responses, and rejects oversized request bodies with 413 and excess initialized
-sessions with 429. POSTs require an exact `application/json` media type.
+rejects malformed session ids before lookup, rejects unsupported
+`MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
+oversized request bodies with 413 and excess initialized sessions with 429.
+POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, duplicate `Content-Length` headers,
 ambiguous MCP control headers, and `Transfer-Encoding` requests are rejected as
 invalid framing or control ambiguity. HTTP/1.1 requests must include exactly
@@ -426,8 +427,9 @@ For MCP clients or adapters that support Streamable HTTP POST locally, run
 `dist/agentk-sidecar/bin/agentk-sidecar-http`; it loads the same reviewed
 bundle, binds localhost by default, answers allowed browser preflights, requires
 `AGENTK_MCP_HTTP_TOKEN` when that environment variable is set, enforces
-origin/session checks, and writes the same trace/session evidence. It serves
-local `GET`/`HEAD` operational probes at `/healthz`, `/readyz`, and `/metrics`,
+origin/session checks, rejects malformed `Mcp-Session-Id` values before
+lookup, and writes the same trace/session evidence. It serves local `GET`/`HEAD`
+operational probes at `/healthz`, `/readyz`, and `/metrics`,
 and rejects unsupported `MCP-Protocol-Version` headers, oversized request
 bodies, or excess initialized sessions, and reaps idle sessions. `/readyz`
 reports the configured allowed-origin count without raw origin values;

@@ -113,8 +113,10 @@ same subprocess mediation path. Use repeated `--allow-origin` values or
 comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values to permit approved
 non-local browser adapters. If clients send `MCP-Protocol-Version`, AgentK
 requires it to match the supported protocol on initialize and the negotiated
-protocol on follow-up POST/DELETE requests. The adapter also serves local
-`GET`/`HEAD` probes at `/healthz`, `/readyz`, and `/metrics`;
+protocol on follow-up POST/DELETE requests. Follow-up `Mcp-Session-Id` values
+must match AgentK's generated 32-character lowercase hex shape before any
+session lookup runs. The adapter also serves local `GET`/`HEAD` probes at
+`/healthz`, `/readyz`, and `/metrics`;
 `/readyz` returns endpoint, supported protocol-version, active-session,
 active-session cap, idle timeout, request-concurrency, request body cap,
 configured allowed-origin count, and auth-required metadata without raw MCP
@@ -139,8 +141,10 @@ declared fixed-length body completes is rejected as invalid framing. Duplicate
 MCP control headers used for
 auth/session/protocol/origin/media negotiation are rejected with sanitized 400
 responses, and clients must choose either `Authorization` or
-`X-AgentK-MCP-Token` per request. POSTs require an exact `application/json`
-media type; parameters such as `charset` are allowed. Request bodies are
+`X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
+rejected with sanitized 400 responses before session lookup. POSTs require an
+exact `application/json` media type; parameters such as `charset` are allowed.
+Request bodies are
 accepted only on MCP `POST`; CORS preflights, DELETEs, GET/SSE placeholders, and
 operational probes reject bodies before auth, session, or probe handling.
 Allowed browser preflights must request `POST` or `DELETE` and only known MCP
