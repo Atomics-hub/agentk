@@ -308,9 +308,10 @@ preflights without requiring auth, supports optional bearer auth via
 subsequent POSTs with that session id, rejects unsupported
 `MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
 oversized request bodies with 413 and excess initialized sessions with 429.
-Duplicate `Content-Length` headers and `Transfer-Encoding` requests are rejected
-as invalid framing. Idle sessions are reaped after the configured timeout so
-abandoned clients do not hold downstream processes forever.
+Malformed request lines, duplicate `Content-Length` headers, and
+`Transfer-Encoding` requests are rejected as invalid framing. Idle sessions are
+reaped after the configured timeout so abandoned clients do not hold downstream
+processes forever.
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults.
 GET/SSE streams return 405 until resumable SSE support lands. It also serves
@@ -408,10 +409,10 @@ reports the configured allowed-origin count without raw origin values;
 `/metrics` reports redacted numeric gateway gauges for supervisors. Non-loopback
 HTTP binds fail closed unless `--allow-non-local-bind` is passed; the packaged
 launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
-those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Duplicate
-`Content-Length` headers and `Transfer-Encoding` requests are rejected as
-invalid framing. LAN/public exposure is therefore an explicit authenticated
-operator choice. Set
+those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
+lines, duplicate `Content-Length` headers, and `Transfer-Encoding` requests are
+rejected as invalid framing. LAN/public exposure is therefore an explicit
+authenticated operator choice. Set
 `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
 `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS`, and
 `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune packaged session/body behavior,

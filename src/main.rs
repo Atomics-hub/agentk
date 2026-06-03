@@ -1517,9 +1517,7 @@ fn read_dashboard_http_request_with_limits(
             "HTTP request headers are too large".to_string(),
         ));
     }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let target = parts.next().unwrap_or_default().to_string();
+    let (method, target) = parse_dashboard_http_request_line(&request_line)?;
     let mut content_length = 0usize;
     let mut content_length_seen = false;
     let mut headers = Vec::new();
@@ -1579,6 +1577,36 @@ fn read_dashboard_http_request_with_limits(
         headers,
         body,
     }))
+}
+
+fn parse_dashboard_http_request_line(line: &str) -> Result<(String, String), AgentKError> {
+    let mut parts = line.split_whitespace();
+    let Some(method) = parts.next() else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP request line is invalid".to_string(),
+        ));
+    };
+    let Some(target) = parts.next() else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP request line is invalid".to_string(),
+        ));
+    };
+    let Some(version) = parts.next() else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP request line is invalid".to_string(),
+        ));
+    };
+    if parts.next().is_some()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || !target.starts_with('/')
+        || method.is_empty()
+        || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "HTTP request line is invalid".to_string(),
+        ));
+    }
+    Ok((method.to_string(), target.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -6513,6 +6541,10 @@ done
         }
 
         for raw_request in [
+            b"GET /mcp\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/2.0\r\n\r\n".as_slice(),
+            b"GET http://example.invalid/mcp HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1 extra\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
         ] {
