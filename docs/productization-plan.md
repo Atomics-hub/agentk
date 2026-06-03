@@ -286,12 +286,12 @@ The safest first productization slice is the local team sidecar path:
     headers, dual token-carrier headers, and invalid JSON POST media types
     before spawning downstream MCP work. Follow-up
     `Mcp-Session-Id` values must match AgentK's generated lowercase hex session
-    shape before lookup. HTTP/1.1 requests
-    require exactly one syntactically valid `Host` authority with no userinfo,
-    wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
-    literals, so gateway handling does not guess across ambiguous authority
-    metadata. Truncated header sections and short fixed-length bodies are
-    rejected before request handling. The configured header byte cap is enforced
+    shape before lookup. All accepted HTTP requests require exactly one
+    syntactically valid `Host` authority with no userinfo, wildcards, paths,
+    queries, fragments, invalid ports, or unbracketed IPv6 literals, so gateway
+    handling does not guess across ambiguous authority metadata. Truncated
+    header sections and short fixed-length bodies are rejected before request
+    handling. The configured header byte cap is enforced
     while each request line and header line is read, so oversized unterminated
     lines fail closed before unbounded buffering. Request
     bodies are accepted only on MCP `POST`, so preflight/probe/session-control

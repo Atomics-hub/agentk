@@ -152,10 +152,9 @@ Only `Connection: close` is accepted; other `Connection` values plus
 unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
 gateway is not an HTTP proxy credential boundary.
-HTTP/1.1 requests must
-include exactly one syntactically valid `Host` authority with no userinfo,
-wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
-literals; duplicate `Host` headers are rejected for all accepted HTTP versions.
+All accepted HTTP requests must include exactly one syntactically valid `Host`
+authority with no userinfo, wildcards, paths, queries, fragments, invalid
+ports, or unbracketed IPv6 literals.
 EOF before the blank header terminator or before the declared fixed-length body
 completes is rejected as invalid framing. The configured header byte cap is
 enforced while each request line and header line is read, so oversized
