@@ -3463,6 +3463,43 @@ fn mcp_http_too_many_sessions_response(max_active_sessions: usize) -> DashboardH
     )
 }
 
+fn mcp_http_preflight_response(origin: &str) -> DashboardHttpResponse {
+    let mut response = DashboardHttpResponse {
+        status: "204 No Content",
+        content_type: "text/plain; charset=utf-8",
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    mcp_http_apply_cors_headers(&mut response, origin);
+    response.headers.push((
+        "Access-Control-Allow-Methods".to_string(),
+        "POST, DELETE, OPTIONS".to_string(),
+    ));
+    response.headers.push((
+        "Access-Control-Allow-Headers".to_string(),
+        "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version"
+            .to_string(),
+    ));
+    response
+        .headers
+        .push(("Access-Control-Max-Age".to_string(), "600".to_string()));
+    response
+}
+
+fn mcp_http_apply_cors_headers(response: &mut DashboardHttpResponse, origin: &str) {
+    response.headers.push((
+        "Access-Control-Allow-Origin".to_string(),
+        origin.to_string(),
+    ));
+    response
+        .headers
+        .push(("Vary".to_string(), "Origin".to_string()));
+    response.headers.push((
+        "Access-Control-Expose-Headers".to_string(),
+        "Mcp-Session-Id, WWW-Authenticate".to_string(),
+    ));
+}
+
 fn mcp_http_prune_expired_sessions(state: &Arc<McpHttpGatewayState>) -> Result<usize, AgentKError> {
     let now = Instant::now();
     let mut expired = Vec::new();
@@ -3504,11 +3541,33 @@ fn mcp_http_response(
     if path != state.endpoint {
         return Ok(dashboard_http_text("404 Not Found", "not found\n"));
     }
-    if !mcp_http_origin_allowed(request.header("origin"), &state.allow_origins) {
+    let origin = request.header("origin");
+    if !mcp_http_origin_allowed(origin, &state.allow_origins) {
         return Ok(dashboard_http_text(
             "403 Forbidden",
             "origin is not allowed\n",
         ));
+    }
+    let cors_origin = mcp_http_cors_origin(origin, &state.allow_origins);
+    if request.method == "OPTIONS" {
+        if let Some(origin) = cors_origin.as_deref() {
+            return Ok(mcp_http_preflight_response(origin));
+        }
+        let mut response = dashboard_http_text("204 No Content", "");
+        response.body.clear();
+        response.headers.push((
+            "Access-Control-Allow-Methods".to_string(),
+            "POST, DELETE, OPTIONS".to_string(),
+        ));
+        response.headers.push((
+            "Access-Control-Allow-Headers".to_string(),
+            "Accept, Content-Type, Authorization, X-AgentK-MCP-Token, Mcp-Session-Id, MCP-Protocol-Version"
+                .to_string(),
+        ));
+        response
+            .headers
+            .push(("Access-Control-Max-Age".to_string(), "600".to_string()));
+        return Ok(response);
     }
     if !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
         let mut response = dashboard_http_text("401 Unauthorized", "MCP HTTP token is required\n");
@@ -3516,11 +3575,14 @@ fn mcp_http_response(
             "WWW-Authenticate".to_string(),
             "Bearer realm=\"agentk-mcp\"".to_string(),
         ));
+        if let Some(origin) = cors_origin.as_deref() {
+            mcp_http_apply_cors_headers(&mut response, origin);
+        }
         return Ok(response);
     }
     mcp_http_prune_expired_sessions(state)?;
 
-    match request.method.as_str() {
+    let mut response = match request.method.as_str() {
         "POST" => mcp_http_post_response(request, state),
         "GET" => {
             let mut response = dashboard_http_text(
@@ -3541,7 +3603,11 @@ fn mcp_http_response(
                 .push(("Allow".to_string(), "POST, DELETE".to_string()));
             Ok(response)
         }
+    }?;
+    if let Some(origin) = cors_origin.as_deref() {
+        mcp_http_apply_cors_headers(&mut response, origin);
     }
+    Ok(response)
 }
 
 fn mcp_http_operational_response(
@@ -3838,15 +3904,25 @@ fn mcp_http_new_session_id() -> Result<String, AgentKError> {
     Ok(hex::encode(bytes))
 }
 
+fn mcp_http_cors_origin(origin: Option<&str>, allow_origins: &[String]) -> Option<String> {
+    let origin = origin?.trim();
+    if origin == "null"
+        || origin == "http://127.0.0.1"
+        || origin.starts_with("http://127.0.0.1:")
+        || origin == "http://localhost"
+        || origin.starts_with("http://localhost:")
+        || allow_origins.iter().any(|allowed| allowed == origin)
+    {
+        return Some(origin.to_string());
+    }
+    None
+}
+
 fn mcp_http_origin_allowed(origin: Option<&str>, allow_origins: &[String]) -> bool {
     let Some(origin) = origin else {
         return true;
     };
-    let origin = origin.trim();
-    origin == "null"
-        || origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("http://localhost")
-        || allow_origins.iter().any(|allowed| allowed == origin)
+    mcp_http_cors_origin(Some(origin), allow_origins).is_some()
 }
 
 fn mcp_http_auth_allowed(request: &DashboardHttpRequest, auth_token: Option<&str>) -> bool {
@@ -4722,6 +4798,14 @@ done
         let initialize_response =
             mcp_http_response(&initialize, &state).expect("initialize should produce response");
         assert_eq!(initialize_response.status, "200 OK");
+        assert_eq!(
+            response_header(&initialize_response, "Access-Control-Allow-Origin"),
+            Some("http://127.0.0.1:3000")
+        );
+        assert_eq!(
+            response_header(&initialize_response, "Access-Control-Expose-Headers"),
+            Some("Mcp-Session-Id, WWW-Authenticate")
+        );
         let session_id = response_header(&initialize_response, "Mcp-Session-Id")
             .expect("initialize should return session id")
             .to_string();
@@ -4810,6 +4894,121 @@ done
         let delete_response =
             mcp_http_response(&delete, &state).expect("delete should be accepted");
         assert_eq!(delete_response.status, "202 Accepted");
+    }
+
+    #[test]
+    fn mcp_http_response_handles_browser_cors_preflight_without_auth() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            allow_origins: vec!["https://console.example".to_string()],
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let preflight = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "http://localhost:5173"),
+                ("Access-Control-Request-Method", "POST"),
+                (
+                    "Access-Control-Request-Headers",
+                    "authorization, mcp-session-id, mcp-protocol-version",
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let response = mcp_http_response(&preflight, &state).expect("preflight should be handled");
+        assert_eq!(response.status, "204 No Content");
+        assert!(response.body.is_empty());
+        assert_eq!(
+            response_header(&response, "Access-Control-Allow-Origin"),
+            Some("http://localhost:5173")
+        );
+        assert_eq!(response_header(&response, "Vary"), Some("Origin"));
+        assert_eq!(
+            response_header(&response, "Access-Control-Allow-Methods"),
+            Some("POST, DELETE, OPTIONS")
+        );
+        assert!(
+            response_header(&response, "Access-Control-Allow-Headers")
+                .expect("preflight should list allowed headers")
+                .contains("MCP-Protocol-Version")
+        );
+        assert_eq!(response_header(&response, "WWW-Authenticate"), None);
+
+        let configured_origin = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [("Origin", "https://console.example")],
+            Vec::new(),
+        );
+        let configured_response = mcp_http_response(&configured_origin, &state)
+            .expect("configured origin preflight should be handled");
+        assert_eq!(configured_response.status, "204 No Content");
+        assert_eq!(
+            response_header(&configured_response, "Access-Control-Allow-Origin"),
+            Some("https://console.example")
+        );
+
+        let unauthorized_post = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Origin", "http://localhost:5173"),
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let unauthorized_response = mcp_http_response(&unauthorized_post, &state)
+            .expect("unauthorized request should still get CORS headers");
+        assert_eq!(unauthorized_response.status, "401 Unauthorized");
+        assert_eq!(
+            response_header(&unauthorized_response, "Access-Control-Allow-Origin"),
+            Some("http://localhost:5173")
+        );
+        assert_eq!(
+            response_header(&unauthorized_response, "WWW-Authenticate"),
+            Some("Bearer realm=\"agentk-mcp\"")
+        );
+
+        let bad_origin = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [("Origin", "https://evil.example.invalid")],
+            Vec::new(),
+        );
+        let bad_origin_response =
+            mcp_http_response(&bad_origin, &state).expect("bad origin should be rejected");
+        assert_eq!(bad_origin_response.status, "403 Forbidden");
+        assert_eq!(
+            response_header(&bad_origin_response, "Access-Control-Allow-Origin"),
+            None
+        );
+        let localhost_suffix = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [("Origin", "http://localhost.evil.example")],
+            Vec::new(),
+        );
+        let localhost_suffix_response = mcp_http_response(&localhost_suffix, &state)
+            .expect("localhost suffix origin should be rejected");
+        assert_eq!(localhost_suffix_response.status, "403 Forbidden");
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
     }
 
     #[test]

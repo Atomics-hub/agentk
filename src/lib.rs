@@ -15538,15 +15538,16 @@ their MCP client configuration supports a TCP JSONL adapter.
 
 `bin/agentk-sidecar-http` listens on `127.0.0.1:9798/mcp` by default and serves
 the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
-direct JSON responses, Origin validation, `MCP-Protocol-Version` enforcement,
-optional bearer-token auth from `AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent
-HTTP requests. Set `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`,
-`AGENTK_MCP_HTTP_ENDPOINT`, `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`,
-`AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`, and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to
-tune the local service; `AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale
-session cleanup. Service supervisors can probe `GET /healthz` for liveness and
-`GET /readyz` for a redacted readiness summary that includes the supported MCP
-protocol version, active-session cap, idle timeout, and request body cap.
+direct JSON responses, Origin validation, browser CORS preflight handling,
+`MCP-Protocol-Version` enforcement, optional bearer-token auth from
+`AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent HTTP requests. Set
+`AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`, `AGENTK_MCP_HTTP_ENDPOINT`,
+`AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, `AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`,
+and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service;
+`AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS` controls stale session cleanup. Service
+supervisors can probe `GET /healthz` for liveness and `GET /readyz` for a
+redacted readiness summary that includes the supported MCP protocol version,
+active-session cap, idle timeout, and request body cap.
 GET/SSE streams are currently rejected with 405 until the gateway grows
 resumable SSE support.
 

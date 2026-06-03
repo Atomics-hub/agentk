@@ -107,12 +107,12 @@ cargo run -- mcp-proxy-http \
 ```
 
 The HTTP adapter accepts local POST requests at the configured endpoint, rejects
-unsafe origins unless they are explicitly allowed, requires a bearer token when
-the configured token environment variable is set, and maps initialized MCP
-sessions onto the same subprocess mediation path. If clients send
-`MCP-Protocol-Version`, AgentK requires it to match the supported protocol on
-initialize and the negotiated protocol on follow-up POST/DELETE requests. The
-adapter also serves local `GET`/`HEAD` probes at `/healthz` and `/readyz`;
+unsafe origins unless they are explicitly allowed, answers allowed browser CORS
+preflights before bearer-token auth, and maps initialized MCP sessions onto the
+same subprocess mediation path. If clients send `MCP-Protocol-Version`, AgentK
+requires it to match the supported protocol on initialize and the negotiated
+protocol on follow-up POST/DELETE requests. The adapter also serves local
+`GET`/`HEAD` probes at `/healthz` and `/readyz`;
 `/readyz` returns endpoint, supported protocol-version, active-session,
 active-session cap, idle timeout, request-concurrency, request body cap, and
 auth-required metadata without raw MCP payloads. `--max-active-sessions` caps
