@@ -268,4 +268,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Fail closed and count unsupported MCP HTTP SSE GET requests.
 - [x] Validate MCP/dashboard HTTP Host and origin authority syntax.
 - [x] Reject MCP/dashboard HTTP expectation and upgrade headers.
+- [x] Reject MCP/dashboard HTTP hop-by-hop connection negotiation.
 - [ ] Build production MCP gateway transport hardening.

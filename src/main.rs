@@ -1598,6 +1598,19 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP expectation and upgrade headers are not supported".to_string(),
             ));
+        } else if name == "connection" {
+            if !is_supported_http_connection_header(&value) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP connection header is not supported".to_string(),
+                ));
+            }
+        } else if matches!(
+            name.as_str(),
+            "proxy-connection" | "keep-alive" | "te" | "trailer"
+        ) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP hop-by-hop headers are not supported".to_string(),
+            ));
         } else if name == "host" {
             if host_seen || !is_valid_http_host_header(&value) {
                 return Err(AgentKError::InvalidMcpRequest(
@@ -1721,6 +1734,13 @@ fn is_valid_http_host_header(value: &str) -> bool {
             .bytes()
             .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace() && byte != b',')
         && is_valid_http_authority(value)
+}
+
+fn is_supported_http_connection_header(value: &str) -> bool {
+    value
+        .split(',')
+        .map(|part| part.trim())
+        .all(|part| part.eq_ignore_ascii_case("close"))
 }
 
 #[derive(Debug, Clone)]
@@ -7943,6 +7963,15 @@ done
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: close, upgrade\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nProxy-Connection: keep-alive\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nKeep-Alive: timeout=5\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nTE: trailers\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nTrailer: X-Later\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
             let response = response_for(raw_request);
@@ -7954,6 +7983,11 @@ done
                 .expect("response should include body");
             assert_eq!(body, "invalid MCP HTTP request\n");
         }
+
+        let close_response =
+            response_for(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(close_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(close_response.ends_with("{\"ok\":true}"));
     }
 
     #[test]

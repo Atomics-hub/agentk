@@ -16091,6 +16091,9 @@ header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header are
 rejected as invalid framing because the adapter only accepts origin-form,
 CRLF-delimited, fixed-length HTTP/1.x requests with exactly space-delimited
 request lines and token-shaped header names without whitespace before `:`.
+Only `Connection: close` is accepted; other `Connection` values plus
+`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
+unsupported hop-by-hop negotiation.
 HTTP/1.1 requests must
 include exactly one syntactically valid `Host` authority with no userinfo,
 wildcards, paths, queries, fragments, invalid ports, or unbracketed IPv6
@@ -17721,6 +17724,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("header values"));
         assert!(package_readme.contains("any `Transfer-Encoding`, `Expect`, or `Upgrade` header"));
         assert!(package_readme.contains("`Expect`, or `Upgrade` header"));
+        assert!(package_readme.contains("Only `Connection: close` is accepted"));
+        assert!(package_readme.contains("unsupported hop-by-hop negotiation"));
         assert!(package_readme.contains("CRLF-delimited"));
         assert!(package_readme.contains("space-delimited"));
         assert!(package_readme.contains("request lines"));
