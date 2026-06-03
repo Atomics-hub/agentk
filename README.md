@@ -509,7 +509,9 @@ review reads and probes cannot smuggle ignored payload bytes. Configure the
 dashboard admin-token environment
 variable documented in
 [docs/mcp-proxy.md](docs/mcp-proxy.md) to require an admin header on write
-requests. If the reviewer has `token_env` in `team-permissions.toml`, scoped
+requests; clients must choose either the standard authorization bearer header or
+`X-AgentK-Admin-Token`, not both. If the reviewer has `token_env` in
+`team-permissions.toml`, scoped
 `/api/review?reviewer=<id>` reads must include `X-AgentK-Reviewer-Token`, and
 write requests must include `reviewer_token` matching that environment
 variable. Dashboard and MCP HTTP responses include no-store, no-sniff,

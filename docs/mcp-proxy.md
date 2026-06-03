@@ -258,7 +258,7 @@ durable team store. Dashboard request bodies are accepted only on those decision
 endpoints and must declare `Content-Type: application/json`, so review reads and
 probes cannot smuggle ignored payload bytes. Set `AGENTK_DASHBOARD_ADMIN_TOKEN`
 to require an admin bearer token or `X-AgentK-Admin-Token` header on dashboard
-write requests.
+write requests; clients must choose one admin token carrier, not both.
 Reviewers can set `token_env` in `team-permissions.toml`; those users must
 include `X-AgentK-Reviewer-Token` for scoped `/api/review?reviewer=<id>` reads
 and matching `reviewer_token` values in dashboard write requests. `agentk

@@ -277,4 +277,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject MCP/dashboard HTTP network-path request targets.
 - [x] Reject unexpected dashboard HTTP request bodies.
 - [x] Require JSON media types on dashboard write requests.
+- [x] Reject ambiguous dashboard admin token carriers.
 - [ ] Build production MCP gateway transport hardening.

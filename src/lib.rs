@@ -16059,7 +16059,8 @@ reject query strings. Dashboard request bodies are accepted only on approval
 decision endpoints and must declare `Content-Type: application/json`, so review
 reads and probes cannot smuggle ignored payload bytes. Set
 `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
-`X-AgentK-Admin-Token`, on write requests. If a
+`X-AgentK-Admin-Token`, on write requests; clients must choose one admin token
+carrier, not both. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
@@ -16629,7 +16630,8 @@ Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `X-AgentK-Admin-Token`, for `/api/approve` and `/api/deny` writes. Reviewer
 `token_env` entries in `sidecar/team-permissions.toml` are still enforced after
 the dashboard admin token passes. Dashboard write requests require
-`Content-Type: application/json`.
+`Content-Type: application/json`, and clients must choose one admin token
+carrier instead of sending both supported admin headers.
 
 The packaged dashboard launcher runs `bin/agentk-package-check --json` before
 serving. Run `bin/agentk-package-check --json` after copying the package or
@@ -17705,6 +17707,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("Dashboard probe paths are matched exactly"));
         assert!(package_readme.contains("reject query strings"));
         assert!(package_readme.contains("must declare `Content-Type: application/json`"));
+        assert!(package_readme.contains("choose one admin token"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin counts"));
         assert!(package_readme.contains("exact `scheme://authority`"));

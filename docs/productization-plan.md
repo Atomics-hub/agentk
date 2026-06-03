@@ -186,7 +186,9 @@ The safest first productization slice is the local team sidecar path:
     probe paths are matched exactly with query strings rejected. Dashboard
     request bodies are accepted only on approval decision endpoints, so review
     reads and probes cannot carry ignored payload bytes, and those write
-    endpoints require `Content-Type: application/json`.
+    endpoints require `Content-Type: application/json`. When dashboard admin
+    auth is enabled, write clients must choose one admin token carrier instead
+    of sending both `Authorization` and `X-AgentK-Admin-Token`.
 12. `store-sync` refreshes a live local durable team store with redacted current
     JSON views and normalized JSONL tables for traces, audit events, approval
     decisions, notification outbox rows, and reviewers. It remains
