@@ -3740,7 +3740,7 @@ fn mcp_http_response(
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
     let path = request.target.split('?').next().unwrap_or_default();
-    if path == "/healthz" || path == "/readyz" {
+    if path == "/healthz" || path == "/readyz" || path == "/metrics" {
         let mut response = mcp_http_operational_response(request, state, path)?;
         if request.method == "HEAD" {
             response.body.clear();
@@ -3847,6 +3847,14 @@ fn mcp_http_operational_response(
         .lock()
         .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))?
         .len();
+    if path == "/metrics" {
+        return Ok(DashboardHttpResponse {
+            status: "200 OK",
+            content_type: "text/plain; version=0.0.4; charset=utf-8",
+            headers: Vec::new(),
+            body: mcp_http_metrics_body(state, active_sessions, expired_sessions).into_bytes(),
+        });
+    }
     Ok(DashboardHttpResponse {
         status: "200 OK",
         content_type: "application/json",
@@ -3867,6 +3875,56 @@ fn mcp_http_operational_response(
             "auth_required": state.auth_token.is_some()
         }))?,
     })
+}
+
+fn mcp_http_metrics_body(
+    state: &McpHttpGatewayState,
+    active_sessions: usize,
+    expired_sessions_reaped: usize,
+) -> String {
+    format!(
+        "# HELP agentk_mcp_http_ready MCP HTTP gateway readiness state.\n\
+# TYPE agentk_mcp_http_ready gauge\n\
+agentk_mcp_http_ready 1\n\
+# HELP agentk_mcp_http_active_sessions Active initialized MCP HTTP sessions.\n\
+# TYPE agentk_mcp_http_active_sessions gauge\n\
+agentk_mcp_http_active_sessions {active_sessions}\n\
+# HELP agentk_mcp_http_max_active_sessions Configured active MCP HTTP session cap.\n\
+# TYPE agentk_mcp_http_max_active_sessions gauge\n\
+agentk_mcp_http_max_active_sessions {max_active_sessions}\n\
+# HELP agentk_mcp_http_expired_sessions_reaped Expired MCP HTTP sessions reaped while serving this operational request.\n\
+# TYPE agentk_mcp_http_expired_sessions_reaped gauge\n\
+agentk_mcp_http_expired_sessions_reaped {expired_sessions_reaped}\n\
+# HELP agentk_mcp_http_max_concurrent_requests Configured concurrent MCP HTTP request cap.\n\
+# TYPE agentk_mcp_http_max_concurrent_requests gauge\n\
+agentk_mcp_http_max_concurrent_requests {max_concurrent_requests}\n\
+# HELP agentk_mcp_http_max_body_bytes Configured MCP HTTP request body byte cap.\n\
+# TYPE agentk_mcp_http_max_body_bytes gauge\n\
+agentk_mcp_http_max_body_bytes {max_body_bytes}\n\
+# HELP agentk_mcp_http_max_header_bytes Configured MCP HTTP request header byte cap.\n\
+# TYPE agentk_mcp_http_max_header_bytes gauge\n\
+agentk_mcp_http_max_header_bytes {max_header_bytes}\n\
+# HELP agentk_mcp_http_session_idle_timeout_milliseconds Configured MCP HTTP idle-session timeout in milliseconds.\n\
+# TYPE agentk_mcp_http_session_idle_timeout_milliseconds gauge\n\
+agentk_mcp_http_session_idle_timeout_milliseconds {session_idle_timeout_ms}\n\
+# HELP agentk_mcp_http_stream_timeout_milliseconds Configured accepted-stream read/write timeout in milliseconds.\n\
+# TYPE agentk_mcp_http_stream_timeout_milliseconds gauge\n\
+agentk_mcp_http_stream_timeout_milliseconds {stream_timeout_ms}\n\
+# HELP agentk_mcp_http_configured_allowed_origins Configured additional allowed Origin count without raw origin values.\n\
+# TYPE agentk_mcp_http_configured_allowed_origins gauge\n\
+agentk_mcp_http_configured_allowed_origins {configured_allowed_origins}\n\
+# HELP agentk_mcp_http_auth_required Whether this MCP HTTP gateway requires bearer auth.\n\
+# TYPE agentk_mcp_http_auth_required gauge\n\
+agentk_mcp_http_auth_required {auth_required}\n",
+        max_active_sessions = state.max_active_sessions,
+        max_concurrent_requests = state.max_concurrent_requests,
+        max_body_bytes = state.max_body_bytes,
+        max_header_bytes = state.max_header_bytes,
+        session_idle_timeout_ms = state.session_idle_timeout.as_millis(),
+        stream_timeout_ms = state.stream_timeout.as_millis(),
+        configured_allowed_origins = state.allow_origins.len(),
+        auth_required = usize::from(state.auth_token.is_some())
+    )
 }
 
 fn mcp_http_protocol_version_error(
@@ -5867,6 +5925,35 @@ done
             "readyz should report allowed-origin counts without raw origin values"
         );
         assert_eq!(ready_json["auth_required"], serde_json::json!(true));
+
+        let metrics = mcp_http_response(
+            &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &state,
+        )
+        .expect("metrics should respond");
+        assert_eq!(metrics.status, "200 OK");
+        assert_eq!(
+            metrics.content_type,
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let metrics_body = String::from_utf8(metrics.body).expect("metrics should be utf8");
+        assert!(metrics_body.contains("agentk_mcp_http_ready 1\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_active_sessions 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_max_concurrent_requests 8\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_configured_allowed_origins 2\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_auth_required 1\n"));
+        assert!(
+            !metrics_body.contains("https://console.example"),
+            "metrics should report allowed-origin counts without raw origin values"
+        );
+
+        let metrics_head = mcp_http_response(
+            &dashboard_test_request("HEAD", "/metrics", Vec::new()),
+            &state,
+        )
+        .expect("metrics HEAD should respond");
+        assert_eq!(metrics_head.status, "200 OK");
+        assert!(metrics_head.body.is_empty());
 
         let ready_head = mcp_http_response(
             &dashboard_test_request("HEAD", "/readyz", Vec::new()),

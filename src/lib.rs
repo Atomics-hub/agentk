@@ -15560,9 +15560,10 @@ browser adapters. Non-loopback HTTP binds fail closed unless
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true` is set, which makes public or LAN
 exposure an explicit operator choice, and those binds also require a non-empty
 `AGENTK_MCP_HTTP_TOKEN`. Service supervisors can probe
-`GET /healthz` for liveness and `GET /readyz` for a redacted readiness summary
-that includes the supported MCP protocol version, active-session cap, idle
-timeout, request body cap, request header cap, configured stream-timeout, and
+`GET /healthz` for liveness, `GET /readyz` for a redacted readiness summary, and
+`GET /metrics` for redacted numeric gateway gauges. The readiness summary
+includes the supported MCP protocol version, active-session cap, idle timeout,
+request body cap, request header cap, configured stream-timeout, and
 allowed-origin counts without raw origin values.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
@@ -17016,6 +17017,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));
+        assert!(package_readme.contains("GET /metrics"));
+        assert!(package_readme.contains("redacted numeric gateway gauges"));
         let dashboard =
             fs::read_to_string(out.join("bin/agentk-dashboard")).expect("dashboard should read");
         assert!(dashboard.contains("dashboard"));

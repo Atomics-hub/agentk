@@ -114,11 +114,13 @@ comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values to permit approved
 non-local browser adapters. If clients send `MCP-Protocol-Version`, AgentK
 requires it to match the supported protocol on initialize and the negotiated
 protocol on follow-up POST/DELETE requests. The adapter also serves local
-`GET`/`HEAD` probes at `/healthz` and `/readyz`;
+`GET`/`HEAD` probes at `/healthz`, `/readyz`, and `/metrics`;
 `/readyz` returns endpoint, supported protocol-version, active-session,
 active-session cap, idle timeout, request-concurrency, request body cap,
 configured allowed-origin count, and auth-required metadata without raw MCP
-payloads or raw origin values. `--max-active-sessions` caps initialized MCP HTTP
+payloads or raw origin values. `/metrics` exposes the same operational posture
+as redacted numeric gateway gauges for service supervisors.
+`--max-active-sessions` caps initialized MCP HTTP
 sessions and excess initialize requests return 429.
 `--session-idle-timeout-ms` reaps idle initialized sessions and releases their
 downstream process/capacity. `--max-body-bytes` bounds the POST body read before
