@@ -15541,12 +15541,13 @@ the MCP Streamable HTTP POST path with stateful `Mcp-Session-Id` handling,
 direct JSON responses, Origin validation, `MCP-Protocol-Version` enforcement,
 optional bearer-token auth from `AGENTK_MCP_HTTP_TOKEN`, and bounded concurrent
 HTTP requests. Set `AGENTK_MCP_HTTP_HOST`, `AGENTK_MCP_HTTP_PORT`,
-`AGENTK_MCP_HTTP_ENDPOINT`, `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`, and
-`AGENTK_MCP_HTTP_MAX_BODY_BYTES` to tune the local service. Service supervisors
-can probe `GET /healthz` for liveness and `GET /readyz` for a redacted
-readiness summary that includes the supported MCP protocol version and request
-body cap. GET/SSE streams are currently rejected with 405 until the gateway
-grows resumable SSE support.
+`AGENTK_MCP_HTTP_ENDPOINT`, `AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS`,
+`AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS`, and `AGENTK_MCP_HTTP_MAX_BODY_BYTES` to
+tune the local service. Service supervisors can probe `GET /healthz` for
+liveness and `GET /readyz` for a redacted readiness summary that includes the
+supported MCP protocol version, active-session cap, and request body cap.
+GET/SSE streams are currently rejected with 405 until the gateway grows
+resumable SSE support.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push` are the packaged path from local review evidence to a
@@ -15721,6 +15722,7 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --port "${AGENTK_MCP_HTTP_PORT:-9798}" \
   --endpoint "${AGENTK_MCP_HTTP_ENDPOINT:-/mcp}" \
   --max-body-bytes "${AGENTK_MCP_HTTP_MAX_BODY_BYTES:-65536}" \
+  --max-active-sessions "${AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS:-32}" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}"
 "#
     .to_string()
@@ -16931,6 +16933,7 @@ can_deny = ["*"]
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_PORT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_ENDPOINT"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS"));
+        assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS"));
         assert!(http_launcher.contains("AGENTK_MCP_HTTP_MAX_BODY_BYTES"));
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
