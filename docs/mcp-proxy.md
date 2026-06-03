@@ -182,9 +182,10 @@ request. Sandboxed/file
 `Origin: null` requests are allowed only when `null` is explicitly configured.
 Browser adapters that call a non-local gateway name must be listed explicitly.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or
-`DELETE`, and only known MCP HTTP headers; missing origins and unsupported
-requested methods or headers return sanitized 400 responses, with CORS
-visibility only for allowed origins. The configured MCP endpoint and
+`DELETE`, and only known MCP HTTP headers; missing origins, unsupported
+requested methods or headers, and Private Network Access preflights return
+sanitized 400 responses, with CORS visibility only for allowed origins and no
+private-network grant. The configured MCP endpoint and
 operational probe paths are matched exactly; query strings on those paths
 return sanitized 400 responses before auth, session, probe, or CORS handling.
 Configured endpoints must be clean origin-form paths beginning with `/`,
