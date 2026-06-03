@@ -195,7 +195,7 @@ it drains any still-active initialized sessions and writes their redacted
 trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
-rejections, unsupported-SSE totals,
+rejections, CORS preflight validation rejections, unsupported-SSE totals,
 invalid-framing/header-too-large/body-too-large stream rejections, and session
 create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control
