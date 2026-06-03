@@ -239,4 +239,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Package a stable sidecar-check launcher for team bundle validation.
 - [x] Require explicit opt-in for non-loopback MCP HTTP binds.
 - [x] Require HTTP auth for non-loopback MCP HTTP binds.
+- [x] Add browser safety headers to dashboard and MCP HTTP responses.
 - [ ] Build production MCP gateway transport hardening.

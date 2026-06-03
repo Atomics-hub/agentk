@@ -15529,7 +15529,9 @@ reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
 also include `reviewer_token`. Decisions are appended to
 `sidecar/.agentk/approvals.jsonl`; the signed trace is not mutated. The packaged
 dashboard server also refreshes `sidecar/.agentk/team-store` so dashboard reads
-and reviewer decisions maintain the live durable team store.
+and reviewer decisions maintain the live durable team store. Dashboard and MCP
+HTTP responses include no-store, no-sniff, no-referrer, anti-framing, and
+local-only CSP headers for browser-facing deployments.
 
 `bin/agentk-sidecar-tcp` listens on `127.0.0.1:9797` by default, accepts the
 configured number of newline-delimited MCP JSON-RPC TCP sessions, and proxies
@@ -16996,6 +16998,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND"));
         assert!(package_readme.contains("explicit operator choice"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(package_readme.contains("no-sniff"));
+        assert!(package_readme.contains("local-only CSP"));
         assert!(package_readme.contains("MCP-Protocol-Version"));
         assert!(package_readme.contains("GET /healthz"));
         assert!(package_readme.contains("GET /readyz"));

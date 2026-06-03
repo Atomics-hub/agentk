@@ -2560,7 +2560,7 @@ fn write_dashboard_http_response(
 ) -> Result<(), AgentKError> {
     write!(
         stream,
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nConnection: close\r\n",
         response.status,
         response.content_type,
         response.body.len()
@@ -4679,6 +4679,32 @@ mod tests {
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn http_response_writer_emits_security_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have addr");
+        let writer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            let response = dashboard_http_text("200 OK", "ok\n");
+            write_dashboard_http_response(&mut stream, &response)
+                .expect("test response should write");
+        });
+        let mut client = TcpStream::connect(addr).expect("test client should connect");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("test client should read response");
+        writer.join().expect("writer thread should finish");
+        assert!(response.contains("Cache-Control: no-store\r\n"));
+        assert!(response.contains("X-Content-Type-Options: nosniff\r\n"));
+        assert!(response.contains("Referrer-Policy: no-referrer\r\n"));
+        assert!(response.contains("X-Frame-Options: DENY\r\n"));
+        assert!(response.contains("Content-Security-Policy:"));
+        assert!(response.contains("frame-ancestors 'none'"));
     }
 
     #[cfg(unix)]
