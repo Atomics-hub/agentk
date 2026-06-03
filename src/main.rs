@@ -2578,6 +2578,12 @@ fn dashboard_http_decision(
     store_root: Option<&PathBuf>,
     decision: ApprovalDecision,
 ) -> DashboardHttpResponse {
+    if admin_token.is_some() && dashboard_admin_token_carriers_are_ambiguous(request) {
+        return dashboard_http_text(
+            "400 Bad Request",
+            "dashboard admin token must use either Authorization or X-AgentK-Admin-Token\n",
+        );
+    }
     if let Err(error) = dashboard_verify_admin_token(request, admin_token) {
         return dashboard_http_text("401 Unauthorized", &format!("{error}\n"));
     }
@@ -2636,6 +2642,10 @@ fn dashboard_verify_admin_token(
         ));
     }
     Ok(())
+}
+
+fn dashboard_admin_token_carriers_are_ambiguous(request: &DashboardHttpRequest) -> bool {
+    request.header("authorization").is_some() && request.header("x-agentk-admin-token").is_some()
 }
 
 fn dashboard_admin_token_from_request(request: &DashboardHttpRequest) -> Option<String> {
@@ -8836,6 +8846,36 @@ can_deny = []
         let wrong_admin_body =
             String::from_utf8(wrong_admin.body).expect("error body should be utf8");
         assert!(wrong_admin_body.contains("dashboard admin token did not match"));
+
+        let dual_admin_carrier = dashboard_http_response(
+            &dashboard_test_request_with_headers(
+                "POST",
+                "/api/approve",
+                [
+                    ("Authorization", "Bearer TOKEN_SHOULD_NOT_REFLECT"),
+                    ("X-AgentK-Admin-Token", "TOKEN_SHOULD_NOT_REFLECT"),
+                    ("Content-Type", "application/json"),
+                ],
+                serde_json::json!({
+                    "id": approval_id,
+                    "reviewer": "tom",
+                    "reason": "ambiguous dashboard admin token",
+                    "reviewer_token": "dashboard-token"
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            Some("server-admin"),
+            None,
+        );
+        assert_eq!(dual_admin_carrier.status, "400 Bad Request");
+        let dual_admin_carrier_body =
+            String::from_utf8(dual_admin_carrier.body).expect("admin carrier body should be utf8");
+        assert!(dual_admin_carrier_body.contains("dashboard admin token"));
+        assert!(!dual_admin_carrier_body.contains("TOKEN_SHOULD_NOT_REFLECT"));
 
         let approved = dashboard_http_response(
             &dashboard_test_request_with_headers(
