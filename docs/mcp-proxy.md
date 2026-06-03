@@ -147,7 +147,9 @@ in header values, and any `Transfer-Encoding`, `Content-Encoding`, `Expect`, or
 with sanitized 400 responses because the adapter only accepts origin-form
 paths beginning with exactly one `/`, fragment-free, CRLF-delimited,
 unencoded fixed-length HTTP/1.x requests with exactly space-delimited request
-lines and token-shaped header names without whitespace before `:`.
+lines and token-shaped header names without whitespace before `:`. WebSocket
+handshake headers such as `Sec-WebSocket-Key` and `Sec-WebSocket-Protocol` are
+rejected because this gateway is not a WebSocket transport.
 Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as

@@ -316,4 +316,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Reject ambient MCP/dashboard HTTP cookie credential headers.
 - [x] Reject MCP HTTP Private Network Access CORS preflights.
 - [x] Reject MCP/dashboard HTTP request content encodings.
+- [x] Reject MCP/dashboard HTTP WebSocket handshake headers.
 - [ ] Build production MCP gateway transport hardening.
