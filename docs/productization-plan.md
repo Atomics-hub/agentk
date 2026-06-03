@@ -282,7 +282,9 @@ The safest first productization slice is the local team sidecar path:
     sanitized 400 responses.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
-    rejected before request handling. Request lines must be exactly
+    rejected before request handling. Forwarded proxy metadata such as
+    `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has
+    an explicit trusted-proxy mode. Request lines must be exactly
     space-delimited, request targets must begin with exactly one `/` and cannot
     contain fragments, and header names cannot carry whitespace before `:`. The
     HTTP gateway validates configured
