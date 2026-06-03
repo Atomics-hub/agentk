@@ -5620,7 +5620,10 @@ fn is_valid_http_authority(authority: &str) -> bool {
         let Some((host, suffix)) = rest.split_once(']') else {
             return false;
         };
-        if host.is_empty() {
+        if !host
+            .parse::<IpAddr>()
+            .is_ok_and(|addr| matches!(addr, IpAddr::V6(_)))
+        {
             return false;
         }
         return suffix.is_empty() || suffix.strip_prefix(':').is_some_and(mcp_http_is_valid_port);
@@ -7773,6 +7776,8 @@ done
             "https://console.example:99999",
             "https://2001:db8::1",
             "http://[::1",
+            "http://[not-ip]",
+            "http://[127.0.0.1]",
             "http://[::1]:bad",
             "console.example",
             "1bad://console.example",
@@ -9255,6 +9260,8 @@ done
             b"GET /mcp HTTP/1.1\r\nHost: localhost:\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost:99999\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: 2001:db8::1\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: [not-ip]\r\n\r\n".as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: [127.0.0.1]\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: [::1]:bad\r\n\r\n".as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nBadHeader\r\n\r\n".as_slice(),

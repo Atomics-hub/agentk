@@ -310,4 +310,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Require existing sessions on unsupported MCP HTTP SSE GET requests.
 - [x] Require explicit opt-in for MCP HTTP `Origin: null` requests.
 - [x] Require local Host authority for built-in MCP HTTP browser origins.
+- [x] Reject invalid bracketed MCP/dashboard HTTP authority literals.
 - [ ] Build production MCP gateway transport hardening.

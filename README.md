@@ -342,8 +342,8 @@ whitespace, or control characters, and cannot reuse `/healthz`, `/readyz`, or
 Use `--allow-origin` or comma-separated `AGENTK_MCP_HTTP_ALLOW_ORIGINS` values
 to permit additional browser origins beyond the built-in local defaults. Extra
 origins must be exact `scheme://authority` values or `null`, without paths,
-queries, fragments, wildcards, whitespace, invalid ports, or unbracketed IPv6;
-built-in
+queries, fragments, wildcards, whitespace, invalid ports, invalid bracketed IP
+literals, or unbracketed IPv6; built-in
 localhost/loopback origins only match exact hosts with optional numeric ports
 and require a localhost/loopback `Host` authority on the request.
 Sandboxed/file `Origin: null` requests are allowed only when `null` is
@@ -471,12 +471,12 @@ reports the configured allowed-origin count without raw origin values;
 `/metrics` reports redacted numeric gateway gauges plus cumulative request,
 rejection, and session lifecycle counters for supervisors. Additional allowed
 origins must be exact `scheme://authority` values or `null`, not wildcard or
-path-bearing URL patterns, and IPv6 origins must be bracketed. `Origin: null`
-is not a built-in local origin; list `null` explicitly only for trusted
-sandboxed/file browser adapters. Built-in localhost/loopback origins apply only
-to requests with localhost/loopback `Host`; browser adapters that call a
-non-local gateway name must be listed explicitly. Non-loopback HTTP binds fail
-closed unless
+path-bearing URL patterns, and IPv6 origins must be bracketed with a valid
+IPv6 literal. `Origin: null` is not a built-in local origin; list `null`
+explicitly only for trusted sandboxed/file browser adapters. Built-in
+localhost/loopback origins apply only to requests with localhost/loopback
+`Host`; browser adapters that call a non-local gateway name must be listed
+explicitly. Non-loopback HTTP binds fail closed unless
 `--allow-non-local-bind` is passed; the packaged launcher only passes it when
 `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and those binds also require a
 non-empty `AGENTK_MCP_HTTP_TOKEN`. The packaged HTTP launcher forwards extra
