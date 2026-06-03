@@ -3869,6 +3869,12 @@ fn mcp_http_response(
     {
         return Ok(response);
     }
+    if (path == state.endpoint || matches!(path, "/healthz" | "/readyz" | "/metrics"))
+        && let Some(response) =
+            mcp_http_unexpected_body_error(request, path, state.endpoint.as_str())
+    {
+        return Ok(response);
+    }
     if path == "/healthz" || path == "/readyz" || path == "/metrics" {
         let mut response =
             if path != "/healthz" && !mcp_http_auth_allowed(request, state.auth_token.as_deref()) {
@@ -4116,6 +4122,21 @@ fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<Dashb
     }
 
     None
+}
+
+fn mcp_http_unexpected_body_error(
+    request: &DashboardHttpRequest,
+    path: &str,
+    endpoint: &str,
+) -> Option<DashboardHttpResponse> {
+    if request.body.is_empty() || (path == endpoint && request.method == "POST") {
+        return None;
+    }
+
+    Some(dashboard_http_text(
+        "400 Bad Request",
+        "MCP HTTP request bodies are only accepted on POST\n",
+    ))
 }
 
 fn mcp_http_post_response(
@@ -5772,6 +5793,72 @@ done
 
         let response = mcp_http_response(&request, &state).expect("invalid media type should fail");
         assert_eq!(response.status, "415 Unsupported Media Type");
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mcp_http_response_rejects_unexpected_request_bodies() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let cases = vec![
+            dashboard_test_request("GET", "/mcp", "BODY_SHOULD_NOT_REFLECT"),
+            dashboard_test_request_with_headers(
+                "OPTIONS",
+                "/mcp",
+                [("Origin", "http://localhost:5173")],
+                "BODY_SHOULD_NOT_REFLECT",
+            ),
+            dashboard_test_request_with_headers(
+                "DELETE",
+                "/mcp",
+                [
+                    ("Mcp-Session-Id", "session-a"),
+                    ("Authorization", "Bearer secret"),
+                ],
+                "BODY_SHOULD_NOT_REFLECT",
+            ),
+            dashboard_test_request("GET", "/healthz", "BODY_SHOULD_NOT_REFLECT"),
+            dashboard_test_request_with_headers(
+                "HEAD",
+                "/readyz",
+                [("Authorization", "Bearer secret")],
+                "BODY_SHOULD_NOT_REFLECT",
+            ),
+            dashboard_test_request_with_headers(
+                "GET",
+                "/metrics",
+                [("Authorization", "Bearer secret")],
+                "BODY_SHOULD_NOT_REFLECT",
+            ),
+        ];
+
+        for request in cases {
+            let response =
+                mcp_http_response(&request, &state).expect("unexpected body should fail closed");
+            assert_eq!(response.status, "400 Bad Request");
+            let response_body = String::from_utf8_lossy(&response.body);
+            assert!(response_body.contains("MCP HTTP request bodies"));
+            assert!(!response_body.contains("BODY_SHOULD_NOT_REFLECT"));
+        }
         assert!(
             state
                 .sessions
