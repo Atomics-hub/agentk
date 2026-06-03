@@ -312,14 +312,14 @@ rejects malformed session ids before lookup, rejects unsupported
 oversized request bodies with 413 and excess initialized sessions with 429.
 POSTs require an exact `application/json` media type.
 Malformed request lines or header lines, including invalid UTF-8, duplicate
-`Content-Length` headers, LF-only line endings, ambiguous MCP control headers,
-and `Transfer-Encoding` requests are rejected as invalid framing or control
-ambiguity. Request lines must be exactly space-delimited, and header names must
-be token-shaped without whitespace before `:`. HTTP/1.1 requests must include
-exactly one nonblank `Host` header. Incomplete header blocks and short
-fixed-length bodies are rejected before request handling. Request bodies are
-accepted only on MCP `POST`; operational probes and other MCP methods reject
-bodies before auth or session handling.
+`Content-Length` headers, LF-only line endings, control characters in header
+values, ambiguous MCP control headers, and any `Transfer-Encoding` header are
+rejected as invalid framing or control ambiguity. Request lines must be exactly
+space-delimited, and header names must be token-shaped without whitespace
+before `:`. HTTP/1.1 requests must include exactly one nonblank `Host` header.
+Incomplete header blocks and short fixed-length bodies are rejected before
+request handling. Request bodies are accepted only on MCP `POST`; operational
+probes and other MCP methods reject bodies before auth or session handling.
 Unsupported preflight methods or headers return sanitized 400 responses with
 CORS visibility for allowed origins. Idle sessions are reaped
 after the configured timeout so abandoned clients do not hold downstream
@@ -445,10 +445,11 @@ binds fail closed unless `--allow-non-local-bind` is passed; the packaged
 launcher only passes it when `AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=true`, and
 those binds also require a non-empty `AGENTK_MCP_HTTP_TOKEN`. Malformed request
 lines or header lines, including invalid UTF-8, duplicate `Content-Length`
-headers, LF-only line endings, and `Transfer-Encoding` requests are rejected as
-invalid framing; request lines must be exactly space-delimited, header names
-must be token-shaped without whitespace before `:`, and duplicate MCP control
-headers and dual token-carrier headers are rejected as ambiguous.
+headers, LF-only line endings, control characters in header values, and any
+`Transfer-Encoding` header are rejected as invalid framing; request lines must
+be exactly space-delimited, header names must be token-shaped without
+whitespace before `:`, and duplicate MCP control headers and dual token-carrier
+headers are rejected as ambiguous.
 HTTP/1.1 requests must include exactly one nonblank `Host` header, and
 truncated headers or bodies are rejected before request handling. Request bodies
 are accepted only on MCP `POST`, and CORS preflights are limited to `POST`,

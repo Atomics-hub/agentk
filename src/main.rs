@@ -1566,6 +1566,11 @@ fn read_dashboard_http_request_with_limits(
                 "HTTP header line is invalid".to_string(),
             ));
         }
+        if !is_valid_http_header_value(value) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP header line is invalid".to_string(),
+            ));
+        }
         let name = name.to_ascii_lowercase();
         let value = value.trim().to_string();
         if name == "content-length" {
@@ -1585,7 +1590,7 @@ fn read_dashboard_http_request_with_limits(
                     "HTTP request body is too large".to_string(),
                 ));
             }
-        } else if name == "transfer-encoding" && !value.is_empty() {
+        } else if name == "transfer-encoding" {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP transfer-encoding is not supported".to_string(),
             ));
@@ -1696,6 +1701,14 @@ fn is_valid_http_header_name(name: &str) -> bool {
                         | b'~'
                 )
         })
+}
+
+fn is_valid_http_header_value(value: &str) -> bool {
+    value
+        .strip_suffix("\r\n")
+        .unwrap_or(value)
+        .bytes()
+        .all(|byte| byte == b'\t' || !byte.is_ascii_control())
 }
 
 fn is_valid_http_host_header(value: &str) -> bool {
@@ -7600,7 +7613,10 @@ done
             b"POST /mcp HTTP/1.1\r\nHost : localhost\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length : 0\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: \xff\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: value\0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Bad: value\rbad\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
