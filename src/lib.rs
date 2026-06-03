@@ -13998,6 +13998,13 @@ pub fn package_sidecar_bundle(
         }
     }
 
+    let package_check = check_sidecar_package(out)?;
+    if !package_check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "generated sidecar package failed self-check".to_string(),
+        ));
+    }
+
     Ok(SidecarPackageReport {
         root: root.to_path_buf(),
         package: out.to_path_buf(),
@@ -16026,7 +16033,7 @@ agentk permissions --path sidecar/team-permissions.toml
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
-`bin/agentk-sidecar-check --json`. It also serves `/healthz` and a redacted
+`bin/agentk-package-check --json`. It also serves `/healthz` and a redacted
 `/readyz` for service supervisors. Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require
 an admin bearer token, or `X-AgentK-Admin-Token`, on write requests. If a
 reviewer has `token_env` in `sidecar/team-permissions.toml`, write requests must
@@ -16096,7 +16103,7 @@ processes that need stable current JSON and normalized JSONL tables.
 `--dry-run`, `--database-url-env`, and `--psql`.
 
 `deploy/` contains service/container templates wired to the packaged launchers.
-The dashboard service/container path runs the package-local sidecar check before
+The dashboard service/container path runs the package-local package check before
 serving. Treat the templates as reviewed starting points: set the real `agentk`
 binary path, environment variables, and downstream MCP server command before
 production use.
@@ -16371,7 +16378,7 @@ set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
-"$DIR/agentk-sidecar-check" --json >/dev/null
+"$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" dashboard-serve "$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl" \
   --decisions "$ROOT/sidecar/.agentk/approvals.jsonl" \
   --permissions "$ROOT/sidecar/team-permissions.toml" \
@@ -16539,7 +16546,7 @@ Set `AGENTK_DASHBOARD_ADMIN_TOKEN` to require an admin bearer token, or
 `token_env` entries in `sidecar/team-permissions.toml` are still enforced after
 the dashboard admin token passes.
 
-The packaged dashboard launcher runs `bin/agentk-sidecar-check --json` before
+The packaged dashboard launcher runs `bin/agentk-package-check --json` before
 serving. Run `bin/agentk-package-check --json` after copying the package or
 building an image to validate the package manifest, launcher modes, deploy
 templates, storage schema, and embedded sidecar bundle. Service and container
@@ -16607,6 +16614,9 @@ args:
 # Package check:
 {}
 
+# Sidecar bundle check:
+{}
+
 # Dashboard:
 {}
 
@@ -16620,6 +16630,7 @@ args:
 {}
 "#,
         package_root.join("bin/agentk-sidecar").display(),
+        package_root.join("bin/agentk-package-check").display(),
         package_root.join("bin/agentk-sidecar-check").display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-dashboard-server").display(),
@@ -17675,7 +17686,7 @@ can_deny = ["*"]
         let dashboard_server = fs::read_to_string(out.join("bin/agentk-dashboard-server"))
             .expect("dashboard server should read");
         assert!(dashboard_server.contains("dashboard-serve"));
-        assert!(dashboard_server.contains("agentk-sidecar-check"));
+        assert!(dashboard_server.contains("agentk-package-check"));
         assert!(dashboard_server.contains("AGENTK_BIN"));
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
@@ -17702,6 +17713,7 @@ can_deny = ["*"]
         assert!(client.contains("bin/agentk-sidecar"));
         let command = fs::read_to_string(out.join("clients/codex-cursor-command.txt"))
             .expect("command snippet should read");
+        assert!(command.contains("agentk-package-check"));
         assert!(command.contains("agentk-sidecar-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));
@@ -17717,7 +17729,6 @@ can_deny = ["*"]
         assert!(compose.contains("127.0.0.1:8765:8765"));
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
-        assert!(deploy_readme.contains("agentk-sidecar-check --json"));
         assert!(deploy_readme.contains("agentk-package-check --json"));
         assert!(!out.join("sidecar/.agentk").exists());
         let package_check_report =

@@ -514,7 +514,7 @@ dist/agentk-sidecar/bin/agentk-store-push --dry-run
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged dashboard and store workflow after review;
-the dashboard launcher preflights the packaged sidecar before serving.
+the dashboard launcher runs the package self-check before serving.
 
 This is the productization path: sidecar first, then approval broker,
 dashboard, multi-user policy, and local packaging.
