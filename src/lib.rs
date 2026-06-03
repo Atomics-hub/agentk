@@ -16294,7 +16294,9 @@ unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
 gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata such
 as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
-explicit trusted-proxy mode.
+explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
+`Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
+tokens instead.
 All accepted HTTP requests must include exactly one syntactically valid `Host`
 authority with no userinfo, wildcards, paths, queries, fragments, invalid ports,
 invalid DNS labels, percent escapes, or unbracketed IPv6 literals.
@@ -18147,6 +18149,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("Forwarded"));
         assert!(package_readme.contains("X-Forwarded-*"));
         assert!(package_readme.contains("trusted-proxy mode"));
+        assert!(package_readme.contains("Ambient cookie headers"));
+        assert!(package_readme.contains("explicit bearer/reviewer"));
+        assert!(package_readme.contains("tokens instead"));
         assert!(package_readme.contains("syntactically valid `Host`"));
         assert!(package_readme.contains("authority with no userinfo"));
         assert!(package_readme.contains("unbracketed IPv6"));

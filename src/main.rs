@@ -1736,6 +1736,10 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP forwarded headers are not supported".to_string(),
             ));
+        } else if is_unsupported_cookie_http_header(&name) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "HTTP cookie headers are not supported".to_string(),
+            ));
         } else if name == "host" {
             if host_seen || !is_valid_http_host_header(&value) {
                 return Err(AgentKError::InvalidMcpRequest(
@@ -1901,6 +1905,10 @@ fn is_supported_http_connection_header(value: &str) -> bool {
 
 fn is_untrusted_forwarded_http_header(name: &str) -> bool {
     name == "forwarded" || name.starts_with("x-forwarded-") || name == "x-real-ip"
+}
+
+fn is_unsupported_cookie_http_header(name: &str) -> bool {
+    matches!(name, "cookie" | "cookie2" | "set-cookie" | "set-cookie2")
 }
 
 #[derive(Debug, Clone)]
@@ -9136,6 +9144,23 @@ done
     }
 
     #[test]
+    fn dashboard_http_stream_rejects_ambient_cookie_headers() {
+        for raw_request in [
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nCookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nSet-Cookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n".as_slice(),
+        ] {
+            let response = dashboard_http_stream_response_for(
+                raw_request,
+                DASHBOARD_HTTP_MAX_BODY_BYTES,
+                DASHBOARD_HTTP_MAX_HEADER_BYTES,
+            );
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid dashboard HTTP request"));
+            assert!(!response.contains("COOKIE_SECRET_SHOULD_NOT_REFLECT"));
+        }
+    }
+
+    #[test]
     fn mcp_http_stream_returns_431_for_oversized_headers() {
         fn response_for(raw_request: &[u8]) -> (String, McpHttpGatewayMetrics) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
@@ -9365,6 +9390,10 @@ done
                 .as_slice(),
             b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nX-Real-IP: SPOOFED_IP\r\n\r\n"
                 .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nCookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n"
+                .as_slice(),
+            b"GET /mcp HTTP/1.1\r\nHost: localhost\r\nSet-Cookie: COOKIE_SECRET_SHOULD_NOT_REFLECT=1\r\n\r\n"
+                .as_slice(),
             b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabc".as_slice(),
         ] {
             let (response, metrics) = response_for(raw_request);
@@ -9375,6 +9404,7 @@ done
             assert!(!response.contains("PROXY_SECRET_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("PROXY_REALM_SHOULD_NOT_REFLECT"));
             assert!(!response.contains("SPOOFED"));
+            assert!(!response.contains("COOKIE_SECRET_SHOULD_NOT_REFLECT"));
             let body = response
                 .split("\r\n\r\n")
                 .nth(1)

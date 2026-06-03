@@ -284,7 +284,9 @@ The safest first productization slice is the local team sidecar path:
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
     rejected before request handling. Forwarded proxy metadata such as
     `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has
-    an explicit trusted-proxy mode. Request lines must be exactly
+    an explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
+    `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
+    tokens instead. Request lines must be exactly
     space-delimited, request targets must begin with exactly one `/` and cannot
     contain fragments, and header names cannot carry whitespace before `:`. The
     HTTP gateway validates configured
