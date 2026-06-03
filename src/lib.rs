@@ -28,7 +28,15 @@ const MCP_SUBPROCESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MCP_SUBPROCESS_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 const MCP_SUBPROCESS_MAX_SKIPPED_NOTIFICATIONS: usize = 32;
 const SIDECAR_PACKAGE_SCHEMA_VERSION: u32 = 1;
+const SIDECAR_PACKAGE_LOCK_SCHEMA_VERSION: u32 = 1;
 const SIDECAR_PACKAGE_NAME: &str = "agentk-team-sidecar";
+const SIDECAR_PACKAGE_LOCK: &str = "package.lock.json";
+const SIDECAR_PACKAGE_RUNTIME_STATE: &str = "sidecar/.agentk";
+const SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const SIDECAR_PACKAGE_INSTALL_RECEIPT: &str = "sidecar/.agentk/install-receipt.json";
+const SIDECAR_PACKAGE_RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const SIDECAR_PACKAGE_LOCK_EXCLUDES: &[&str] =
+    &[SIDECAR_PACKAGE_LOCK, SIDECAR_PACKAGE_RUNTIME_STATE];
 const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-package-info",
     "bin/agentk-package-check",
@@ -39,10 +47,17 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
+    "bin/agentk-identity-check",
     "bin/agentk-store-export",
     "bin/agentk-store-check",
     "bin/agentk-store-sync",
     "bin/agentk-store-push",
+    "bin/agentk-store-slack",
+    "bin/agentk-store-slack-send",
+    "bin/agentk-store-github",
+    "bin/agentk-store-github-send",
+    "bin/agentk-store-email",
+    "bin/agentk-store-email-send",
 ];
 const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-safe-agent-demo",
@@ -52,10 +67,17 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
+    "bin/agentk-identity-check",
     "bin/agentk-store-export",
     "bin/agentk-store-check",
     "bin/agentk-store-sync",
     "bin/agentk-store-push",
+    "bin/agentk-store-slack",
+    "bin/agentk-store-slack-send",
+    "bin/agentk-store-github",
+    "bin/agentk-store-github-send",
+    "bin/agentk-store-email",
+    "bin/agentk-store-email-send",
 ];
 const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
     "clients/claude-desktop.mcp.json",
@@ -70,6 +92,12 @@ const SIDECAR_PACKAGE_DEPLOY_TEMPLATES: &[&str] = &[
     "deploy/docker/Dockerfile",
     "deploy/docker/compose.yml",
     "deploy/README.md",
+];
+const SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES: &[&str] = &[
+    "deploy/env/sidecar-http.env.example",
+    "deploy/env/dashboard.env.example",
+    "deploy/env/store-postgres.env.example",
+    "deploy/env/notifications.env.example",
 ];
 const DEV_SIGNING_KEY_BYTES: [u8; 32] = [0x41; 32];
 pub const SIGNING_KEY_ENV: &str = "AGENTK_SIGNING_KEY_HEX";
@@ -510,6 +538,9 @@ impl fmt::Debug for SecretReferenceManifest {
 pub struct SecretReferenceManifestReport {
     pub version: u64,
     pub secret_count: usize,
+    pub provider_count: usize,
+    pub production_provider_ref_count: usize,
+    pub shape_checked_ref_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -532,10 +563,32 @@ pub fn secret_reference_manifest_report_from_path(
     path: impl AsRef<Path>,
 ) -> Result<SecretReferenceManifestReport, AgentKError> {
     let manifest = SecretReferenceManifest::from_path(path)?;
-    Ok(SecretReferenceManifestReport {
+    Ok(secret_reference_manifest_report(&manifest))
+}
+
+fn secret_reference_manifest_report(
+    manifest: &SecretReferenceManifest,
+) -> SecretReferenceManifestReport {
+    let providers: BTreeSet<&str> = manifest
+        .secrets()
+        .iter()
+        .map(SecretReferenceEntry::provider)
+        .collect();
+    SecretReferenceManifestReport {
         version: manifest.version(),
         secret_count: manifest.secrets().len(),
-    })
+        provider_count: providers.len(),
+        production_provider_ref_count: manifest
+            .secrets()
+            .iter()
+            .filter(|secret| is_known_production_secret_provider(secret.provider()))
+            .count(),
+        shape_checked_ref_count: manifest
+            .secrets()
+            .iter()
+            .filter(|secret| has_provider_specific_secret_reference_shape(secret.provider()))
+            .count(),
+    }
 }
 
 pub fn secret_reference_store_report(
@@ -648,6 +701,14 @@ impl SecretReferenceEntry {
                 self.target
             )));
         }
+        if let Err(error) =
+            validate_provider_specific_secret_reference(&self.provider, &self.reference)
+        {
+            return Err(AgentKError::InvalidSecretManifest(format!(
+                "secret target {} {error}",
+                self.target
+            )));
+        }
 
         Ok(())
     }
@@ -676,6 +737,249 @@ fn valid_secret_provider_id(provider: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+}
+
+fn validate_provider_specific_secret_reference(
+    provider: &str,
+    reference: &str,
+) -> Result<(), &'static str> {
+    match provider {
+        EnvironmentSecretStore::PROVIDER => Ok(()),
+        "aws-secrets-manager" => {
+            if valid_aws_secrets_manager_reference(reference) {
+                Ok(())
+            } else {
+                Err("aws-secrets-manager reference must be an ARN or clean secret name")
+            }
+        }
+        "gcp-secret-manager" => {
+            if valid_gcp_secret_manager_reference(reference) {
+                Ok(())
+            } else {
+                Err("gcp-secret-manager reference must use projects/<project>/secrets/<secret>")
+            }
+        }
+        "azure-key-vault" => {
+            if valid_azure_key_vault_reference(reference) {
+                Ok(())
+            } else {
+                Err("azure-key-vault reference must be a vault/secret path or HTTPS Key Vault URL")
+            }
+        }
+        "vault" => {
+            if valid_vault_secret_reference(reference) {
+                Ok(())
+            } else {
+                Err("vault reference must be a clean mount/path with an optional #field")
+            }
+        }
+        "onepassword" => {
+            if valid_onepassword_secret_reference(reference) {
+                Ok(())
+            } else {
+                Err("onepassword reference must use op://vault/item/field")
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn has_provider_specific_secret_reference_shape(provider: &str) -> bool {
+    matches!(
+        provider,
+        EnvironmentSecretStore::PROVIDER
+            | "aws-secrets-manager"
+            | "gcp-secret-manager"
+            | "azure-key-vault"
+            | "vault"
+            | "onepassword"
+    )
+}
+
+fn is_known_production_secret_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "aws-secrets-manager" | "gcp-secret-manager" | "azure-key-vault" | "vault" | "onepassword"
+    )
+}
+
+fn valid_aws_secrets_manager_reference(reference: &str) -> bool {
+    if !reference_shape_is_safe(reference) {
+        return false;
+    }
+    if let Some(rest) = reference.strip_prefix("arn:aws:secretsmanager:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        return parts.len() == 4
+            && valid_aws_region(parts[0])
+            && parts[1].len() == 12
+            && parts[1].chars().all(|ch| ch.is_ascii_digit())
+            && parts[2] == "secret"
+            && valid_aws_secret_name(parts[3]);
+    }
+    valid_aws_secret_name(reference)
+}
+
+fn valid_aws_region(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('-').collect();
+    parts.len() >= 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        })
+}
+
+fn valid_aws_secret_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '+' | '=' | '.' | '@' | '-')
+        })
+}
+
+fn valid_gcp_secret_manager_reference(reference: &str) -> bool {
+    if !reference_shape_is_safe(reference) {
+        return false;
+    }
+    let parts: Vec<&str> = reference.split('/').collect();
+    match parts.as_slice() {
+        ["projects", project, "secrets", secret] => {
+            valid_gcp_project_id(project) && valid_gcp_secret_id(secret)
+        }
+        ["projects", project, "secrets", secret, "versions", version] => {
+            valid_gcp_project_id(project)
+                && valid_gcp_secret_id(secret)
+                && valid_gcp_secret_version(version)
+        }
+        _ => false,
+    }
+}
+
+fn valid_gcp_project_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        && value
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+fn valid_gcp_secret_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+}
+
+fn valid_gcp_secret_version(value: &str) -> bool {
+    value == "latest"
+        || (!value.is_empty() && value.len() <= 32 && value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn valid_azure_key_vault_reference(reference: &str) -> bool {
+    if !reference_shape_is_safe(reference) {
+        return false;
+    }
+    if let Some(rest) = reference.strip_prefix("https://") {
+        let Some((host, path)) = rest.split_once('/') else {
+            return false;
+        };
+        return host
+            .strip_suffix(".vault.azure.net")
+            .is_some_and(valid_azure_vault_name)
+            && valid_azure_secret_path(path);
+    }
+    let parts: Vec<&str> = reference.split('/').collect();
+    matches!(parts.as_slice(), [vault, secret] if valid_azure_vault_name(vault) && valid_azure_secret_name(secret))
+}
+
+fn valid_azure_vault_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 24
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+fn valid_azure_secret_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(parts.as_slice(), ["secrets", secret] if valid_azure_secret_name(secret))
+        || matches!(parts.as_slice(), ["secrets", secret, version] if valid_azure_secret_name(secret) && valid_azure_secret_version(version))
+}
+
+fn valid_azure_secret_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 127
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+fn valid_azure_secret_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn valid_vault_secret_reference(reference: &str) -> bool {
+    if !reference_shape_is_safe(reference) {
+        return false;
+    }
+    let (path, field) = reference.split_once('#').unwrap_or((reference, ""));
+    let segments: Vec<&str> = path.split('/').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| valid_vault_segment(segment))
+        && (field.is_empty() || valid_vault_segment(field))
+}
+
+fn valid_vault_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn valid_onepassword_secret_reference(reference: &str) -> bool {
+    if !reference_shape_is_safe(reference) {
+        return false;
+    }
+    let Some(rest) = reference.strip_prefix("op://") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    matches!(parts.as_slice(), [vault, item, field] if valid_onepassword_segment(vault) && valid_onepassword_segment(item) && valid_onepassword_segment(field))
+}
+
+fn valid_onepassword_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ' '))
+}
+
+fn reference_shape_is_safe(reference: &str) -> bool {
+    !reference.trim().is_empty()
+        && reference == reference.trim()
+        && !reference.chars().any(|ch| ch.is_control())
+        && !reference.contains('?')
+        && !reference.contains('&')
 }
 
 #[derive(Clone)]
@@ -6245,6 +6549,19 @@ pub struct TeamPermissionsReport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TeamIdentityReport {
+    pub path: PathBuf,
+    pub permissions_path: Option<PathBuf>,
+    pub version: u64,
+    pub providers: usize,
+    pub mappings: usize,
+    pub mapped_reviewers: usize,
+    pub permission_reviewers: Option<usize>,
+    pub covered_permission_reviewers: Option<usize>,
+    pub token_protected_reviewers: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApprovalDashboardReport {
     pub output_path: PathBuf,
     pub trace_path: PathBuf,
@@ -6266,6 +6583,7 @@ pub struct AuditStoreExportReport {
     pub trace_path: PathBuf,
     pub decisions_path: PathBuf,
     pub permissions_path: Option<PathBuf>,
+    pub identity_path: Option<PathBuf>,
     pub files: Vec<PathBuf>,
     pub events_checked: u64,
     pub signatures_ok: bool,
@@ -6273,6 +6591,7 @@ pub struct AuditStoreExportReport {
     pub approved: usize,
     pub denied: usize,
     pub stale: usize,
+    pub identity_mappings: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -6288,6 +6607,7 @@ pub struct DurableAuditStoreSyncReport {
     pub trace_path: PathBuf,
     pub decisions_path: PathBuf,
     pub permissions_path: Option<PathBuf>,
+    pub identity_path: Option<PathBuf>,
     pub trace_id: String,
     pub files: Vec<PathBuf>,
     pub events_checked: u64,
@@ -6298,7 +6618,76 @@ pub struct DurableAuditStoreSyncReport {
     pub denied: usize,
     pub stale: usize,
     pub reviewers: usize,
+    pub identity_mappings: usize,
     pub notifications: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SlackNotificationExportReport {
+    pub root: PathBuf,
+    pub out: PathBuf,
+    pub channel: Option<String>,
+    pub files: Vec<PathBuf>,
+    pub notifications: usize,
+    pub pending: usize,
+    pub decided: usize,
+    pub payloads: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GitHubNotificationExportReport {
+    pub root: PathBuf,
+    pub out: PathBuf,
+    pub repository: Option<String>,
+    pub labels: Vec<String>,
+    pub files: Vec<PathBuf>,
+    pub notifications: usize,
+    pub pending: usize,
+    pub decided: usize,
+    pub payloads: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EmailNotificationExportReport {
+    pub root: PathBuf,
+    pub out: PathBuf,
+    pub to: Vec<String>,
+    pub files: Vec<PathBuf>,
+    pub notifications: usize,
+    pub pending: usize,
+    pub decided: usize,
+    pub payloads: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DurableNotificationRow {
+    notification_id: String,
+    kind: String,
+    trace_id: String,
+    approval_id: String,
+    event_hash: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    syscall: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    rule_id: Option<String>,
+    #[serde(default)]
+    missing_capability: Option<String>,
+    #[serde(default)]
+    review_hint: Option<String>,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    reviewer: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    created_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -6326,6 +6715,43 @@ struct TeamPermissionsRole {
     can_approve: Vec<String>,
     #[serde(default)]
     can_deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamIdentityManifest {
+    version: u64,
+    #[serde(default)]
+    providers: Vec<TeamIdentityProvider>,
+    #[serde(default)]
+    mappings: Vec<TeamIdentityMapping>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamIdentityProvider {
+    id: String,
+    issuer: String,
+    audience: String,
+    subject_claim: String,
+    #[serde(default)]
+    groups_claim: Option<String>,
+    #[serde(default)]
+    email_claim: Option<String>,
+    #[serde(default)]
+    allowed_email_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamIdentityMapping {
+    provider: String,
+    external_group: String,
+    reviewer: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TeamIdentityStoreMapping {
+    provider: String,
+    external_group: String,
+    reviewer: String,
 }
 
 pub fn audit_inbox_jsonl(path: impl AsRef<Path>) -> Result<AuditInboxReport, AgentKError> {
@@ -6388,6 +6814,7 @@ pub fn export_audit_store(
     trace_path: impl AsRef<Path>,
     decisions_path: impl AsRef<Path>,
     permissions_path: Option<&Path>,
+    identity_path: Option<&Path>,
     output_dir: impl AsRef<Path>,
 ) -> Result<AuditStoreExportReport, AgentKError> {
     let output_dir = output_dir.as_ref();
@@ -6395,6 +6822,10 @@ pub fn export_audit_store(
     let review = approval_review_jsonl(&trace_path, &decisions_path)?;
     let permissions = match permissions_path {
         Some(path) => Some(team_permissions_report_from_path(path)?),
+        None => None,
+    };
+    let identity = match identity_path {
+        Some(path) => Some(team_identity_store_mapping_rows(path, permissions_path)?),
         None => None,
     };
     fs::create_dir_all(output_dir)?;
@@ -6409,6 +6840,9 @@ pub fn export_audit_store(
             permissions,
         )?);
     }
+    if let Some((identity, _)) = &identity {
+        files.push(write_store_json(output_dir, "identity.json", identity)?);
+    }
     files.push(write_store_file(
         output_dir,
         "postgres-schema.sql",
@@ -6419,6 +6853,7 @@ pub fn export_audit_store(
         &inbox,
         &review,
         permissions.as_ref(),
+        identity.as_ref().map(|(_, rows)| rows.as_slice()),
     )?);
     files.push(write_store_file(
         output_dir,
@@ -6431,6 +6866,7 @@ pub fn export_audit_store(
         trace_path: inbox.path,
         decisions_path: review.decisions_path,
         permissions_path: permissions.as_ref().map(|report| report.path.clone()),
+        identity_path: identity.as_ref().map(|(report, _)| report.path.clone()),
         files,
         events_checked: review.events_checked,
         signatures_ok: review.signatures_ok,
@@ -6438,6 +6874,7 @@ pub fn export_audit_store(
         approved: review.approved,
         denied: review.denied,
         stale: review.stale_decisions.len(),
+        identity_mappings: identity.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
     })
 }
 
@@ -6483,11 +6920,40 @@ pub fn check_audit_store_export(
         Err(error) => readiness_check("approvals json", ReadinessStatus::Fail, error.to_string()),
     });
 
+    let identity = if root.join("identity.json").is_file() {
+        match read_store_json::<TeamIdentityReport>(root, "identity.json") {
+            Ok(identity) => {
+                checks.push(readiness_check(
+                    "identity json",
+                    ReadinessStatus::Pass,
+                    format!("{} mappings", identity.mappings),
+                ));
+                Some(identity)
+            }
+            Err(error) => {
+                checks.push(readiness_check(
+                    "identity json",
+                    ReadinessStatus::Fail,
+                    error.to_string(),
+                ));
+                None
+            }
+        }
+    } else {
+        checks.push(readiness_check(
+            "identity json",
+            ReadinessStatus::Pass,
+            "not configured",
+        ));
+        None
+    };
+
     checks.push(check_audit_store_load_sql(root));
     checks.push(check_audit_store_tsv_counts(
         root,
         audit.as_ref().ok(),
         approvals.as_ref().ok(),
+        identity.as_ref(),
     ));
 
     let passed = checks
@@ -6584,12 +7050,41 @@ fn check_durable_audit_store(root: &Path) -> Result<AuditStoreCheckReport, Agent
         None
     };
 
+    let identity = if root.join("current/identity.json").is_file() {
+        match read_store_json::<TeamIdentityReport>(root, "current/identity.json") {
+            Ok(identity) => {
+                checks.push(readiness_check(
+                    "durable identity json",
+                    ReadinessStatus::Pass,
+                    format!("{} mappings", identity.mappings),
+                ));
+                Some(identity)
+            }
+            Err(error) => {
+                checks.push(readiness_check(
+                    "durable identity json",
+                    ReadinessStatus::Fail,
+                    error.to_string(),
+                ));
+                None
+            }
+        }
+    } else {
+        checks.push(readiness_check(
+            "durable identity json",
+            ReadinessStatus::Pass,
+            "not configured",
+        ));
+        None
+    };
+
     checks.push(check_durable_store_schema(root));
     checks.push(check_durable_store_jsonl_counts(
         root,
         audit.as_ref().ok(),
         approvals.as_ref().ok(),
         permissions.as_ref(),
+        identity.as_ref(),
     ));
 
     let passed = checks
@@ -6606,6 +7101,7 @@ pub fn sync_durable_audit_store(
     trace_path: impl AsRef<Path>,
     decisions_path: impl AsRef<Path>,
     permissions_path: Option<&Path>,
+    identity_path: Option<&Path>,
     root: impl AsRef<Path>,
 ) -> Result<DurableAuditStoreSyncReport, AgentKError> {
     let root = root.as_ref();
@@ -6613,6 +7109,10 @@ pub fn sync_durable_audit_store(
     let review = approval_review_jsonl(&trace_path, &decisions_path)?;
     let permissions = match permissions_path {
         Some(path) => Some(team_permissions_report_from_path(path)?),
+        None => None,
+    };
+    let identity = match identity_path {
+        Some(path) => Some(team_identity_store_mapping_rows(path, permissions_path)?),
         None => None,
     };
     let trace_id = postgres_trace_id(&inbox);
@@ -6639,6 +7139,9 @@ pub fn sync_durable_audit_store(
             permissions,
         )?);
     }
+    if let Some((identity, _)) = &identity {
+        files.push(write_store_json(root, "current/identity.json", identity)?);
+    }
     files.push(write_store_json(
         root,
         "store-schema.json",
@@ -6654,7 +7157,8 @@ pub fn sync_durable_audit_store(
                 "tables/syscall_summary.jsonl",
                 "tables/evidence_summary.jsonl",
                 "tables/notifications.jsonl",
-                "tables/team_reviewers.jsonl"
+                "tables/team_reviewers.jsonl",
+                "tables/team_identity_mappings.jsonl"
             ]
         }),
     )?);
@@ -6708,6 +7212,14 @@ pub fn sync_durable_audit_store(
         "tables/team_reviewers.jsonl",
         durable_team_reviewer_rows(permissions.as_ref()),
     )?);
+    files.push(write_store_jsonl(
+        root,
+        "tables/team_identity_mappings.jsonl",
+        identity
+            .as_ref()
+            .map(|(_, rows)| rows.clone())
+            .unwrap_or_default(),
+    )?);
     files.push(write_store_file(
         root,
         "README.md",
@@ -6719,6 +7231,7 @@ pub fn sync_durable_audit_store(
         trace_path: review.trace_path.clone(),
         decisions_path: review.decisions_path.clone(),
         permissions_path: permissions.as_ref().map(|report| report.path.clone()),
+        identity_path: identity.as_ref().map(|(report, _)| report.path.clone()),
         trace_id,
         files,
         events_checked: review.events_checked,
@@ -6732,7 +7245,249 @@ pub fn sync_durable_audit_store(
             .as_ref()
             .map(|report| report.reviewers.len())
             .unwrap_or(0),
+        identity_mappings: identity.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
         notifications: notification_rows.len(),
+    })
+}
+
+pub fn export_slack_notification_payloads(
+    root: impl AsRef<Path>,
+    out: impl AsRef<Path>,
+    channel: Option<&str>,
+) -> Result<SlackNotificationExportReport, AgentKError> {
+    let root = root.as_ref();
+    let out = out.as_ref();
+    let check = check_audit_store(root)?;
+    if !check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "durable store preflight failed".to_string(),
+        ));
+    }
+    if !root.join("store-schema.json").is_file() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-slack requires a durable team store from store-sync".to_string(),
+        ));
+    }
+    if out.starts_with(root) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Slack notification export must be written outside the durable store".to_string(),
+        ));
+    }
+    let channel = match channel {
+        Some(channel) if channel.trim().is_empty() => {
+            return Err(AgentKError::InvalidMcpRequest(
+                "Slack channel must be non-empty when provided".to_string(),
+            ));
+        }
+        Some(channel) => Some(channel.to_string()),
+        None => None,
+    };
+    let notifications = read_durable_notification_rows(root)?;
+    let payloads = notifications
+        .iter()
+        .map(|row| slack_notification_payload(row, channel.as_deref()))
+        .collect::<Vec<_>>();
+    fs::create_dir_all(out)?;
+
+    let mut files = Vec::new();
+    files.push(write_store_json(
+        out,
+        "manifest.json",
+        &serde_json::json!({
+            "schema": "agentk.slack_notification_payloads",
+            "version": 1,
+            "source_store": root,
+            "channel": channel,
+            "notifications": notifications.len(),
+            "pending": notifications.iter().filter(|row| row.kind == "approval_requested").count(),
+            "decided": notifications.iter().filter(|row| row.kind == "approval_decided").count(),
+            "payloads": "payloads.jsonl",
+            "raw_payloads": false
+        }),
+    )?);
+    files.push(write_store_jsonl(out, "payloads.jsonl", payloads.clone())?);
+    files.push(write_store_file(
+        out,
+        "README.md",
+        &slack_notification_readme(),
+    )?);
+
+    Ok(SlackNotificationExportReport {
+        root: root.to_path_buf(),
+        out: out.to_path_buf(),
+        channel,
+        files,
+        notifications: notifications.len(),
+        pending: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_requested")
+            .count(),
+        decided: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_decided")
+            .count(),
+        payloads: payloads.len(),
+    })
+}
+
+pub fn export_github_notification_payloads(
+    root: impl AsRef<Path>,
+    out: impl AsRef<Path>,
+    repository: Option<&str>,
+    labels: &[String],
+) -> Result<GitHubNotificationExportReport, AgentKError> {
+    let root = root.as_ref();
+    let out = out.as_ref();
+    let check = check_audit_store(root)?;
+    if !check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "durable store preflight failed".to_string(),
+        ));
+    }
+    if !root.join("store-schema.json").is_file() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-github requires a durable team store from store-sync".to_string(),
+        ));
+    }
+    if out.starts_with(root) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub notification export must be written outside the durable store".to_string(),
+        ));
+    }
+    let repository = match repository {
+        Some(repository) if repository.trim().is_empty() => {
+            return Err(AgentKError::InvalidMcpRequest(
+                "GitHub repository must be non-empty when provided".to_string(),
+            ));
+        }
+        Some(repository) if !is_valid_github_repository(repository) => {
+            return Err(AgentKError::InvalidMcpRequest(
+                "GitHub repository must look like owner/name".to_string(),
+            ));
+        }
+        Some(repository) => Some(repository.to_string()),
+        None => None,
+    };
+    let labels = github_notification_labels(labels)?;
+    let notifications = read_durable_notification_rows(root)?;
+    let payloads = notifications
+        .iter()
+        .map(|row| github_notification_payload(row, repository.as_deref(), &labels))
+        .collect::<Vec<_>>();
+    fs::create_dir_all(out)?;
+
+    let mut files = Vec::new();
+    files.push(write_store_json(
+        out,
+        "manifest.json",
+        &serde_json::json!({
+            "schema": "agentk.github_notification_payloads",
+            "version": 1,
+            "source_store": root,
+            "repository": repository,
+            "labels": labels,
+            "notifications": notifications.len(),
+            "pending": notifications.iter().filter(|row| row.kind == "approval_requested").count(),
+            "decided": notifications.iter().filter(|row| row.kind == "approval_decided").count(),
+            "payloads": "payloads.jsonl",
+            "raw_payloads": false
+        }),
+    )?);
+    files.push(write_store_jsonl(out, "payloads.jsonl", payloads.clone())?);
+    files.push(write_store_file(
+        out,
+        "README.md",
+        &github_notification_readme(),
+    )?);
+
+    Ok(GitHubNotificationExportReport {
+        root: root.to_path_buf(),
+        out: out.to_path_buf(),
+        repository,
+        labels,
+        files,
+        notifications: notifications.len(),
+        pending: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_requested")
+            .count(),
+        decided: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_decided")
+            .count(),
+        payloads: payloads.len(),
+    })
+}
+
+pub fn export_email_notification_payloads(
+    root: impl AsRef<Path>,
+    out: impl AsRef<Path>,
+    to: &[String],
+) -> Result<EmailNotificationExportReport, AgentKError> {
+    let root = root.as_ref();
+    let out = out.as_ref();
+    let check = check_audit_store(root)?;
+    if !check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "durable store preflight failed".to_string(),
+        ));
+    }
+    if !root.join("store-schema.json").is_file() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-email requires a durable team store from store-sync".to_string(),
+        ));
+    }
+    if out.starts_with(root) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Email notification export must be written outside the durable store".to_string(),
+        ));
+    }
+    let to = email_notification_recipients(to)?;
+    let notifications = read_durable_notification_rows(root)?;
+    let payloads = notifications
+        .iter()
+        .map(|row| email_notification_payload(row, &to))
+        .collect::<Vec<_>>();
+    fs::create_dir_all(out)?;
+
+    let mut files = Vec::new();
+    files.push(write_store_json(
+        out,
+        "manifest.json",
+        &serde_json::json!({
+            "schema": "agentk.email_notification_payloads",
+            "version": 1,
+            "source_store": root,
+            "to": to,
+            "notifications": notifications.len(),
+            "pending": notifications.iter().filter(|row| row.kind == "approval_requested").count(),
+            "decided": notifications.iter().filter(|row| row.kind == "approval_decided").count(),
+            "payloads": "payloads.jsonl",
+            "raw_payloads": false
+        }),
+    )?);
+    files.push(write_store_jsonl(out, "payloads.jsonl", payloads.clone())?);
+    files.push(write_store_file(
+        out,
+        "README.md",
+        &email_notification_readme(),
+    )?);
+
+    Ok(EmailNotificationExportReport {
+        root: root.to_path_buf(),
+        out: out.to_path_buf(),
+        to,
+        files,
+        notifications: notifications.len(),
+        pending: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_requested")
+            .count(),
+        decided: notifications
+            .iter()
+            .filter(|row| row.kind == "approval_decided")
+            .count(),
+        payloads: payloads.len(),
     })
 }
 
@@ -6911,6 +7666,79 @@ pub fn team_permissions_report_from_path(
     })
 }
 
+pub fn team_identity_report_from_path(
+    path: impl AsRef<Path>,
+    permissions_path: Option<&Path>,
+) -> Result<TeamIdentityReport, AgentKError> {
+    let path = path.as_ref();
+    let manifest = read_team_identity_manifest(path)?;
+    let permissions_manifest = match permissions_path {
+        Some(path) => Some(read_team_permissions_manifest(path)?),
+        None => None,
+    };
+    validate_team_identity_manifest(&manifest, permissions_manifest.as_ref())?;
+
+    let mapped_reviewers = manifest
+        .mappings
+        .iter()
+        .map(|mapping| mapping.reviewer.as_str())
+        .collect::<BTreeSet<_>>();
+    let permission_reviewers = permissions_manifest
+        .as_ref()
+        .map(team_permission_reviewers)
+        .unwrap_or_default();
+    let covered_permission_reviewers = permissions_manifest.as_ref().map(|_| {
+        permission_reviewers
+            .iter()
+            .filter(|reviewer| mapped_reviewers.contains(reviewer.as_str()))
+            .count()
+    });
+    let token_protected_reviewers = permissions_manifest.as_ref().map(|manifest| {
+        manifest
+            .users
+            .iter()
+            .filter(|user| {
+                user.token_env.is_some()
+                    && permission_reviewers
+                        .iter()
+                        .any(|reviewer| reviewer == &user.id)
+            })
+            .count()
+    });
+
+    Ok(TeamIdentityReport {
+        path: path.to_path_buf(),
+        permissions_path: permissions_path.map(Path::to_path_buf),
+        version: manifest.version,
+        providers: manifest.providers.len(),
+        mappings: manifest.mappings.len(),
+        mapped_reviewers: mapped_reviewers.len(),
+        permission_reviewers: permissions_manifest
+            .as_ref()
+            .map(|_| permission_reviewers.len()),
+        covered_permission_reviewers,
+        token_protected_reviewers,
+    })
+}
+
+fn team_identity_store_mapping_rows(
+    identity_path: &Path,
+    permissions_path: Option<&Path>,
+) -> Result<(TeamIdentityReport, Vec<TeamIdentityStoreMapping>), AgentKError> {
+    let report = team_identity_report_from_path(identity_path, permissions_path)?;
+    let manifest = read_team_identity_manifest(identity_path)?;
+    let rows = manifest
+        .mappings
+        .into_iter()
+        .map(|mapping| TeamIdentityStoreMapping {
+            provider: mapping.provider,
+            external_group: mapping.external_group,
+            reviewer: mapping.reviewer,
+        })
+        .collect();
+    Ok((report, rows))
+}
+
 pub fn verify_team_reviewer_token(
     permissions_path: impl AsRef<Path>,
     reviewer: &str,
@@ -7045,6 +7873,205 @@ fn validate_team_permissions_manifest(
         }
     }
 
+    Ok(())
+}
+
+fn read_team_identity_manifest(path: &Path) -> Result<TeamIdentityManifest, AgentKError> {
+    let content = fs::read_to_string(path)?;
+    let manifest = toml::from_str::<TeamIdentityManifest>(&content).map_err(|error| {
+        AgentKError::InvalidMcpRequest(format!("team identity did not parse: {error}"))
+    })?;
+    validate_team_identity_manifest(&manifest, None)?;
+    Ok(manifest)
+}
+
+fn validate_team_identity_manifest(
+    manifest: &TeamIdentityManifest,
+    permissions: Option<&TeamPermissionsManifest>,
+) -> Result<(), AgentKError> {
+    if manifest.version != 1 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity version must be 1".to_string(),
+        ));
+    }
+    if manifest.providers.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity must define at least one provider".to_string(),
+        ));
+    }
+    if manifest.mappings.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity must define at least one mapping".to_string(),
+        ));
+    }
+
+    let mut provider_ids = BTreeSet::new();
+    for provider in &manifest.providers {
+        if !valid_secret_provider_id(&provider.id) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team identity provider ids must be safe provider ids".to_string(),
+            ));
+        }
+        if !provider_ids.insert(provider.id.as_str()) {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "duplicate team identity provider {}",
+                provider.id
+            )));
+        }
+        validate_identity_https_url(&provider.issuer)?;
+        validate_identity_audience(&provider.audience)?;
+        validate_identity_claim_name(&provider.subject_claim, "subject_claim")?;
+        if let Some(groups_claim) = &provider.groups_claim {
+            validate_identity_claim_name(groups_claim, "groups_claim")?;
+        }
+        if let Some(email_claim) = &provider.email_claim {
+            validate_identity_claim_name(email_claim, "email_claim")?;
+        }
+        for domain in &provider.allowed_email_domains {
+            validate_identity_domain(domain)?;
+        }
+    }
+
+    let permission_reviewers = permissions.map(team_permission_reviewers);
+    let mut mapping_keys = BTreeSet::new();
+    for mapping in &manifest.mappings {
+        if !provider_ids.contains(mapping.provider.as_str()) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team identity mapping references unknown provider".to_string(),
+            ));
+        }
+        validate_identity_external_group(&mapping.external_group)?;
+        if mapping.reviewer.trim().is_empty() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team identity mapping reviewer must be non-empty".to_string(),
+            ));
+        }
+        let key = format!("{}\n{}", mapping.provider, mapping.external_group);
+        if !mapping_keys.insert(key) {
+            return Err(AgentKError::InvalidMcpRequest(
+                "duplicate team identity mapping for provider/group".to_string(),
+            ));
+        }
+        if let Some(reviewers) = &permission_reviewers
+            && !reviewers
+                .iter()
+                .any(|reviewer| reviewer == &mapping.reviewer)
+        {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team identity mapping reviewer was not found in team permissions".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn team_permission_reviewers(manifest: &TeamPermissionsManifest) -> Vec<String> {
+    let roles_by_id = manifest
+        .roles
+        .iter()
+        .map(|role| (role.id.as_str(), role))
+        .collect::<BTreeMap<_, _>>();
+    manifest
+        .users
+        .iter()
+        .filter(|user| {
+            user.roles.iter().any(|role| {
+                roles_by_id
+                    .get(role.as_str())
+                    .map(|role| !role.can_approve.is_empty() || !role.can_deny.is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .map(|user| user.id.clone())
+        .collect()
+}
+
+fn validate_identity_https_url(value: &str) -> Result<(), AgentKError> {
+    let rest = value.strip_prefix("https://").ok_or_else(|| {
+        AgentKError::InvalidMcpRequest("team identity issuer must be an https URL".to_string())
+    })?;
+    if value.contains('?') || value.contains('#') || value.contains('@') {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity issuer must not include query, fragment, or userinfo".to_string(),
+        ));
+    }
+    let host = rest.split('/').next().unwrap_or_default();
+    validate_identity_host(host)?;
+    Ok(())
+}
+
+fn validate_identity_host(host: &str) -> Result<(), AgentKError> {
+    if host.is_empty() || host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity issuer host must be a DNS name".to_string(),
+        ));
+    }
+    for label in host.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err(AgentKError::InvalidMcpRequest(
+                "team identity issuer host must use valid DNS labels".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_identity_audience(value: &str) -> Result<(), AgentKError> {
+    if value.trim().is_empty()
+        || value != value.trim()
+        || value.len() > 256
+        || value.chars().any(|ch| ch.is_control())
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity audience must be a clean non-empty value".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_claim_name(value: &str, field: &str) -> Result<(), AgentKError> {
+    if value.trim().is_empty()
+        || value.len() > 128
+        || value.split('.').any(|segment| {
+            segment.is_empty()
+                || !segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':'))
+        })
+    {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "team identity {field} must be a safe claim name"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_identity_domain(value: &str) -> Result<(), AgentKError> {
+    validate_identity_host(value).map_err(|_| {
+        AgentKError::InvalidMcpRequest(
+            "team identity allowed email domains must use DNS names".to_string(),
+        )
+    })
+}
+
+fn validate_identity_external_group(value: &str) -> Result<(), AgentKError> {
+    if value.trim().is_empty()
+        || value != value.trim()
+        || value.len() > 256
+        || value.chars().any(|ch| ch.is_control())
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "team identity external group must be a clean non-empty value".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -8418,6 +9445,40 @@ pub struct ReleaseAuditCheck {
     pub detail: String,
 }
 
+struct ReleaseAuditCommandSpec {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+const RELEASE_AUDIT_COMMANDS: &[ReleaseAuditCommandSpec] = &[
+    ReleaseAuditCommandSpec {
+        name: "git diff whitespace",
+        program: "git",
+        args: &["diff", "--check"],
+    },
+    ReleaseAuditCommandSpec {
+        name: "cargo fmt",
+        program: "cargo",
+        args: &["fmt", "--check"],
+    },
+    ReleaseAuditCommandSpec {
+        name: "cargo test",
+        program: "cargo",
+        args: &["test"],
+    },
+    ReleaseAuditCommandSpec {
+        name: "cargo clippy",
+        program: "cargo",
+        args: &["clippy", "--all-targets", "--all-features"],
+    },
+    ReleaseAuditCommandSpec {
+        name: "release candidate smoke",
+        program: "cargo",
+        args: &["run", "--locked", "--", "release-candidate-smoke", "--json"],
+    },
+];
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReadinessStatus {
@@ -8472,6 +9533,7 @@ pub fn readiness_report(root: impl AsRef<Path>) -> ReadinessReport {
         check_required_file(&root, "examples/mcp-timeout-server.sh"),
         check_required_file(&root, "examples/replay-behavior-overrides.json"),
         check_required_file(&root, "examples/secret-refs.toml"),
+        check_required_file(&root, "examples/secret-refs-production.toml"),
         check_required_file(&root, "examples/trusted-signers.toml"),
         check_policy(&root),
         check_policy_profiles(&root),
@@ -8507,25 +9569,14 @@ pub fn release_audit_report(root: impl AsRef<Path>) -> ReleaseAuditReport {
     }
 
     checks.push(check_git_worktree(&root));
-    checks.push(command_audit_check(
-        &root,
-        "git diff whitespace",
-        "git",
-        &["diff", "--check"],
-    ));
-    checks.push(command_audit_check(
-        &root,
-        "cargo fmt",
-        "cargo",
-        &["fmt", "--check"],
-    ));
-    checks.push(command_audit_check(&root, "cargo test", "cargo", &["test"]));
-    checks.push(command_audit_check(
-        &root,
-        "cargo clippy",
-        "cargo",
-        &["clippy", "--all-targets", "--all-features"],
-    ));
+    for command in RELEASE_AUDIT_COMMANDS {
+        checks.push(command_audit_check(
+            &root,
+            command.name,
+            command.program,
+            command.args,
+        ));
+    }
 
     match release_audit_runtime_checks(&root) {
         Ok(runtime_checks) => checks.extend(runtime_checks),
@@ -8575,6 +9626,9 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
     let secret_handle_smoke = brokered_secret_handle_smoke()?;
     let secret_refs =
         secret_reference_manifest_report_from_path(root.join("examples/secret-refs.toml"))?;
+    let production_secret_refs = secret_reference_manifest_report_from_path(
+        root.join("examples/secret-refs-production.toml"),
+    )?;
     let secret_refs_validation = secret_ref_validation_smoke()?;
     let secret_refs_store = secret_ref_store_report_smoke()?;
     let mcp_taint_flow = mcp_taint_flow_smoke()?;
@@ -8723,9 +9777,28 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
             ),
         ),
         release_audit_check(
+            "secret refs production shapes",
+            if production_secret_refs.version == default_secret_reference_manifest_version()
+                && production_secret_refs.secret_count == 5
+                && production_secret_refs.production_provider_ref_count == 5
+                && production_secret_refs.shape_checked_ref_count == 5
+            {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{} refs, {} providers, {} production-shaped",
+                production_secret_refs.secret_count,
+                production_secret_refs.provider_count,
+                production_secret_refs.production_provider_ref_count
+            ),
+        ),
+        release_audit_check(
             "secret refs validation",
             if secret_refs_validation.invalid_provider_rejected
                 && secret_refs_validation.invalid_env_reference_rejected
+                && secret_refs_validation.invalid_provider_shape_rejected
                 && !secret_refs_validation.raw_provider_logged
                 && !secret_refs_validation.raw_reference_logged
             {
@@ -8734,13 +9807,18 @@ fn release_audit_runtime_checks(root: &Path) -> Result<Vec<ReleaseAuditCheck>, A
                 ReadinessStatus::Fail
             },
             format!(
-                "provider {}, env ref {}, redacted {}",
+                "provider {}, env ref {}, provider shape {}, redacted {}",
                 if secret_refs_validation.invalid_provider_rejected {
                     "rejected"
                 } else {
                     "accepted"
                 },
                 if secret_refs_validation.invalid_env_reference_rejected {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                if secret_refs_validation.invalid_provider_shape_rejected {
                     "rejected"
                 } else {
                     "accepted"
@@ -9666,6 +10744,7 @@ fn brokered_secret_handle_smoke() -> Result<SignatureVerifyReport, AgentKError> 
 struct SecretRefValidationSmokeReport {
     invalid_provider_rejected: bool,
     invalid_env_reference_rejected: bool,
+    invalid_provider_shape_rejected: bool,
     raw_provider_logged: bool,
     raw_reference_logged: bool,
 }
@@ -9674,6 +10753,7 @@ fn secret_ref_validation_smoke() -> Result<SecretRefValidationSmokeReport, Agent
     const RAW_PROVIDER: &str = "Cloud Provider/secret";
     const RAW_PROVIDER_REF: &str = "AGENTK_PROVIDER_REF";
     const RAW_ENV_REF: &str = "invalid-reference-name";
+    const RAW_PROVIDER_SHAPE_REF: &str = "projects/agentk-prod/bad/github_token";
 
     let invalid_provider = SecretReferenceManifest::parse_toml(&format!(
         r#"
@@ -9701,13 +10781,28 @@ fn secret_ref_validation_smoke() -> Result<SecretRefValidationSmokeReport, Agent
     .expect_err("invalid env reference should fail");
     let invalid_env_error = invalid_env_reference.to_string();
 
+    let invalid_provider_shape = SecretReferenceManifest::parse_toml(&format!(
+        r#"
+        version = 1
+
+        [[secrets]]
+        target = "secret://release-audit-gcp"
+        provider = "gcp-secret-manager"
+        reference = "{RAW_PROVIDER_SHAPE_REF}"
+        "#
+    ))
+    .expect_err("invalid production provider reference should fail");
+    let invalid_provider_shape_error = invalid_provider_shape.to_string();
+
     Ok(SecretRefValidationSmokeReport {
         invalid_provider_rejected: invalid_provider_error.contains("safe provider id"),
         invalid_env_reference_rejected: invalid_env_error
             .contains("safe environment variable name"),
+        invalid_provider_shape_rejected: invalid_provider_shape_error.contains("reference must"),
         raw_provider_logged: invalid_provider_error.contains(RAW_PROVIDER),
         raw_reference_logged: invalid_provider_error.contains(RAW_PROVIDER_REF)
-            || invalid_env_error.contains(RAW_ENV_REF),
+            || invalid_env_error.contains(RAW_ENV_REF)
+            || invalid_provider_shape_error.contains(RAW_PROVIDER_SHAPE_REF),
     })
 }
 
@@ -13966,10 +15061,110 @@ pub struct SidecarPackageReport {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageArchiveReport {
+    pub package: PathBuf,
+    pub archive: PathBuf,
+    pub checksum: PathBuf,
+    pub files: usize,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageArchiveCheckReport {
+    pub archive: PathBuf,
+    pub checksum: PathBuf,
+    pub passed: bool,
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: Option<String>,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageInstallReport {
+    pub archive: PathBuf,
+    pub checksum: PathBuf,
+    pub package: PathBuf,
+    pub receipt: PathBuf,
+    pub files: usize,
+    pub archive_sha256: String,
+    pub package_check: SidecarPackageCheckReport,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageInstallReceipt {
+    pub schema_version: u32,
+    pub package: String,
+    pub agentk_version: String,
+    pub archive_file: String,
+    pub checksum_file: String,
+    pub hash_algorithm: String,
+    pub archive_sha256: String,
+    pub installed_files: usize,
+    pub installed_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct SidecarPackageReleaseManifestReport {
+    pub schema_version: u32,
+    pub package_name: String,
+    pub agentk_version: String,
+    pub generated_at_unix_seconds: u64,
+    pub output: PathBuf,
+    pub package_root: PathBuf,
+    pub package_manifest: PathBuf,
+    pub package_lock: PathBuf,
+    pub archive: PathBuf,
+    pub checksum: PathBuf,
+    pub install_receipt: PathBuf,
+    pub hash_algorithm: String,
+    pub archive_sha256: String,
+    pub package_manifest_sha256: String,
+    pub package_lock_sha256: String,
+    pub install_receipt_sha256: String,
+    pub installed_files: usize,
+    pub passed: bool,
+    pub package_check: SidecarPackageCheckReport,
+    pub archive_check: SidecarPackageArchiveCheckReport,
+    pub receipt: SidecarPackageInstallReceipt,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct HomebrewFormulaReport {
+    pub output: PathBuf,
+    pub class_name: String,
+    pub formula_name: String,
+    pub version: String,
+    pub homepage: String,
+    pub source_url: String,
+    pub source_archive: Option<PathBuf>,
+    pub sha256: String,
+    pub files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct SidecarPackageCheckReport {
     pub root: PathBuf,
     pub passed: bool,
     pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+struct SidecarPackageLock {
+    schema_version: u32,
+    package: String,
+    agentk_version: String,
+    hash_algorithm: String,
+    excludes: Vec<String>,
+    files: Vec<SidecarPackageLockFile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+struct SidecarPackageLockFile {
+    path: String,
+    bytes: u64,
+    sha256: String,
+    executable: bool,
 }
 
 pub fn init_sidecar_bundle(
@@ -13984,6 +15179,7 @@ pub fn init_sidecar_bundle(
             "team-permissions.toml",
             sidecar_team_permissions().to_string(),
         ),
+        ("team-identity.toml", sidecar_team_identity().to_string()),
         (
             "policies/team-sidecar.toml",
             DEFAULT_POLICY_TOML.to_string(),
@@ -14039,7 +15235,7 @@ pub fn package_sidecar_bundle(
 
     let sidecar_out = out.join("sidecar");
     copy_sidecar_dir(root, &sidecar_out)?;
-    let files = vec![
+    let mut files = vec![
         write_packaged_sidecar_file(out, "README.md", &sidecar_package_readme())?,
         write_packaged_sidecar_file(out, "manifest.json", &sidecar_package_manifest()?)?,
         write_packaged_sidecar_file(
@@ -14077,12 +15273,39 @@ pub fn package_sidecar_bundle(
         )?,
         write_packaged_sidecar_file(
             out,
+            "bin/agentk-identity-check",
+            &sidecar_identity_check_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
             "bin/agentk-store-export",
             &sidecar_store_export_script(),
         )?,
         write_packaged_sidecar_file(out, "bin/agentk-store-check", &sidecar_store_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-store-sync", &sidecar_store_sync_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-store-push", &sidecar_store_push_script())?,
+        write_packaged_sidecar_file(out, "bin/agentk-store-slack", &sidecar_store_slack_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-store-slack-send",
+            &sidecar_store_slack_send_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-store-github",
+            &sidecar_store_github_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-store-github-send",
+            &sidecar_store_github_send_script(),
+        )?,
+        write_packaged_sidecar_file(out, "bin/agentk-store-email", &sidecar_store_email_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-store-email-send",
+            &sidecar_store_email_send_script(),
+        )?,
         write_packaged_sidecar_file(
             out,
             "clients/claude-desktop.mcp.json",
@@ -14120,6 +15343,26 @@ pub fn package_sidecar_bundle(
         )?,
         write_packaged_sidecar_file(out, "deploy/docker/Dockerfile", &sidecar_dockerfile())?,
         write_packaged_sidecar_file(out, "deploy/docker/compose.yml", &sidecar_docker_compose())?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/env/sidecar-http.env.example",
+            &sidecar_http_env_example(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/env/dashboard.env.example",
+            &sidecar_dashboard_env_example(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/env/store-postgres.env.example",
+            &sidecar_store_postgres_env_example(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "deploy/env/notifications.env.example",
+            &sidecar_notifications_env_example(),
+        )?,
         write_packaged_sidecar_file(out, "deploy/README.md", &sidecar_deploy_readme())?,
     ];
 
@@ -14133,6 +15376,8 @@ pub fn package_sidecar_bundle(
             fs::set_permissions(path, permissions)?;
         }
     }
+
+    files.push(write_sidecar_package_lock(out)?);
 
     let package_check = check_sidecar_package(out)?;
     if !package_check.passed {
@@ -14148,6 +15393,596 @@ pub fn package_sidecar_bundle(
     })
 }
 
+pub fn archive_sidecar_package(
+    package: impl AsRef<Path>,
+    archive: impl AsRef<Path>,
+    force: bool,
+) -> Result<SidecarPackageArchiveReport, AgentKError> {
+    let package = package.as_ref();
+    let archive = archive.as_ref();
+    if archive.starts_with(package) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package archive must be written outside the package directory".to_string(),
+        ));
+    }
+    let checksum = sidecar_package_archive_checksum_path(archive)?;
+
+    let package_check = check_sidecar_package(package)?;
+    if !package_check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package preflight failed".to_string(),
+        ));
+    }
+
+    if archive.exists() {
+        if archive.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package archive path is a directory: {}",
+                archive.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(archive.to_path_buf()));
+        }
+        fs::remove_file(archive)?;
+    }
+    if checksum.exists() {
+        if checksum.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package archive checksum path is a directory: {}",
+                checksum.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(checksum));
+        }
+        fs::remove_file(&checksum)?;
+    }
+    if let Some(parent) = archive.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+
+    let root_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "package directory name must be valid UTF-8 for archive paths".to_string(),
+            )
+        })?;
+    validate_sidecar_relative_path(root_name).map_err(AgentKError::InvalidMcpRequest)?;
+
+    let files = sidecar_package_archive_files(package)?;
+    let mut writer = fs::File::create(archive)?;
+    write_sidecar_package_archive(&mut writer, package, root_name, &files)?;
+    writer.flush()?;
+    drop(writer);
+
+    let bytes = fs::metadata(archive)?.len();
+    let sha256 = sidecar_package_file_sha256(archive)?;
+    write_sidecar_package_archive_checksum(archive, &checksum, &sha256)?;
+    Ok(SidecarPackageArchiveReport {
+        package: package.to_path_buf(),
+        archive: archive.to_path_buf(),
+        checksum,
+        files: files.len(),
+        bytes,
+        sha256,
+    })
+}
+
+pub fn check_sidecar_package_archive(
+    archive: impl AsRef<Path>,
+    checksum: Option<PathBuf>,
+) -> Result<SidecarPackageArchiveCheckReport, AgentKError> {
+    let archive = archive.as_ref();
+    let checksum = checksum.unwrap_or_else(|| {
+        sidecar_package_archive_checksum_path(archive)
+            .unwrap_or_else(|_| archive.with_extension("sha256"))
+    });
+    let mut checks = Vec::new();
+
+    let archive_file_name = match sidecar_package_archive_file_name(archive) {
+        Ok(file_name) => Some(file_name),
+        Err(error) => {
+            checks.push(sidecar_check(
+                "package archive filename",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            ));
+            None
+        }
+    };
+
+    let archive_ok = match fs::metadata(archive) {
+        Ok(metadata) if metadata.is_file() => {
+            checks.push(sidecar_check(
+                "package archive file",
+                ReadinessStatus::Pass,
+                format!("{} bytes", metadata.len()),
+            ));
+            true
+        }
+        Ok(_) => {
+            checks.push(sidecar_check(
+                "package archive file",
+                ReadinessStatus::Fail,
+                "archive path is not a file",
+            ));
+            false
+        }
+        Err(error) => {
+            checks.push(sidecar_check(
+                "package archive file",
+                ReadinessStatus::Fail,
+                format!("archive could not be read: {error}"),
+            ));
+            false
+        }
+    };
+
+    let checksum_content = match fs::read_to_string(&checksum) {
+        Ok(content) => {
+            checks.push(sidecar_check(
+                "package archive checksum file",
+                ReadinessStatus::Pass,
+                "present",
+            ));
+            Some(content)
+        }
+        Err(error) => {
+            checks.push(sidecar_check(
+                "package archive checksum file",
+                ReadinessStatus::Fail,
+                format!("checksum could not be read: {error}"),
+            ));
+            None
+        }
+    };
+
+    let mut expected_sha256 = None;
+    if let Some(content) = checksum_content {
+        match parse_sidecar_package_archive_checksum(&content, archive_file_name.as_deref()) {
+            Ok(sha256) => {
+                checks.push(sidecar_check(
+                    "package archive checksum format",
+                    ReadinessStatus::Pass,
+                    "checksum names the archive and uses sha256",
+                ));
+                expected_sha256 = Some(sha256);
+            }
+            Err(error) => {
+                checks.push(sidecar_check(
+                    "package archive checksum format",
+                    ReadinessStatus::Fail,
+                    error,
+                ));
+            }
+        }
+    }
+
+    let actual_sha256 = if archive_ok {
+        Some(sidecar_package_file_sha256(archive)?)
+    } else {
+        None
+    };
+
+    if let (Some(expected), Some(actual)) = (&expected_sha256, &actual_sha256) {
+        if expected == actual {
+            checks.push(sidecar_check(
+                "package archive checksum match",
+                ReadinessStatus::Pass,
+                "archive sha256 matches checksum file",
+            ));
+        } else {
+            checks.push(sidecar_check(
+                "package archive checksum match",
+                ReadinessStatus::Fail,
+                "archive sha256 does not match checksum file",
+            ));
+        }
+    }
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(SidecarPackageArchiveCheckReport {
+        archive: archive.to_path_buf(),
+        checksum,
+        passed,
+        expected_sha256,
+        actual_sha256,
+        checks,
+    })
+}
+
+pub fn install_sidecar_package_archive(
+    archive: impl AsRef<Path>,
+    checksum: Option<PathBuf>,
+    out: impl AsRef<Path>,
+    force: bool,
+) -> Result<SidecarPackageInstallReport, AgentKError> {
+    let archive = archive.as_ref();
+    let out = out.as_ref();
+    let archive_check = check_sidecar_package_archive(archive, checksum)?;
+    if !archive_check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package archive check failed".to_string(),
+        ));
+    }
+    if out.exists() && !force {
+        return Err(AgentKError::FileExists(out.to_path_buf()));
+    }
+    if out.as_os_str().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package install output path must be non-empty".to_string(),
+        ));
+    }
+
+    let staging = sidecar_package_install_staging_path(out)?;
+    let result = (|| {
+        if staging.exists() {
+            return Err(AgentKError::FileExists(staging.clone()));
+        }
+        if let Some(parent) = staging.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir_all(&staging)?;
+
+        let files = unpack_sidecar_package_archive(archive, &staging)?;
+        let staging_check = check_sidecar_package(&staging)?;
+        if !staging_check.passed {
+            return Err(AgentKError::InvalidMcpRequest(
+                "installed sidecar package failed self-check".to_string(),
+            ));
+        }
+        let archive_sha256 = archive_check.actual_sha256.clone().unwrap_or_default();
+        write_sidecar_package_install_receipt(
+            &staging,
+            archive,
+            &archive_check.checksum,
+            &archive_sha256,
+            files,
+        )?;
+        let staging_check = check_sidecar_package(&staging)?;
+        if !staging_check.passed {
+            return Err(AgentKError::InvalidMcpRequest(
+                "installed sidecar package failed self-check after receipt write".to_string(),
+            ));
+        }
+
+        if out.exists() {
+            if out.is_dir() {
+                fs::remove_dir_all(out)?;
+            } else {
+                fs::remove_file(out)?;
+            }
+        }
+        fs::rename(&staging, out)?;
+        let receipt = out.join(SIDECAR_PACKAGE_INSTALL_RECEIPT);
+        let package_check = check_sidecar_package(out)?;
+
+        Ok(SidecarPackageInstallReport {
+            archive: archive.to_path_buf(),
+            checksum: archive_check.checksum,
+            package: out.to_path_buf(),
+            receipt,
+            files,
+            archive_sha256,
+            package_check,
+        })
+    })();
+
+    if result.is_err() {
+        fs::remove_dir_all(&staging).ok();
+    }
+
+    result
+}
+
+pub fn write_sidecar_package_release_manifest(
+    package: impl AsRef<Path>,
+    archive: impl AsRef<Path>,
+    checksum: Option<PathBuf>,
+    install_receipt: Option<PathBuf>,
+    out: impl AsRef<Path>,
+    force: bool,
+) -> Result<SidecarPackageReleaseManifestReport, AgentKError> {
+    let package = package.as_ref();
+    let archive = archive.as_ref();
+    let out = out.as_ref();
+    if out.starts_with(package) {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package release manifest must be written outside the package directory".to_string(),
+        ));
+    }
+    if out.exists() {
+        if out.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package release manifest path is a directory: {}",
+                out.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(out.to_path_buf()));
+        }
+    }
+
+    let package_check = check_sidecar_package(package)?;
+    if !package_check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package preflight failed".to_string(),
+        ));
+    }
+    let archive_check = check_sidecar_package_archive(archive, checksum)?;
+    if !archive_check.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package archive check failed".to_string(),
+        ));
+    }
+    let archive_sha256 = archive_check.actual_sha256.clone().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest("package archive sha256 was not available".to_string())
+    })?;
+
+    let install_receipt =
+        install_receipt.unwrap_or_else(|| package.join(SIDECAR_PACKAGE_INSTALL_RECEIPT));
+    let receipt_content = fs::read_to_string(&install_receipt)?;
+    let receipt: SidecarPackageInstallReceipt = serde_json::from_str(&receipt_content)?;
+    validate_sidecar_package_install_receipt(
+        &receipt,
+        archive,
+        &archive_check.checksum,
+        &archive_sha256,
+    )?;
+
+    let package_manifest = package.join("manifest.json");
+    let package_lock = package.join(SIDECAR_PACKAGE_LOCK);
+    let package_manifest_sha256 = sidecar_package_file_sha256(&package_manifest)?;
+    let package_lock_sha256 = sidecar_package_file_sha256(&package_lock)?;
+    let install_receipt_sha256 = sidecar_package_file_sha256(&install_receipt)?;
+
+    let report = SidecarPackageReleaseManifestReport {
+        schema_version: SIDECAR_PACKAGE_RELEASE_MANIFEST_SCHEMA_VERSION,
+        package_name: SIDECAR_PACKAGE_NAME.to_string(),
+        agentk_version: env!("CARGO_PKG_VERSION").to_string(),
+        generated_at_unix_seconds: unix_timestamp(),
+        output: out.to_path_buf(),
+        package_root: package.to_path_buf(),
+        package_manifest,
+        package_lock,
+        archive: archive.to_path_buf(),
+        checksum: archive_check.checksum.clone(),
+        install_receipt,
+        hash_algorithm: "sha256".to_string(),
+        archive_sha256,
+        package_manifest_sha256,
+        package_lock_sha256,
+        install_receipt_sha256,
+        installed_files: receipt.installed_files,
+        passed: true,
+        package_check,
+        archive_check,
+        receipt,
+    };
+
+    if let Some(parent) = out.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    write_public_file(
+        out,
+        format!("{}\n", serde_json::to_string_pretty(&report)?).as_bytes(),
+        force,
+    )?;
+
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_homebrew_formula(
+    source_url: &str,
+    sha256: Option<&str>,
+    source_archive: Option<&Path>,
+    out: impl AsRef<Path>,
+    version: Option<&str>,
+    homepage: Option<&str>,
+    class_name: Option<&str>,
+    force: bool,
+) -> Result<HomebrewFormulaReport, AgentKError> {
+    let out = out.as_ref();
+    if out.exists() {
+        if out.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "Homebrew formula output path is a directory: {}",
+                out.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(out.to_path_buf()));
+        }
+    }
+
+    validate_homebrew_url(source_url, "source URL")?;
+    let homepage = homepage.unwrap_or("https://github.com/agentk/agentk");
+    validate_homebrew_url(homepage, "homepage")?;
+    let version = version.unwrap_or(env!("CARGO_PKG_VERSION"));
+    validate_homebrew_version(version)?;
+    let class_name = class_name.unwrap_or("Agentk");
+    validate_homebrew_class_name(class_name)?;
+    let formula_name = homebrew_formula_name(class_name);
+
+    let computed_sha = source_archive
+        .map(sidecar_package_file_sha256)
+        .transpose()?;
+    let sha256 = match (sha256, computed_sha.as_deref()) {
+        (Some(provided), Some(computed)) => {
+            let provided = normalize_sha256(provided)?;
+            if provided != computed {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "Homebrew formula sha256 does not match source archive".to_string(),
+                ));
+            }
+            provided
+        }
+        (Some(provided), None) => normalize_sha256(provided)?,
+        (None, Some(computed)) => computed.to_string(),
+        (None, None) => {
+            return Err(AgentKError::InvalidMcpRequest(
+                "Homebrew formula requires --sha256 or --source-archive".to_string(),
+            ));
+        }
+    };
+
+    let formula = homebrew_formula(
+        class_name,
+        source_url,
+        &sha256,
+        version,
+        homepage,
+        env!("CARGO_PKG_DESCRIPTION"),
+        env!("CARGO_PKG_LICENSE"),
+    );
+    if let Some(parent) = out.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    write_public_file(out, formula.as_bytes(), force)?;
+
+    Ok(HomebrewFormulaReport {
+        output: out.to_path_buf(),
+        class_name: class_name.to_string(),
+        formula_name,
+        version: version.to_string(),
+        homepage: homepage.to_string(),
+        source_url: source_url.to_string(),
+        source_archive: source_archive.map(Path::to_path_buf),
+        sha256,
+        files: vec![out.to_path_buf()],
+    })
+}
+
+fn homebrew_formula(
+    class_name: &str,
+    source_url: &str,
+    sha256: &str,
+    version: &str,
+    homepage: &str,
+    description: &str,
+    license: &str,
+) -> String {
+    format!(
+        r##"class {class_name} < Formula
+  desc "{description}"
+  homepage "{homepage}"
+  url "{source_url}"
+  sha256 "{sha256}"
+  license "{license}"
+  version "{version}"
+
+  depends_on "rust" => :build
+
+  def install
+    system "cargo", "install", *std_cargo_args
+  end
+
+  test do
+    system "#{{bin}}/agentk", "--help"
+  end
+end
+"##,
+        class_name = class_name,
+        description = ruby_string_escape(description),
+        homepage = ruby_string_escape(homepage),
+        source_url = ruby_string_escape(source_url),
+        sha256 = sha256,
+        license = ruby_string_escape(license),
+        version = ruby_string_escape(version)
+    )
+}
+
+fn validate_homebrew_url(value: &str, label: &str) -> Result<(), AgentKError> {
+    if value.trim() != value
+        || !value.starts_with("https://")
+        || value.len() > 2048
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || value.contains('"')
+        || value.contains('\\')
+    {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "Homebrew formula {label} must be a clean https:// URL"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_sha256(value: &str) -> Result<String, AgentKError> {
+    let value = value.trim();
+    if value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err(AgentKError::InvalidMcpRequest(
+            "Homebrew formula sha256 must be 64 hex characters".to_string(),
+        ))
+    }
+}
+
+fn validate_homebrew_version(value: &str) -> Result<(), AgentKError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew formula version must be a non-empty release version".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_homebrew_class_name(value: &str) -> Result<(), AgentKError> {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew formula class name must be non-empty".to_string(),
+        ));
+    };
+    if !first.is_ascii_uppercase()
+        || !chars.all(|ch| ch.is_ascii_alphanumeric())
+        || value.len() > 80
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew formula class name must be CamelCase ASCII".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn homebrew_formula_name(class_name: &str) -> String {
+    let mut name = String::new();
+    for (index, ch) in class_name.chars().enumerate() {
+        if index > 0 && ch.is_ascii_uppercase() {
+            name.push('-');
+        }
+        name.push(ch.to_ascii_lowercase());
+    }
+    name
+}
+
+fn ruby_string_escape(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            _ if ch.is_control() => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 pub fn check_sidecar_package(
     root: impl AsRef<Path>,
 ) -> Result<SidecarPackageCheckReport, AgentKError> {
@@ -14155,6 +15990,7 @@ pub fn check_sidecar_package(
     let mut checks = vec![
         check_sidecar_required_file(root, "README.md"),
         check_sidecar_required_file(root, "manifest.json"),
+        check_sidecar_required_file(root, SIDECAR_PACKAGE_LOCK),
         check_sidecar_required_file(root, "sidecar/agentk-sidecar.toml"),
     ];
     for relative in SIDECAR_PACKAGE_LAUNCHERS
@@ -14162,6 +15998,7 @@ pub fn check_sidecar_package(
         .chain(SIDECAR_PACKAGE_CLIENT_SNIPPETS)
         .chain(SIDECAR_PACKAGE_STORAGE_CONTRACTS)
         .chain(SIDECAR_PACKAGE_DEPLOY_TEMPLATES)
+        .chain(SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES)
     {
         checks.push(check_sidecar_required_file(root, relative));
     }
@@ -14170,6 +16007,8 @@ pub fn check_sidecar_package(
     checks.push(check_sidecar_package_launcher_preflights(root));
     checks.push(check_sidecar_package_agentk_bin_guard(root));
     checks.push(check_sidecar_package_deploy_templates(root));
+    checks.push(check_sidecar_package_deploy_env_examples(root));
+    checks.push(check_sidecar_package_lock(root));
     checks.push(check_sidecar_package_sidecar_bundle(root));
 
     let passed = checks
@@ -14283,6 +16122,7 @@ fn check_sidecar_package_manifest_inventory(manifest: &serde_json::Value) -> Rea
         ("client_snippets", SIDECAR_PACKAGE_CLIENT_SNIPPETS),
         ("storage_contracts", SIDECAR_PACKAGE_STORAGE_CONTRACTS),
         ("deploy_templates", SIDECAR_PACKAGE_DEPLOY_TEMPLATES),
+        ("deploy_env_examples", SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES),
     ] {
         let Ok(values) = sidecar_manifest_string_array(manifest, key) else {
             return sidecar_check(
@@ -14304,7 +16144,7 @@ fn check_sidecar_package_manifest_inventory(manifest: &serde_json::Value) -> Rea
     sidecar_check(
         "package manifest inventory",
         ReadinessStatus::Pass,
-        "expected launchers, snippets, storage contracts, and deploy templates are listed",
+        "expected launchers, snippets, storage contracts, deploy templates, and env examples are listed",
     )
 }
 
@@ -14320,6 +16160,12 @@ fn check_sidecar_package_manifest_paths(
         }
     };
     paths.push((sidecar_bundle, true));
+    match sidecar_manifest_string(manifest, "package_lock") {
+        Ok(value) => paths.push((value, false)),
+        Err(error) => {
+            return sidecar_check("package manifest paths", ReadinessStatus::Fail, error);
+        }
+    }
     match sidecar_manifest_string(manifest, "safe_agent_demo") {
         Ok(value) => paths.push((value, false)),
         Err(error) => {
@@ -14331,6 +16177,7 @@ fn check_sidecar_package_manifest_paths(
         "client_snippets",
         "storage_contracts",
         "deploy_templates",
+        "deploy_env_examples",
     ] {
         match sidecar_manifest_string_array(manifest, key) {
             Ok(values) => paths.extend(values.into_iter().map(|value| (value, false))),
@@ -14345,6 +16192,11 @@ fn check_sidecar_package_manifest_paths(
         .and_then(|value| value.as_str())
     {
         paths.push((launcher, false));
+    }
+    if let Some(identity) = manifest.get("identity").and_then(|value| value.as_object()) {
+        for value in identity.values().filter_map(|value| value.as_str()) {
+            paths.push((value, false));
+        }
     }
     if let Some(workflow) = manifest
         .get("store_workflow")
@@ -14481,18 +16333,63 @@ fn check_sidecar_package_manifest_store_and_dashboard(
             .get("store_workflow")
             .and_then(|value| value.get("push"))
             .and_then(|value| value.as_str())
-            == Some("bin/agentk-store-push");
-    if !dashboard_ok || !store_ok {
+            == Some("bin/agentk-store-push")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("slack"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-slack")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("slack_send"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-slack-send")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("github"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-github")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("github_send"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-github-send")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("email"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-email")
+        && manifest
+            .get("store_workflow")
+            .and_then(|value| value.get("email_send"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-store-email-send");
+    let identity_ok = manifest
+        .get("identity")
+        .and_then(|value| value.get("manifest"))
+        .and_then(|value| value.as_str())
+        == Some("sidecar/team-identity.toml")
+        && manifest
+            .get("identity")
+            .and_then(|value| value.get("permissions"))
+            .and_then(|value| value.as_str())
+            == Some("sidecar/team-permissions.toml")
+        && manifest
+            .get("identity")
+            .and_then(|value| value.get("check"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-identity-check");
+    if !dashboard_ok || !store_ok || !identity_ok {
         return sidecar_check(
             "package manifest workflow",
             ReadinessStatus::Fail,
-            "dashboard and store workflow launchers must be listed",
+            "dashboard, identity, and store workflow launchers must be listed",
         );
     }
     sidecar_check(
         "package manifest workflow",
         ReadinessStatus::Pass,
-        "dashboard and store workflow launchers are listed",
+        "dashboard, identity, and store workflow launchers are listed",
     )
 }
 
@@ -14715,6 +16612,936 @@ fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
     )
 }
 
+fn check_sidecar_package_deploy_env_examples(root: &Path) -> ReadinessCheck {
+    let requirements = [
+        (
+            "deploy/env/sidecar-http.env.example",
+            &[
+                "AGENTK_BIN",
+                "AGENTK_MCP_HTTP_HOST",
+                "AGENTK_MCP_HTTP_PORT",
+                "AGENTK_MCP_HTTP_ENDPOINT",
+                "AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND",
+                "AGENTK_MCP_HTTP_TOKEN",
+            ][..],
+        ),
+        (
+            "deploy/env/dashboard.env.example",
+            &[
+                "AGENTK_BIN",
+                "AGENTK_DASHBOARD_HOST",
+                "AGENTK_DASHBOARD_PORT",
+                "AGENTK_DASHBOARD_ADMIN_TOKEN",
+                "AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND",
+            ][..],
+        ),
+        (
+            "deploy/env/store-postgres.env.example",
+            &[
+                "DATABASE_URL",
+                "AGENTK_STORE_ROOT",
+                "AGENTK_STORE_EXPORT_ROOT",
+            ][..],
+        ),
+        (
+            "deploy/env/notifications.env.example",
+            &[
+                "AGENTK_STORE_ROOT",
+                "AGENTK_SLACK_OUT",
+                "AGENTK_GITHUB_OUT",
+                "AGENTK_GITHUB_REPOSITORY",
+                "AGENTK_GITHUB_LABEL",
+            ][..],
+        ),
+    ];
+
+    for (relative, required_keys) in requirements {
+        let content = match fs::read_to_string(root.join(relative)) {
+            Ok(content) => content,
+            Err(error) => {
+                return sidecar_check(
+                    "package deploy env examples",
+                    ReadinessStatus::Fail,
+                    format!("{relative} could not be read: {error}"),
+                );
+            }
+        };
+        for key in required_keys {
+            let prefix = format!("{key}=");
+            if !content
+                .lines()
+                .map(str::trim)
+                .any(|line| line.starts_with(&prefix))
+            {
+                return sidecar_check(
+                    "package deploy env examples",
+                    ReadinessStatus::Fail,
+                    format!("{relative} is missing {key}"),
+                );
+            }
+        }
+        if let Err(error) = validate_deploy_env_example(relative, &content) {
+            return sidecar_check("package deploy env examples", ReadinessStatus::Fail, error);
+        }
+    }
+
+    sidecar_check(
+        "package deploy env examples",
+        ReadinessStatus::Pass,
+        format!(
+            "{} deploy env examples contain required dummy values",
+            SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES.len()
+        ),
+    )
+}
+
+fn validate_deploy_env_example(relative: &str, content: &str) -> Result<(), String> {
+    let mut assignments = 0usize;
+    for (line_index, line) in content.lines().enumerate() {
+        let line_number = line_index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(format!("{relative}:{line_number} must be KEY=value"));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if !is_safe_mcp_env_name(key) {
+            return Err(format!("{relative}:{line_number} has unsafe env key {key}"));
+        }
+        if value.is_empty() {
+            return Err(format!(
+                "{relative}:{line_number} must not use an empty value"
+            ));
+        }
+        if value.contains("$(") || value.contains('`') {
+            return Err(format!(
+                "{relative}:{line_number} must not include command substitution"
+            ));
+        }
+        if deploy_env_key_requires_placeholder(key) && !value.contains("CHANGE_ME") {
+            return Err(format!(
+                "{relative}:{line_number} {key} must keep a CHANGE_ME placeholder"
+            ));
+        }
+        if deploy_env_value_looks_real_secret(key, value) {
+            return Err(format!(
+                "{relative}:{line_number} {key} looks like a real credential"
+            ));
+        }
+        assignments += 1;
+    }
+    if assignments == 0 {
+        return Err(format!("{relative} must contain KEY=value assignments"));
+    }
+    Ok(())
+}
+
+fn deploy_env_key_requires_placeholder(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    if upper.ends_with("_ENV") {
+        return false;
+    }
+    upper == "DATABASE_URL"
+        || upper.contains("TOKEN")
+        || upper.contains("PASSWORD")
+        || upper.contains("SECRET")
+}
+
+fn deploy_env_value_looks_real_secret(key: &str, value: &str) -> bool {
+    if !deploy_env_key_requires_placeholder(key) || value.contains("CHANGE_ME") {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    let openai_key_prefix = ["sk", "-"].concat();
+    lower.starts_with(&openai_key_prefix)
+        || lower.starts_with("ghp_")
+        || lower.starts_with("github_pat_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxp-")
+        || lower.starts_with("xoxa-")
+        || value.starts_with("AKIA")
+        || value.starts_with("ASIA")
+}
+
+fn write_sidecar_package_lock(root: &Path) -> Result<PathBuf, AgentKError> {
+    let lock = sidecar_package_lock(root)?;
+    let content = format!("{}\n", serde_json::to_string_pretty(&lock)?);
+    write_packaged_sidecar_file(root, SIDECAR_PACKAGE_LOCK, &content)
+}
+
+fn sidecar_package_lock(root: &Path) -> Result<SidecarPackageLock, AgentKError> {
+    Ok(SidecarPackageLock {
+        schema_version: SIDECAR_PACKAGE_LOCK_SCHEMA_VERSION,
+        package: SIDECAR_PACKAGE_NAME.to_string(),
+        agentk_version: env!("CARGO_PKG_VERSION").to_string(),
+        hash_algorithm: "sha256".to_string(),
+        excludes: SIDECAR_PACKAGE_LOCK_EXCLUDES
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        files: sidecar_package_lock_files(root)?,
+    })
+}
+
+fn sidecar_package_lock_files(root: &Path) -> Result<Vec<SidecarPackageLockFile>, AgentKError> {
+    let mut relative_paths = Vec::new();
+    collect_sidecar_package_lock_paths(root, root, &mut relative_paths)?;
+    relative_paths.sort_unstable();
+
+    relative_paths
+        .into_iter()
+        .map(|relative| sidecar_package_lock_file(root, &relative))
+        .collect()
+}
+
+fn collect_sidecar_package_lock_paths(
+    root: &Path,
+    dir: &Path,
+    relative_paths: &mut Vec<String>,
+) -> Result<(), AgentKError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| {
+            AgentKError::InvalidMcpRequest("package path escaped package root".to_string())
+        })?;
+        let relative = sidecar_package_relative_string(relative)?;
+        if sidecar_package_lock_excludes(&relative) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package lock does not allow symlinks: {relative}"
+            )));
+        }
+        if metadata.is_dir() {
+            collect_sidecar_package_lock_paths(root, &path, relative_paths)?;
+        } else if metadata.is_file() {
+            relative_paths.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn sidecar_package_lock_file(
+    root: &Path,
+    relative: &str,
+) -> Result<SidecarPackageLockFile, AgentKError> {
+    validate_sidecar_relative_path(relative).map_err(AgentKError::InvalidMcpRequest)?;
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "package lock does not allow symlinks: {relative}"
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "package lock entry is not a file: {relative}"
+        )));
+    }
+    Ok(SidecarPackageLockFile {
+        path: relative.to_string(),
+        bytes: metadata.len(),
+        sha256: sidecar_package_file_sha256(&path)?,
+        executable: sidecar_package_file_executable(&metadata),
+    })
+}
+
+fn sidecar_package_file_sha256(path: &Path) -> Result<String, AgentKError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(unix)]
+fn sidecar_package_file_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn sidecar_package_file_executable(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn sidecar_package_relative_string(path: &Path) -> Result<String, AgentKError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let Some(part) = part.to_str() else {
+                    return Err(AgentKError::InvalidMcpRequest(
+                        "package lock paths must be valid UTF-8".to_string(),
+                    ));
+                };
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            _ => {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "package lock paths must stay relative".to_string(),
+                ));
+            }
+        }
+    }
+    let relative = parts.join("/");
+    validate_sidecar_relative_path(&relative).map_err(AgentKError::InvalidMcpRequest)?;
+    Ok(relative)
+}
+
+fn check_sidecar_package_lock(root: &Path) -> ReadinessCheck {
+    match verify_sidecar_package_lock(root) {
+        Ok(count) => sidecar_check(
+            "package lock",
+            ReadinessStatus::Pass,
+            format!("{count} files match package.lock.json"),
+        ),
+        Err(error) => sidecar_check("package lock", ReadinessStatus::Fail, error),
+    }
+}
+
+fn verify_sidecar_package_lock(root: &Path) -> Result<usize, String> {
+    let lock_path = root.join(SIDECAR_PACKAGE_LOCK);
+    let content = fs::read_to_string(&lock_path)
+        .map_err(|error| format!("{SIDECAR_PACKAGE_LOCK} could not be read: {error}"))?;
+    let lock = serde_json::from_str::<SidecarPackageLock>(&content)
+        .map_err(|error| format!("{SIDECAR_PACKAGE_LOCK} did not parse: {error}"))?;
+    if lock.schema_version != SIDECAR_PACKAGE_LOCK_SCHEMA_VERSION {
+        return Err(format!(
+            "package lock schema_version must be {SIDECAR_PACKAGE_LOCK_SCHEMA_VERSION}"
+        ));
+    }
+    if lock.package != SIDECAR_PACKAGE_NAME {
+        return Err(format!(
+            "package lock package must be {SIDECAR_PACKAGE_NAME}"
+        ));
+    }
+    if lock.hash_algorithm != "sha256" {
+        return Err("package lock hash_algorithm must be sha256".to_string());
+    }
+    for excluded in SIDECAR_PACKAGE_LOCK_EXCLUDES {
+        if !lock.excludes.iter().any(|value| value == excluded) {
+            return Err(format!("package lock excludes must list {excluded}"));
+        }
+    }
+    if lock.files.is_empty() {
+        return Err("package lock must list package files".to_string());
+    }
+
+    let actual = sidecar_package_lock_files(root).map_err(|error| error.to_string())?;
+    let expected = sidecar_package_lock_map(lock.files)?;
+    let actual = sidecar_package_lock_map(actual).map_err(|error| error.to_string())?;
+
+    for (path, expected_file) in &expected {
+        let Some(actual_file) = actual.get(path) else {
+            return Err(format!("{path} is listed in package lock but missing"));
+        };
+        if actual_file.bytes != expected_file.bytes {
+            return Err(format!("{path} byte count changed"));
+        }
+        if actual_file.sha256 != expected_file.sha256 {
+            return Err(format!("{path} sha256 changed"));
+        }
+        if actual_file.executable != expected_file.executable {
+            return Err(format!("{path} executable bit changed"));
+        }
+    }
+    for path in actual.keys() {
+        if !expected.contains_key(path) {
+            return Err(format!("{path} is present but not listed in package lock"));
+        }
+    }
+
+    Ok(expected.len())
+}
+
+fn sidecar_package_lock_map(
+    files: Vec<SidecarPackageLockFile>,
+) -> Result<BTreeMap<String, SidecarPackageLockFile>, String> {
+    let mut map = BTreeMap::new();
+    for file in files {
+        validate_sidecar_relative_path(&file.path)?;
+        if sidecar_package_lock_excludes(&file.path) {
+            return Err(format!("{} must not be listed in package lock", file.path));
+        }
+        if file.sha256.len() != 64 || !file.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(format!("{} has an invalid sha256", file.path));
+        }
+        if map.insert(file.path.clone(), file).is_some() {
+            return Err("package lock contains duplicate file paths".to_string());
+        }
+    }
+    Ok(map)
+}
+
+fn sidecar_package_lock_excludes(relative: &str) -> bool {
+    relative == SIDECAR_PACKAGE_LOCK
+        || relative == SIDECAR_PACKAGE_RUNTIME_STATE
+        || relative
+            .strip_prefix(SIDECAR_PACKAGE_RUNTIME_STATE)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn sidecar_package_archive_files(root: &Path) -> Result<Vec<String>, AgentKError> {
+    let mut relative_paths = Vec::new();
+    collect_sidecar_package_archive_paths(root, root, &mut relative_paths)?;
+    relative_paths.sort_unstable();
+    Ok(relative_paths)
+}
+
+fn collect_sidecar_package_archive_paths(
+    root: &Path,
+    dir: &Path,
+    relative_paths: &mut Vec<String>,
+) -> Result<(), AgentKError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|_| {
+            AgentKError::InvalidMcpRequest("package archive path escaped package root".to_string())
+        })?;
+        let relative = sidecar_package_relative_string(relative)?;
+        if sidecar_package_archive_excludes(&relative) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package archive does not allow symlinks: {relative}"
+            )));
+        }
+        if metadata.is_dir() {
+            collect_sidecar_package_archive_paths(root, &path, relative_paths)?;
+        } else if metadata.is_file() {
+            relative_paths.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn sidecar_package_archive_excludes(relative: &str) -> bool {
+    relative == SIDECAR_PACKAGE_RUNTIME_STATE
+        || relative
+            .strip_prefix(SIDECAR_PACKAGE_RUNTIME_STATE)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn sidecar_package_archive_checksum_path(archive: &Path) -> Result<PathBuf, AgentKError> {
+    let file_name = sidecar_package_archive_file_name(archive)?;
+    Ok(archive.with_file_name(format!("{file_name}.sha256")))
+}
+
+fn write_sidecar_package_archive_checksum(
+    archive: &Path,
+    checksum: &Path,
+    sha256: &str,
+) -> Result<(), AgentKError> {
+    let file_name = sidecar_package_archive_file_name(archive)?;
+    if let Some(parent) = checksum
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(checksum, format!("{sha256}  {file_name}\n"))?;
+    Ok(())
+}
+
+fn sidecar_package_archive_file_name(archive: &Path) -> Result<String, AgentKError> {
+    sidecar_package_safe_file_name(archive, "package archive filename", "checksum output")
+}
+
+fn sidecar_package_safe_file_name(
+    path: &Path,
+    label: &str,
+    usage: &str,
+) -> Result<String, AgentKError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AgentKError::InvalidMcpRequest(format!("{label} must be valid UTF-8")))?;
+    if file_name.contains('/') || file_name.contains('\\') || file_name.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "{label} is unsafe for {usage}"
+        )));
+    }
+    Ok(file_name.to_string())
+}
+
+fn parse_sidecar_package_archive_checksum(
+    content: &str,
+    archive_file_name: Option<&str>,
+) -> Result<String, String> {
+    let mut lines = content.lines();
+    let Some(line) = lines.next() else {
+        return Err("checksum file is empty".to_string());
+    };
+    if lines.next().is_some() {
+        return Err("checksum file must contain one line".to_string());
+    }
+    let mut parts = line.split_whitespace();
+    let Some(sha256) = parts.next() else {
+        return Err("checksum line must start with sha256".to_string());
+    };
+    let Some(file_name) = parts.next() else {
+        return Err("checksum line must include archive filename".to_string());
+    };
+    if parts.next().is_some() {
+        return Err("checksum line must contain only sha256 and archive filename".to_string());
+    }
+    if sha256.len() != 64 || !sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("checksum sha256 must be 64 hex characters".to_string());
+    }
+    if file_name.contains('/') || file_name.contains('\\') {
+        return Err("checksum filename must not contain path separators".to_string());
+    }
+    if let Some(expected_file_name) = archive_file_name {
+        if file_name != expected_file_name {
+            return Err(format!(
+                "checksum filename must be {expected_file_name}, got {file_name}"
+            ));
+        }
+    }
+    Ok(sha256.to_ascii_lowercase())
+}
+
+fn sidecar_package_install_staging_path(out: &Path) -> Result<PathBuf, AgentKError> {
+    let name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "package install output path must end with a valid UTF-8 directory name"
+                    .to_string(),
+            )
+        })?;
+    if name.trim().is_empty() || name.contains('/') || name.contains('\\') {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package install output directory name is unsafe".to_string(),
+        ));
+    }
+    let parent = out
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Ok(parent.join(format!(".{name}.installing-{}-{nanos}", std::process::id())))
+}
+
+fn write_sidecar_package_install_receipt(
+    package: &Path,
+    archive: &Path,
+    checksum: &Path,
+    archive_sha256: &str,
+    files: usize,
+) -> Result<PathBuf, AgentKError> {
+    let archive_file = sidecar_package_archive_file_name(archive)?;
+    let checksum_file = sidecar_package_safe_file_name(
+        checksum,
+        "package archive checksum filename",
+        "install receipt",
+    )?;
+    let receipt = SidecarPackageInstallReceipt {
+        schema_version: SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION,
+        package: SIDECAR_PACKAGE_NAME.to_string(),
+        agentk_version: env!("CARGO_PKG_VERSION").to_string(),
+        archive_file,
+        checksum_file,
+        hash_algorithm: "sha256".to_string(),
+        archive_sha256: archive_sha256.to_string(),
+        installed_files: files,
+        installed_at_unix_seconds: unix_timestamp(),
+    };
+    let path = package.join(SIDECAR_PACKAGE_INSTALL_RECEIPT);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&receipt)?),
+    )?;
+    Ok(path)
+}
+
+fn validate_sidecar_package_install_receipt(
+    receipt: &SidecarPackageInstallReceipt,
+    archive: &Path,
+    checksum: &Path,
+    archive_sha256: &str,
+) -> Result<(), AgentKError> {
+    if receipt.schema_version != SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "install receipt schema_version must be {SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION}"
+        )));
+    }
+    if receipt.package != SIDECAR_PACKAGE_NAME {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "install receipt package must be {SIDECAR_PACKAGE_NAME}"
+        )));
+    }
+    if receipt.agentk_version.trim().is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "install receipt agentk_version must be non-empty".to_string(),
+        ));
+    }
+    if receipt.hash_algorithm != "sha256" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "install receipt hash_algorithm must be sha256".to_string(),
+        ));
+    }
+    let archive_file = sidecar_package_archive_file_name(archive)?;
+    if receipt.archive_file != archive_file {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "install receipt archive_file must be {archive_file}"
+        )));
+    }
+    let checksum_file = sidecar_package_safe_file_name(
+        checksum,
+        "package archive checksum filename",
+        "install receipt validation",
+    )?;
+    if receipt.checksum_file != checksum_file {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "install receipt checksum_file must be {checksum_file}"
+        )));
+    }
+    if receipt.archive_sha256 != archive_sha256 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "install receipt archive_sha256 does not match archive checksum".to_string(),
+        ));
+    }
+    if receipt.installed_files == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "install receipt installed_files must be positive".to_string(),
+        ));
+    }
+    if receipt.installed_at_unix_seconds == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "install receipt installed_at_unix_seconds must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn unpack_sidecar_package_archive(archive: &Path, out: &Path) -> Result<usize, AgentKError> {
+    let bytes = fs::read(archive)?;
+    let mut offset = 0usize;
+    let mut package_root = None;
+    let mut files = 0usize;
+
+    loop {
+        if offset + 512 > bytes.len() {
+            return Err(AgentKError::InvalidMcpRequest(
+                "package archive ended before a complete tar header".to_string(),
+            ));
+        }
+        let header = &bytes[offset..offset + 512];
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+
+        let archive_path = read_ustar_path(header)?;
+        let size = read_ustar_octal(&header[124..136], "size")?;
+        let mode = read_ustar_octal(&header[100..108], "mode")?;
+        let typeflag = header[156];
+        let data_start = offset + 512;
+        let padded_size = size.div_ceil(512) * 512;
+        let size_usize = usize::try_from(size).map_err(|_| {
+            AgentKError::InvalidMcpRequest("tar entry is too large for this platform".to_string())
+        })?;
+        let padded_size_usize = usize::try_from(padded_size).map_err(|_| {
+            AgentKError::InvalidMcpRequest("tar entry is too large for this platform".to_string())
+        })?;
+        let data_end = data_start
+            .checked_add(size_usize)
+            .ok_or_else(|| AgentKError::InvalidMcpRequest("tar entry is too large".to_string()))?;
+        let next_offset = data_start
+            .checked_add(padded_size_usize)
+            .ok_or_else(|| AgentKError::InvalidMcpRequest("tar entry is too large".to_string()))?;
+        if next_offset > bytes.len() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "tar entry {archive_path} extends past archive end"
+            )));
+        }
+
+        let relative = sidecar_package_install_relative(&archive_path, &mut package_root)?;
+        match typeflag {
+            b'5' => {
+                if size != 0 {
+                    return Err(AgentKError::InvalidMcpRequest(format!(
+                        "tar directory entry {archive_path} must have zero size"
+                    )));
+                }
+                if !relative.is_empty() {
+                    fs::create_dir_all(out.join(relative))?;
+                }
+            }
+            b'0' | 0 => {
+                if relative.is_empty() {
+                    return Err(AgentKError::InvalidMcpRequest(
+                        "tar file entries must be inside the package root".to_string(),
+                    ));
+                }
+                let path = out.join(&relative);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&path, &bytes[data_start..data_end])?;
+                sidecar_package_install_file_mode(&path, mode)?;
+                files += 1;
+            }
+            _ => {
+                return Err(AgentKError::InvalidMcpRequest(format!(
+                    "tar entry {archive_path} has unsupported typeflag {typeflag}"
+                )));
+            }
+        }
+
+        offset = next_offset;
+    }
+
+    if package_root.is_none() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package archive does not contain a package root".to_string(),
+        ));
+    }
+    if files == 0 {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package archive does not contain package files".to_string(),
+        ));
+    }
+    Ok(files)
+}
+
+fn read_ustar_path(header: &[u8]) -> Result<String, AgentKError> {
+    let name = read_ustar_string(&header[0..100], "name")?;
+    let prefix = read_ustar_string(&header[345..500], "prefix")?;
+    let path = if prefix.is_empty() {
+        name
+    } else {
+        format!("{prefix}/{name}")
+    };
+    if path.contains('\\') {
+        return Err(AgentKError::InvalidMcpRequest(
+            "tar paths must not contain backslashes".to_string(),
+        ));
+    }
+    validate_sidecar_relative_path(&path).map_err(AgentKError::InvalidMcpRequest)?;
+    Ok(path)
+}
+
+fn read_ustar_string(field: &[u8], name: &str) -> Result<String, AgentKError> {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    let value = std::str::from_utf8(&field[..end]).map_err(|_| {
+        AgentKError::InvalidMcpRequest(format!("tar {name} field must be valid UTF-8"))
+    })?;
+    Ok(value.trim().to_string())
+}
+
+fn read_ustar_octal(field: &[u8], name: &str) -> Result<u64, AgentKError> {
+    let value = read_ustar_string(field, name)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(0);
+    }
+    let digits = value.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    u64::from_str_radix(digits, 8)
+        .map_err(|_| AgentKError::InvalidMcpRequest(format!("tar {name} field must be octal")))
+}
+
+fn sidecar_package_install_relative(
+    archive_path: &str,
+    package_root: &mut Option<String>,
+) -> Result<String, AgentKError> {
+    let (root, relative) = archive_path.split_once('/').unwrap_or((archive_path, ""));
+    validate_sidecar_relative_path(root).map_err(AgentKError::InvalidMcpRequest)?;
+    if root.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "tar entries must include a package root directory".to_string(),
+        ));
+    }
+    match package_root {
+        Some(expected) if expected != root => {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "tar entries must stay under one package root: expected {expected}, got {root}"
+            )));
+        }
+        Some(_) => {}
+        None => *package_root = Some(root.to_string()),
+    }
+    if !relative.is_empty() {
+        validate_sidecar_relative_path(relative).map_err(AgentKError::InvalidMcpRequest)?;
+    }
+    Ok(relative.to_string())
+}
+
+#[cfg(unix)]
+fn sidecar_package_install_file_mode(path: &Path, mode: u64) -> Result<(), AgentKError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode((mode & 0o777) as u32);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sidecar_package_install_file_mode(_path: &Path, _mode: u64) -> Result<(), AgentKError> {
+    Ok(())
+}
+
+fn write_sidecar_package_archive<W: Write>(
+    writer: &mut W,
+    package: &Path,
+    root_name: &str,
+    files: &[String],
+) -> Result<(), AgentKError> {
+    for directory in sidecar_package_archive_dirs(root_name, files) {
+        write_ustar_header(writer, &directory, 0o755, 0, b'5')?;
+    }
+
+    for relative in files {
+        let path = package.join(relative);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "package archive entry is not a file: {relative}"
+            )));
+        }
+        let mode = if sidecar_package_file_executable(&metadata) {
+            0o755
+        } else {
+            0o644
+        };
+        let archive_path = format!("{root_name}/{relative}");
+        write_ustar_header(writer, &archive_path, mode, metadata.len(), b'0')?;
+
+        let mut file = fs::File::open(&path)?;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..read])?;
+        }
+        write_ustar_padding(writer, metadata.len())?;
+    }
+
+    writer.write_all(&[0u8; 1024])?;
+    Ok(())
+}
+
+fn sidecar_package_archive_dirs(root_name: &str, files: &[String]) -> Vec<String> {
+    let mut dirs = BTreeSet::new();
+    dirs.insert(root_name.to_string());
+    for relative in files {
+        let mut prefix = root_name.to_string();
+        for part in relative.split('/').take(relative.matches('/').count()) {
+            prefix.push('/');
+            prefix.push_str(part);
+            dirs.insert(prefix.clone());
+        }
+    }
+    dirs.into_iter().collect()
+}
+
+fn write_ustar_header<W: Write>(
+    writer: &mut W,
+    path: &str,
+    mode: u64,
+    size: u64,
+    typeflag: u8,
+) -> Result<(), AgentKError> {
+    validate_sidecar_relative_path(path).map_err(AgentKError::InvalidMcpRequest)?;
+    let (prefix, name) = ustar_split_path(path)?;
+    let mut header = [0u8; 512];
+    write_tar_bytes(&mut header[0..100], name.as_bytes());
+    write_tar_octal(&mut header[100..108], mode)?;
+    write_tar_octal(&mut header[108..116], 0)?;
+    write_tar_octal(&mut header[116..124], 0)?;
+    write_tar_octal(&mut header[124..136], size)?;
+    write_tar_octal(&mut header[136..148], 0)?;
+    for byte in &mut header[148..156] {
+        *byte = b' ';
+    }
+    header[156] = typeflag;
+    write_tar_bytes(&mut header[257..263], b"ustar\0");
+    write_tar_bytes(&mut header[263..265], b"00");
+    write_tar_bytes(&mut header[265..297], b"agentk");
+    write_tar_bytes(&mut header[297..329], b"agentk");
+    write_tar_bytes(&mut header[345..500], prefix.as_bytes());
+
+    let checksum = header.iter().map(|byte| *byte as u32).sum::<u32>();
+    let checksum = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(checksum.as_bytes());
+    writer.write_all(&header)?;
+    Ok(())
+}
+
+fn ustar_split_path(path: &str) -> Result<(&str, &str), AgentKError> {
+    if path.as_bytes().len() <= 100 {
+        return Ok(("", path));
+    }
+    for (index, _) in path.match_indices('/').rev() {
+        let prefix = &path[..index];
+        let name = &path[index + 1..];
+        if !name.is_empty() && prefix.as_bytes().len() <= 155 && name.as_bytes().len() <= 100 {
+            return Ok((prefix, name));
+        }
+    }
+    Err(AgentKError::InvalidMcpRequest(format!(
+        "package archive path is too long for ustar: {path}"
+    )))
+}
+
+fn write_tar_bytes(field: &mut [u8], value: &[u8]) {
+    let length = field.len().min(value.len());
+    field[..length].copy_from_slice(&value[..length]);
+}
+
+fn write_tar_octal(field: &mut [u8], value: u64) -> Result<(), AgentKError> {
+    let width = field.len();
+    let octal = format!("{value:o}");
+    if octal.len() + 1 > width {
+        return Err(AgentKError::InvalidMcpRequest(
+            "package archive metadata value is too large for ustar".to_string(),
+        ));
+    }
+    let formatted = format!("{value:0width$o}\0", width = width - 1);
+    field.copy_from_slice(formatted.as_bytes());
+    Ok(())
+}
+
+fn write_ustar_padding<W: Write>(writer: &mut W, size: u64) -> Result<(), AgentKError> {
+    let remainder = size % 512;
+    if remainder == 0 {
+        return Ok(());
+    }
+    let padding = 512 - remainder;
+    writer.write_all(&[0u8; 512][..padding as usize])?;
+    Ok(())
+}
+
 fn check_sidecar_package_sidecar_bundle(root: &Path) -> ReadinessCheck {
     match check_sidecar_bundle(root.join("sidecar")) {
         Ok(report) if report.passed => sidecar_check(
@@ -14799,6 +17626,8 @@ struct SidecarManifestSidecar {
     audit_log: String,
     policy: String,
     permissions: String,
+    #[serde(default)]
+    identity: Option<String>,
     secrets: String,
 }
 
@@ -14832,6 +17661,7 @@ pub fn check_sidecar_bundle(root: impl AsRef<Path>) -> Result<SidecarCheckReport
         check_sidecar_required_file(root, "clients/claude-desktop.mcp.json"),
         check_sidecar_required_file(root, "clients/codex-cursor-mcp-command.txt"),
         check_sidecar_required_file(root, "team-permissions.toml"),
+        check_sidecar_required_file(root, "team-identity.toml"),
     ];
 
     let config_path = root.join("agentk-sidecar.toml");
@@ -15049,6 +17879,47 @@ fn check_sidecar_manifest(root: &Path, manifest: &SidecarManifest) -> Vec<Readin
             ReadinessStatus::Fail,
             error,
         )),
+    }
+
+    if let Some(identity) = &manifest.sidecar.identity {
+        let permissions_path = sidecar_relative_path(root, &manifest.sidecar.permissions);
+        match sidecar_relative_path(root, identity) {
+            Ok(path) => match permissions_path {
+                Ok(permissions_path) => {
+                    match team_identity_report_from_path(&path, Some(&permissions_path)) {
+                        Ok(report) => checks.push(sidecar_check(
+                            "sidecar team identity",
+                            ReadinessStatus::Pass,
+                            format!(
+                                "{} providers, {} mappings, {} mapped reviewers",
+                                report.providers, report.mappings, report.mapped_reviewers
+                            ),
+                        )),
+                        Err(error) => checks.push(sidecar_check(
+                            "sidecar team identity",
+                            ReadinessStatus::Fail,
+                            error.to_string(),
+                        )),
+                    }
+                }
+                Err(error) => checks.push(sidecar_check(
+                    "sidecar team identity",
+                    ReadinessStatus::Fail,
+                    error,
+                )),
+            },
+            Err(error) => checks.push(sidecar_check(
+                "sidecar team identity",
+                ReadinessStatus::Fail,
+                error,
+            )),
+        }
+    } else {
+        checks.push(sidecar_check(
+            "sidecar team identity",
+            ReadinessStatus::Warn,
+            "team identity mapping is not configured",
+        ));
     }
 
     checks.push(if manifest.mcp.agent_id.trim().is_empty() {
@@ -15473,6 +18344,7 @@ fn audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> {
         "postgres/team_roles.tsv",
         "postgres/team_user_roles.tsv",
         "postgres/team_role_scopes.tsv",
+        "postgres/team_identity_mappings.tsv",
     ]
     .into_iter()
     .map(|relative| {
@@ -15507,6 +18379,7 @@ fn durable_audit_store_required_file_checks(root: &Path) -> Vec<ReadinessCheck> 
         "tables/evidence_summary.jsonl",
         "tables/notifications.jsonl",
         "tables/team_reviewers.jsonl",
+        "tables/team_identity_mappings.jsonl",
         "README.md",
     ]
     .into_iter()
@@ -15545,6 +18418,7 @@ fn check_audit_store_load_sql(root: &Path) -> ReadinessCheck {
         "\\copy agentk_team_roles",
         "\\copy agentk_team_user_roles",
         "\\copy agentk_team_role_scopes",
+        "\\copy agentk_team_identity_mappings",
     ];
     let missing = required
         .iter()
@@ -15603,6 +18477,7 @@ fn check_durable_store_schema(root: &Path) -> ReadinessCheck {
         "tables/evidence_summary.jsonl",
         "tables/notifications.jsonl",
         "tables/team_reviewers.jsonl",
+        "tables/team_identity_mappings.jsonl",
     ];
     let tables_ok = required_tables.iter().all(|required| {
         tables
@@ -15630,6 +18505,7 @@ fn check_durable_store_jsonl_counts(
     audit: Option<&AuditInboxReport>,
     approvals: Option<&ApprovalReviewReport>,
     permissions: Option<&TeamPermissionsReport>,
+    identity: Option<&TeamIdentityReport>,
 ) -> ReadinessCheck {
     let traces = count_jsonl_rows(root.join("tables/traces.jsonl"));
     let events = count_jsonl_rows(root.join("tables/audit_events.jsonl"));
@@ -15639,6 +18515,7 @@ fn check_durable_store_jsonl_counts(
     let evidence = count_jsonl_rows(root.join("tables/evidence_summary.jsonl"));
     let notifications = count_jsonl_rows(root.join("tables/notifications.jsonl"));
     let reviewers = count_jsonl_rows(root.join("tables/team_reviewers.jsonl"));
+    let identity_mappings = count_jsonl_rows(root.join("tables/team_identity_mappings.jsonl"));
     let (
         Ok(traces),
         Ok(events),
@@ -15648,6 +18525,7 @@ fn check_durable_store_jsonl_counts(
         Ok(evidence),
         Ok(notifications),
         Ok(reviewers),
+        Ok(identity_mappings),
     ) = (
         traces,
         events,
@@ -15657,6 +18535,7 @@ fn check_durable_store_jsonl_counts(
         evidence,
         notifications,
         reviewers,
+        identity_mappings,
     )
     else {
         return readiness_check(
@@ -15686,6 +18565,7 @@ fn check_durable_store_jsonl_counts(
     let expected_reviewers = permissions
         .map(|permissions| permissions.reviewers.len())
         .unwrap_or(0);
+    let expected_identity_mappings = identity.map(|identity| identity.mappings).unwrap_or(0);
 
     if traces == 1
         && events == expected_events
@@ -15695,12 +18575,13 @@ fn check_durable_store_jsonl_counts(
         && evidence == expected_evidence
         && notifications == expected_notifications
         && reviewers == expected_reviewers
+        && identity_mappings == expected_identity_mappings
     {
         readiness_check(
             "durable jsonl rows",
             ReadinessStatus::Pass,
             format!(
-                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries, {notifications} notifications, {reviewers} reviewers"
+                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries, {notifications} notifications, {reviewers} reviewers, {identity_mappings} identity mappings"
             ),
         )
     } else {
@@ -15708,7 +18589,7 @@ fn check_durable_store_jsonl_counts(
             "durable jsonl rows",
             ReadinessStatus::Fail,
             format!(
-                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence}/{expected_notifications}/{expected_reviewers} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}/{notifications}/{reviewers}"
+                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence}/{expected_notifications}/{expected_reviewers}/{expected_identity_mappings} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}/{notifications}/{reviewers}/{identity_mappings}"
             ),
         )
     }
@@ -15718,6 +18599,7 @@ fn check_audit_store_tsv_counts(
     root: &Path,
     audit: Option<&AuditInboxReport>,
     approvals: Option<&ApprovalReviewReport>,
+    identity: Option<&TeamIdentityReport>,
 ) -> ReadinessCheck {
     let traces = count_tsv_rows(root.join("postgres/traces.tsv"));
     let events = count_tsv_rows(root.join("postgres/audit_events.tsv"));
@@ -15725,8 +18607,24 @@ fn check_audit_store_tsv_counts(
     let blocked_rules = count_tsv_rows(root.join("postgres/blocked_rules.tsv"));
     let syscalls = count_tsv_rows(root.join("postgres/syscall_summary.tsv"));
     let evidence = count_tsv_rows(root.join("postgres/evidence_summary.tsv"));
-    let (Ok(traces), Ok(events), Ok(decisions), Ok(blocked_rules), Ok(syscalls), Ok(evidence)) =
-        (traces, events, decisions, blocked_rules, syscalls, evidence)
+    let identity_mappings = count_tsv_rows(root.join("postgres/team_identity_mappings.tsv"));
+    let (
+        Ok(traces),
+        Ok(events),
+        Ok(decisions),
+        Ok(blocked_rules),
+        Ok(syscalls),
+        Ok(evidence),
+        Ok(identity_mappings),
+    ) = (
+        traces,
+        events,
+        decisions,
+        blocked_rules,
+        syscalls,
+        evidence,
+        identity_mappings,
+    )
     else {
         return readiness_check(
             "postgres tsv rows",
@@ -15749,18 +18647,20 @@ fn check_audit_store_tsv_counts(
     let expected_evidence = audit
         .map(|audit| audit.evidence_summary.len())
         .unwrap_or(evidence);
+    let expected_identity_mappings = identity.map(|identity| identity.mappings).unwrap_or(0);
     if traces == 1
         && events == expected_events
         && decisions == expected_decisions
         && blocked_rules == expected_blocked_rules
         && syscalls == expected_syscalls
         && evidence == expected_evidence
+        && identity_mappings == expected_identity_mappings
     {
         readiness_check(
             "postgres tsv rows",
             ReadinessStatus::Pass,
             format!(
-                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries"
+                "{traces} trace, {events} audit events, {decisions} decisions, {blocked_rules} blocked-rule summaries, {syscalls} syscall summaries, {evidence} evidence summaries, {identity_mappings} identity mappings"
             ),
         )
     } else {
@@ -15768,7 +18668,7 @@ fn check_audit_store_tsv_counts(
             "postgres tsv rows",
             ReadinessStatus::Fail,
             format!(
-                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}"
+                "expected 1/{expected_events}/{expected_decisions}/{expected_blocked_rules}/{expected_syscalls}/{expected_evidence}/{expected_identity_mappings} rows, found {traces}/{events}/{decisions}/{blocked_rules}/{syscalls}/{evidence}/{identity_mappings}"
             ),
         )
     }
@@ -15938,11 +18838,515 @@ fn durable_notification_rows(
         .collect()
 }
 
+fn read_durable_notification_rows(root: &Path) -> Result<Vec<DurableNotificationRow>, AgentKError> {
+    let content = fs::read_to_string(root.join("tables/notifications.jsonl"))?;
+    let mut rows = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: DurableNotificationRow = serde_json::from_str(line).map_err(|error| {
+            AgentKError::InvalidMcpRequest(format!(
+                "tables/notifications.jsonl line {} did not parse: {error}",
+                index + 1
+            ))
+        })?;
+        if row.notification_id.trim().is_empty()
+            || row.approval_id.trim().is_empty()
+            || row.trace_id.trim().is_empty()
+            || row.event_hash.trim().is_empty()
+        {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "tables/notifications.jsonl line {} is missing required identifiers",
+                index + 1
+            )));
+        }
+        if !matches!(row.kind.as_str(), "approval_requested" | "approval_decided") {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "tables/notifications.jsonl line {} has unsupported notification kind",
+                index + 1
+            )));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn slack_notification_payload(
+    row: &DurableNotificationRow,
+    channel: Option<&str>,
+) -> serde_json::Value {
+    let requested = row.kind == "approval_requested";
+    let title = if requested {
+        "AgentK approval requested"
+    } else {
+        "AgentK approval decided"
+    };
+    let status = row
+        .status
+        .as_deref()
+        .unwrap_or(if requested { "pending" } else { "ready" });
+    let action = if requested {
+        row.review_hint
+            .as_deref()
+            .unwrap_or("Review the pending approval in AgentK.")
+    } else {
+        row.reason
+            .as_deref()
+            .unwrap_or("Review decision recorded in AgentK.")
+    };
+    let mut payload = serde_json::json!({
+        "text": format!(
+            "{title}: {} {}",
+            slack_text(row.approval_id.as_str()),
+            slack_text(row.target.as_deref().unwrap_or("unknown target"))
+        ),
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": title
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("*Approval*\\n{}", slack_text(&row.approval_id))
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("*Status*\\n{}", slack_text(status))
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("*Agent*\\n{}", slack_text(row.agent_id.as_deref().unwrap_or("unknown")))
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": format!("*Target*\\n{}", slack_text(row.target.as_deref().unwrap_or("unknown")))
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("*Reason*\\n{}", slack_text(action))
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": format!(
+                            "trace `{}` event `{}` rule `{}` capability `{}`",
+                            slack_text(&row.trace_id),
+                            slack_text(&row.event_hash),
+                            slack_text(row.rule_id.as_deref().unwrap_or("n/a")),
+                            slack_text(row.missing_capability.as_deref().unwrap_or("n/a"))
+                        )
+                    }
+                ]
+            }
+        ],
+        "metadata": {
+            "event_type": if requested { "agentk_approval_requested" } else { "agentk_approval_decided" },
+            "event_payload": {
+                "notification_id": row.notification_id,
+                "approval_id": row.approval_id,
+                "trace_id": row.trace_id,
+                "event_hash": row.event_hash,
+                "kind": row.kind,
+                "status": status,
+                "syscall": row.syscall,
+                "target": row.target,
+                "rule_id": row.rule_id,
+                "missing_capability": row.missing_capability,
+                "reviewer": row.reviewer,
+                "decision": row.decision,
+                "created_at_unix": row.created_at_unix
+            }
+        }
+    });
+    if let Some(channel) = channel {
+        payload["channel"] = serde_json::json!(channel);
+    }
+    payload
+}
+
+fn email_notification_payload(row: &DurableNotificationRow, to: &[String]) -> serde_json::Value {
+    let requested = row.kind == "approval_requested";
+    let status = row
+        .status
+        .as_deref()
+        .unwrap_or(if requested { "pending" } else { "ready" });
+    let subject = email_subject(&format!(
+        "{}: {} {}",
+        if requested {
+            "AgentK approval requested"
+        } else {
+            "AgentK approval decided"
+        },
+        row.approval_id,
+        row.target.as_deref().unwrap_or("unknown target")
+    ));
+    let note = if requested {
+        row.review_hint
+            .as_deref()
+            .unwrap_or("Review the pending approval in AgentK.")
+    } else {
+        row.reason
+            .as_deref()
+            .unwrap_or("Review decision recorded in AgentK.")
+    };
+    let body = [
+        subject.clone(),
+        String::new(),
+        format!("Approval: {}", email_body_text(&row.approval_id, 180)),
+        format!("Status: {}", email_body_text(status, 80)),
+        format!(
+            "Agent: {}",
+            email_body_text(row.agent_id.as_deref().unwrap_or("unknown"), 180)
+        ),
+        format!(
+            "Target: {}",
+            email_body_text(row.target.as_deref().unwrap_or("unknown"), 180)
+        ),
+        format!(
+            "Rule: {}",
+            email_body_text(row.rule_id.as_deref().unwrap_or("n/a"), 180)
+        ),
+        format!(
+            "Missing capability: {}",
+            email_body_text(row.missing_capability.as_deref().unwrap_or("n/a"), 180)
+        ),
+        format!("Trace: {}", email_body_text(&row.trace_id, 180)),
+        format!("Event: {}", email_body_text(&row.event_hash, 180)),
+        String::new(),
+        "Review note:".to_string(),
+        email_body_text(note, 800),
+        String::new(),
+        "AgentK email payloads are redacted: no raw tool payloads or secret values are included."
+            .to_string(),
+    ]
+    .join("\n");
+    let message = [
+        format!("To: {}", to.join(", ")),
+        format!("Subject: {subject}"),
+        format!("X-AgentK-Notification-Id: {}", row.notification_id),
+        format!("X-AgentK-Approval-Id: {}", row.approval_id),
+        "Content-Type: text/plain; charset=utf-8".to_string(),
+        String::new(),
+        body.clone(),
+    ]
+    .join("\n");
+    serde_json::json!({
+        "to": to,
+        "subject": subject,
+        "body": body,
+        "message": message,
+        "metadata": {
+            "event_type": if requested { "agentk_approval_requested" } else { "agentk_approval_decided" },
+            "notification_id": row.notification_id,
+            "approval_id": row.approval_id,
+            "trace_id": row.trace_id,
+            "event_hash": row.event_hash,
+            "kind": row.kind,
+            "status": status,
+            "agent_id": row.agent_id,
+            "syscall": row.syscall,
+            "target": row.target,
+            "rule_id": row.rule_id,
+            "missing_capability": row.missing_capability,
+            "reviewer": row.reviewer,
+            "decision": row.decision,
+            "created_at_unix": row.created_at_unix
+        }
+    })
+}
+
+fn github_notification_payload(
+    row: &DurableNotificationRow,
+    repository: Option<&str>,
+    labels: &[String],
+) -> serde_json::Value {
+    let requested = row.kind == "approval_requested";
+    let title = github_notification_title(row);
+    let body = github_notification_body(row);
+    let desired_state = if requested { "open" } else { "closed" };
+    let mut payload = serde_json::json!({
+        "operation": "upsert_issue",
+        "dedupe_key": format!(
+            "agentk:{}:{}:{}",
+            row.trace_id, row.approval_id, row.kind
+        ),
+        "issue": {
+            "title": title,
+            "body": body,
+            "labels": labels,
+            "desired_state": desired_state
+        },
+        "metadata": {
+            "event_type": if requested { "agentk_approval_requested" } else { "agentk_approval_decided" },
+            "notification_id": row.notification_id,
+            "approval_id": row.approval_id,
+            "trace_id": row.trace_id,
+            "event_hash": row.event_hash,
+            "kind": row.kind,
+            "status": row.status,
+            "agent_id": row.agent_id,
+            "syscall": row.syscall,
+            "target": row.target,
+            "rule_id": row.rule_id,
+            "missing_capability": row.missing_capability,
+            "reviewer": row.reviewer,
+            "decision": row.decision,
+            "created_at_unix": row.created_at_unix
+        }
+    });
+    if !requested {
+        payload["comment"] = serde_json::json!({
+            "body": github_notification_decision_comment(row)
+        });
+    }
+    if let Some(repository) = repository {
+        payload["repository"] = serde_json::json!(repository);
+    }
+    payload
+}
+
+fn github_notification_title(row: &DurableNotificationRow) -> String {
+    let prefix = if row.kind == "approval_requested" {
+        "AgentK approval requested"
+    } else {
+        "AgentK approval decided"
+    };
+    let target = row.target.as_deref().unwrap_or("unknown target");
+    github_text(&format!("{prefix}: {} {target}", row.approval_id), 120)
+}
+
+fn github_notification_body(row: &DurableNotificationRow) -> String {
+    let requested = row.kind == "approval_requested";
+    let heading = if requested {
+        "AgentK approval requested"
+    } else {
+        "AgentK approval decided"
+    };
+    let note = if requested {
+        row.review_hint
+            .as_deref()
+            .unwrap_or("Review the pending approval in AgentK.")
+    } else {
+        row.reason
+            .as_deref()
+            .unwrap_or("Review decision recorded in AgentK.")
+    };
+    [
+        heading.to_string(),
+        String::new(),
+        "| Field | Value |".to_string(),
+        "| --- | --- |".to_string(),
+        format!("| Approval | `{}` |", github_table_cell(&row.approval_id)),
+        format!(
+            "| Status | `{}` |",
+            github_table_cell(row.status.as_deref().unwrap_or(if requested {
+                "pending"
+            } else {
+                "ready"
+            }))
+        ),
+        format!(
+            "| Agent | `{}` |",
+            github_table_cell(row.agent_id.as_deref().unwrap_or("unknown"))
+        ),
+        format!(
+            "| Target | `{}` |",
+            github_table_cell(row.target.as_deref().unwrap_or("unknown"))
+        ),
+        format!(
+            "| Rule | `{}` |",
+            github_table_cell(row.rule_id.as_deref().unwrap_or("n/a"))
+        ),
+        format!(
+            "| Missing capability | `{}` |",
+            github_table_cell(row.missing_capability.as_deref().unwrap_or("n/a"))
+        ),
+        format!("| Trace | `{}` |", github_table_cell(&row.trace_id)),
+        format!("| Event | `{}` |", github_table_cell(&row.event_hash)),
+        String::new(),
+        "## Review Note".to_string(),
+        github_text(note, 500),
+        String::new(),
+        "<!-- agentk: no raw tool payloads or secret values are included in this issue payload -->"
+            .to_string(),
+    ]
+    .join("\n")
+}
+
+fn github_notification_decision_comment(row: &DurableNotificationRow) -> String {
+    let decision = row.decision.as_deref().unwrap_or("decision recorded");
+    let reviewer = row.reviewer.as_deref().unwrap_or("unknown reviewer");
+    let reason = row
+        .reason
+        .as_deref()
+        .unwrap_or("Review decision recorded in AgentK.");
+    format!(
+        "AgentK approval `{}` was `{}` by `{}`.\n\n{}",
+        github_text(&row.approval_id, 120),
+        github_text(decision, 80),
+        github_text(reviewer, 120),
+        github_text(reason, 500)
+    )
+}
+
+fn github_notification_labels(labels: &[String]) -> Result<Vec<String>, AgentKError> {
+    let mut normalized = if labels.is_empty() {
+        vec!["agentk".to_string(), "agentk-approval".to_string()]
+    } else {
+        labels
+            .iter()
+            .map(|label| label.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+    normalized.sort();
+    normalized.dedup();
+    if normalized
+        .iter()
+        .any(|label| label.is_empty() || label.chars().any(char::is_control))
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "GitHub labels must be non-empty printable strings".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn email_notification_recipients(to: &[String]) -> Result<Vec<String>, AgentKError> {
+    if to.is_empty() {
+        return Err(AgentKError::InvalidMcpRequest(
+            "store-email requires at least one --to recipient".to_string(),
+        ));
+    }
+    let mut recipients = to
+        .iter()
+        .map(|recipient| recipient.trim().to_string())
+        .collect::<Vec<_>>();
+    recipients.sort();
+    recipients.dedup();
+    if recipients
+        .iter()
+        .any(|recipient| !is_valid_email_recipient(recipient))
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "email recipients must be simple non-empty addresses without commas or control characters"
+                .to_string(),
+        ));
+    }
+    Ok(recipients)
+}
+
+fn is_valid_email_recipient(recipient: &str) -> bool {
+    !recipient.is_empty()
+        && recipient.len() <= 254
+        && recipient.contains('@')
+        && !recipient.starts_with('@')
+        && !recipient.ends_with('@')
+        && recipient
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b',' | b'<' | b'>' | b'"'))
+}
+
+fn is_valid_github_repository(repository: &str) -> bool {
+    let Some((owner, name)) = repository.split_once('/') else {
+        return false;
+    };
+    !owner.contains('/')
+        && !name.contains('/')
+        && is_valid_github_repository_part(owner)
+        && is_valid_github_repository_part(name)
+}
+
+fn is_valid_github_repository_part(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && value != "."
+        && value != ".."
+}
+
+fn email_subject(value: &str) -> String {
+    email_body_text(value, 120).replace(['\n', '\r'], " ")
+}
+
+fn email_body_text(value: &str, limit: usize) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars().take(limit) {
+        match ch {
+            '\n' | '\t' => sanitized.push(ch),
+            _ if ch.is_control() => sanitized.push(' '),
+            _ => sanitized.push(ch),
+        }
+    }
+    if value.chars().count() > limit {
+        sanitized.push_str("...");
+    }
+    sanitized
+}
+
+fn slack_text(value: &str) -> String {
+    const LIMIT: usize = 180;
+    let mut escaped = String::new();
+    for ch in value.chars().take(LIMIT) {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ if ch.is_control() => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    if value.chars().count() > LIMIT {
+        escaped.push_str("...");
+    }
+    escaped
+}
+
+fn github_text(value: &str, limit: usize) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars().take(limit) {
+        match ch {
+            '&' => sanitized.push_str("&amp;"),
+            '<' => sanitized.push_str("&lt;"),
+            '>' => sanitized.push_str("&gt;"),
+            '`' => sanitized.push_str("\\`"),
+            _ if ch.is_control() && ch != '\n' && ch != '\t' => sanitized.push(' '),
+            _ => sanitized.push(ch),
+        }
+    }
+    if value.chars().count() > limit {
+        sanitized.push_str("...");
+    }
+    sanitized
+}
+
+fn github_table_cell(value: &str) -> String {
+    github_text(value, 180)
+        .replace('|', "\\|")
+        .replace(['\n', '\r'], " ")
+}
+
 fn write_postgres_store_files(
     root: &Path,
     inbox: &AuditInboxReport,
     review: &ApprovalReviewReport,
     permissions: Option<&TeamPermissionsReport>,
+    identity_mappings: Option<&[TeamIdentityStoreMapping]>,
 ) -> Result<Vec<PathBuf>, AgentKError> {
     let trace_id = postgres_trace_id(inbox);
     let files = vec![
@@ -15995,6 +19399,11 @@ fn write_postgres_store_files(
             root,
             "postgres/team_role_scopes.tsv",
             &postgres_team_empty_tsv(),
+        )?,
+        write_store_file(
+            root,
+            "postgres/team_identity_mappings.tsv",
+            &postgres_team_identity_mappings_tsv(identity_mappings),
         )?,
         write_store_file(root, "postgres/load.sql", &postgres_load_sql())?,
     ];
@@ -16123,6 +19532,21 @@ fn postgres_team_empty_tsv() -> String {
     String::new()
 }
 
+fn postgres_team_identity_mappings_tsv(mappings: Option<&[TeamIdentityStoreMapping]>) -> String {
+    postgres_tsv_rows(
+        mappings
+            .into_iter()
+            .flat_map(|mappings| mappings.iter())
+            .map(|mapping| {
+                [
+                    mapping.provider.clone(),
+                    mapping.external_group.clone(),
+                    mapping.reviewer.clone(),
+                ]
+            }),
+    )
+}
+
 fn postgres_tsv_rows<I, const N: usize>(rows: I) -> String
 where
     I: IntoIterator<Item = [String; N]>,
@@ -16196,6 +19620,7 @@ fn postgres_load_sql() -> String {
 \copy agentk_team_roles(role_id) from 'postgres/team_roles.tsv' with (format text, null '\N')
 \copy agentk_team_user_roles(user_id, role_id) from 'postgres/team_user_roles.tsv' with (format text, null '\N')
 \copy agentk_team_role_scopes(role_id, decision, scope_pattern) from 'postgres/team_role_scopes.tsv' with (format text, null '\N')
+\copy agentk_team_identity_mappings(provider_id, external_group, reviewer) from 'postgres/team_identity_mappings.tsv' with (format text, null '\N')
 "#
     .to_string()
 }
@@ -16210,6 +19635,7 @@ mode = "local"
 audit_log = ".agentk/runs/team-sidecar.jsonl"
 policy = "policies/team-sidecar.toml"
 permissions = "team-permissions.toml"
+identity = "team-identity.toml"
 secrets = "secrets.toml"
 
 [mcp]
@@ -16297,6 +19723,40 @@ can_deny = ["tool.invoke:slack.*"]
 "#
 }
 
+fn sidecar_team_identity() -> &'static str {
+    r#"# External identity mapping for AgentK approval review.
+# Replace the sample issuer, audience, domains, and groups with your IdP values.
+# This file validates identity handoff shape only; AgentK does not verify live
+# OIDC tokens or contact the identity provider in the local sidecar path.
+
+version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+groups_claim = "groups"
+email_claim = "email"
+allowed_email_domains = ["example.com"]
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-security-reviewers"
+reviewer = "security-reviewer"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-support-reviewers"
+reviewer = "support-lead"
+"#
+}
+
 fn sidecar_claude_desktop_config() -> &'static str {
     r#"{
   "mcpServers": {
@@ -16326,6 +19786,7 @@ agentk sidecar-run --root REPLACE_WITH_AGENTK_SIDECAR_PATH
 # Review the audit log:
 agentk audit .agentk/runs/team-sidecar.jsonl
 agentk approvals .agentk/runs/team-sidecar.jsonl
+agentk identity-check --identity team-identity.toml --permissions team-permissions.toml
 "#
 }
 
@@ -16340,6 +19801,7 @@ and gives the team a policy file they can review before agents touch real tools.
 
 - `agentk-sidecar.toml`: local sidecar conventions and audit path.
 - `team-permissions.toml`: local users, reviewer roles, and approval scopes.
+- `team-identity.toml`: external IdP groups mapped to local reviewers.
 - `policies/team-sidecar.toml`: default-deny AgentK policy starter.
 - `secrets.toml`: environment-backed secret references, never secret values.
 - `clients/claude-desktop.mcp.json`: MCP client snippet for Claude Desktop.
@@ -16372,14 +19834,17 @@ and gives the team a policy file they can review before agents touch real tools.
    ```sh
    agentk audit .agentk/runs/team-sidecar.jsonl
    agentk approvals .agentk/runs/team-sidecar.jsonl
+   agentk identity-check --identity team-identity.toml --permissions team-permissions.toml
    agentk approve .agentk/runs/team-sidecar.jsonl appr_... --permissions team-permissions.toml --reviewer tom --reason "one-shot approval"
    agentk dashboard .agentk/runs/team-sidecar.jsonl --permissions team-permissions.toml --out .agentk/dashboard.html
-   agentk dashboard-serve .agentk/runs/team-sidecar.jsonl --permissions team-permissions.toml --store-root .agentk/team-store
+   agentk dashboard-serve .agentk/runs/team-sidecar.jsonl --permissions team-permissions.toml --identity team-identity.toml --store-root .agentk/team-store
    agentk trace-inspect .agentk/runs/team-sidecar.jsonl
    ```
 
    The local dashboard server exposes `/api/review` and permission-checked
    `/api/approve` and `/api/deny` JSON endpoints for appending decisions.
+   `team-identity.toml` maps IdP groups to those local reviewers; the check
+   reports only counts and does not print issuers, groups, or claim values.
    Dashboard write requests require exactly one `Content-Type: application/json`.
    Add `token_env = "AGENTK_REVIEWER_NAME_TOKEN"` to a user to require
    `reviewer_token` in dashboard write requests.
@@ -16441,17 +19906,42 @@ This package is a local deployable sidecar wrapper. It assumes `agentk` is
 installed on the host PATH, keeps the reviewable bundle in `sidecar/`, and gives
 MCP clients stable launcher scripts in `bin/`.
 
+When produced with `agentk sidecar-package --archive-out`, the tar handoff
+contains this package directory after `agentk-package-check` has passed. The
+CLI writes a neighboring `.sha256` file; keep that checksum and the reported
+archive SHA-256 with the release notes or deployment ticket. Before unpacking a
+received handoff, run `agentk sidecar-package-archive-check --archive
+agentk-sidecar.tar` from the directory containing the tar and checksum file, or
+run `agentk sidecar-package-install --archive agentk-sidecar.tar --out
+agentk-sidecar` to verify, safely unpack, and self-check the package in one
+step. Successful installs write `sidecar/.agentk/install-receipt.json` with the
+archive filename, checksum filename, SHA-256, AgentK version, and installed file
+count for deployment tickets. After install, run `agentk
+sidecar-package-release-manifest --package agentk-sidecar --archive
+agentk-sidecar.tar --out agentk-sidecar-release-manifest.json` to write a
+machine-readable handoff that binds the installed package, package lock, archive
+checksum, and install receipt without changing the package directory.
+
 ## Contents
 
 - `sidecar/`: generated AgentK sidecar bundle.
 - `manifest.json`: machine-readable package schema, AgentK version, relative
   launcher paths, default local transports, and deploy/store artifacts.
+- `package.lock.json`: relative-path install inventory with byte counts,
+  SHA-256 hashes, and executable-bit expectations for every packaged install
+  file; runtime state under `sidecar/.agentk` is excluded.
+- `sidecar/.agentk/install-receipt.json`: package-install provenance written
+  by `agentk sidecar-package-install`; it is runtime state and is excluded from
+  `package.lock.json`.
+- `agentk-sidecar-release-manifest.json`: recommended release/deployment
+  handoff written outside this package by `agentk
+  sidecar-package-release-manifest`.
 - `bin/agentk-package-info`: prints `manifest.json` for support, deployment,
   and inventory checks.
-- `bin/agentk-package-check`: validates `manifest.json`, package artifacts,
-  launcher modes, launcher preflights, deploy-template hardening, and the
-  embedded sidecar bundle. It also verifies `AGENTK_BIN` resolves before any
-  packaged runtime delegates to AgentK.
+- `bin/agentk-package-check`: validates `manifest.json`, `package.lock.json`,
+  package artifacts, launcher modes, launcher preflights, deploy-template
+  hardening, and the embedded sidecar bundle. It also verifies `AGENTK_BIN`
+  resolves before any packaged runtime delegates to AgentK.
 - `bin/agentk-safe-agent-demo`: runs the no-credential GitHub/Postgres/Slack/
   filesystem demo and writes a package-local trace for audit review.
 - `bin/agentk-sidecar`: MCP stdio launcher for Claude, Codex, Cursor, or any
@@ -16464,16 +19954,31 @@ MCP clients stable launcher scripts in `bin/`.
   serving.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
+- `bin/agentk-identity-check`: validates external identity mappings against
+  local reviewers without printing issuers, groups, or claim values.
 - `bin/agentk-dashboard`: writes `.agentk/dashboard.html` from the package trace
   and approval decisions.
 - `bin/agentk-dashboard-server`: serves the same review surface and JSON API on
   localhost.
 - `bin/agentk-store-export`: writes `.agentk/store` from the package trace,
-  approvals, permissions, and redacted summary tables.
+  approvals, permissions, identity mappings, and redacted summary tables.
 - `bin/agentk-store-check`: validates `.agentk/store` before a Postgres load.
 - `bin/agentk-store-sync`: refreshes `.agentk/team-store` as the live durable
   team dashboard store with normalized summary rows.
 - `bin/agentk-store-push`: preflights and loads `.agentk/store` with `psql`.
+- `bin/agentk-store-slack`: exports Slack-ready JSON payloads from the durable
+  notification outbox without sending messages or reading Slack tokens.
+- `bin/agentk-store-slack-send`: delivers exported Slack payloads with `curl`
+  using a webhook URL read only from environment.
+- `bin/agentk-store-github`: exports GitHub issue-ready JSON payloads from the
+  durable notification outbox without calling the GitHub API or reading GitHub
+  tokens.
+- `bin/agentk-store-github-send`: delivers exported GitHub issue payloads with
+  `gh` using a token read only from environment.
+- `bin/agentk-store-email`: exports sendmail-ready RFC 5322-style payloads from
+  the durable notification outbox without calling a mail relay.
+- `bin/agentk-store-email-send`: delivers exported email payloads through a
+  local `sendmail`-compatible command.
 - `clients/`: ready-to-copy client snippets.
 - `storage/postgres-schema.sql`: durable audit and approval store schema
   contract.
@@ -16490,13 +19995,21 @@ MCP clients stable launcher scripts in `bin/`.
 AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/agentk-sidecar-tcp
 ./bin/agentk-sidecar-http
 ./bin/agentk-sidecar-check
+./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
 ./bin/agentk-dashboard-server
 ./bin/agentk-store-export
 ./bin/agentk-store-check
 ./bin/agentk-store-sync
 ./bin/agentk-store-push --dry-run
+./bin/agentk-store-slack --channel '#agentk-approvals'
+./bin/agentk-store-slack-send --dry-run
+./bin/agentk-store-github --repository owner/repo --label agentk --label approvals
+./bin/agentk-store-github-send --dry-run
+./bin/agentk-store-email --to agentk-alerts@example.com
+./bin/agentk-store-email-send --dry-run
 agentk permissions --path sidecar/team-permissions.toml
+agentk identity-check --identity sidecar/team-identity.toml --permissions sidecar/team-permissions.toml
 ```
 
 Every packaged runtime launcher other than `bin/agentk-package-info` and
@@ -16506,6 +20019,12 @@ artifacts. This catches copied or edited packages before a team depends on stale
 policy, permissions, client snippets, deploy templates, or a missing AgentK
 binary. Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk`
 is not on the service account's `PATH`.
+
+`bin/agentk-identity-check` validates `sidecar/team-identity.toml`, checks that
+mapped reviewers exist in `sidecar/team-permissions.toml`, and prints only
+redacted provider, mapping, reviewer, and coverage counts. It validates the
+handoff shape for external IdP wiring; the local sidecar path does not contact
+the IdP or verify live OIDC tokens.
 
 `bin/agentk-safe-agent-demo` runs the credential-free GitHub/Postgres/Slack/
 filesystem workflow and writes
@@ -16518,6 +20037,10 @@ rules for the generated trace, so reviewers can inspect the evidence without
 opening source code. Set `AGENTK_TRACE` to that demo trace before running
 `bin/agentk-dashboard`, `bin/agentk-dashboard-server`, `bin/agentk-store-export`,
 or `bin/agentk-store-sync` to use the same packaged demo evidence end to end.
+The packaged dashboard server, store export, and store sync launchers also pass
+`sidecar/team-identity.toml` into the durable store path, so reviewer metadata
+can include IdP group-to-reviewer mappings without issuer, audience, or claim
+values.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -16663,7 +20186,19 @@ counter until the gateway grows resumable SSE support.
 shared Postgres audit store. `bin/agentk-store-sync` maintains the live local
 team store under `sidecar/.agentk/team-store` for dashboard/control-plane
 processes that need stable current JSON and normalized JSONL tables, including
-blocked-rule, syscall, and evidence-ref summaries.
+blocked-rule, syscall, and evidence-ref summaries. `bin/agentk-store-slack`
+writes Slack-ready payloads under `sidecar/.agentk/slack` from that durable
+notification outbox, and `bin/agentk-store-slack-send` can deliver those
+payloads through `curl` using only the webhook URL env var named by
+`AGENTK_SLACK_WEBHOOK_URL_ENV` (default `AGENTK_SLACK_WEBHOOK_URL`).
+`bin/agentk-store-github` writes GitHub issue-ready payloads under
+`sidecar/.agentk/github`, and `bin/agentk-store-github-send` can deliver those
+payloads through `gh` using only the token env var named by
+`AGENTK_GITHUB_TOKEN_ENV` (default `GITHUB_TOKEN`). `bin/agentk-store-email`
+writes sendmail-ready payloads under `sidecar/.agentk/email`, and
+`bin/agentk-store-email-send` can deliver those payloads through a local
+`sendmail`-compatible command. AgentK does not store Slack/GitHub tokens, email
+relay credentials, or print delivery URLs.
 `agentk-store-push` accepts the same flags as `agentk store-push`, including
 `--dry-run`, `--database-url-env`, and `--psql`.
 
@@ -16685,11 +20220,13 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
         "package": SIDECAR_PACKAGE_NAME,
         "agentk_version": env!("CARGO_PKG_VERSION"),
         "sidecar_bundle": "sidecar",
+        "package_lock": SIDECAR_PACKAGE_LOCK,
         "safe_agent_demo": "sidecar/demos/safe-agent-demo.md",
         "launchers": SIDECAR_PACKAGE_LAUNCHERS,
         "client_snippets": SIDECAR_PACKAGE_CLIENT_SNIPPETS,
         "storage_contracts": SIDECAR_PACKAGE_STORAGE_CONTRACTS,
         "deploy_templates": SIDECAR_PACKAGE_DEPLOY_TEMPLATES,
+        "deploy_env_examples": SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES,
         "default_transports": [
             {
                 "name": "stdio",
@@ -16710,11 +20247,22 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             "launcher": "bin/agentk-dashboard-server",
             "default_url": "http://127.0.0.1:8765"
         },
+        "identity": {
+            "manifest": "sidecar/team-identity.toml",
+            "permissions": "sidecar/team-permissions.toml",
+            "check": "bin/agentk-identity-check"
+        },
         "store_workflow": {
             "sync": "bin/agentk-store-sync",
             "export": "bin/agentk-store-export",
             "check": "bin/agentk-store-check",
-            "push": "bin/agentk-store-push"
+            "push": "bin/agentk-store-push",
+            "slack": "bin/agentk-store-slack",
+            "slack_send": "bin/agentk-store-slack-send",
+            "github": "bin/agentk-store-github",
+            "github_send": "bin/agentk-store-github-send",
+            "email": "bin/agentk-store-email",
+            "email_send": "bin/agentk-store-email-send"
         },
         "evidence_contract": "redacted hash/evidence-first audit data; no raw tool payloads or secret values"
     }))?)
@@ -16730,10 +20278,11 @@ its local approval state.
 - `approvals.json`: reconciliation of open, decided, and stale approvals.
 - `permissions.json`: reviewer summary, when a team permissions manifest was
   provided.
+- `identity.json`: redacted external identity mapping summary, when configured.
 - `postgres-schema.sql`: schema contract for a shared Postgres-backed store.
 - `postgres/*.tsv`: Postgres text-format rows for traces, audit events,
   decisions, blocked rules, syscall summaries, evidence-ref summaries, and
-  reviewer metadata.
+  reviewer plus identity-mapping metadata.
 - `postgres/load.sql`: psql load script. From this export directory, run
   `agentk store-check --root .`, then `agentk store-push --root . --dry-run`,
   then `agentk store-push --root .`.
@@ -16756,16 +20305,89 @@ or mirror into a database.
 - `current/approvals.json`: latest reconciled approval state.
 - `current/notifications.json`: notification outbox counts for local bridges.
 - `current/permissions.json`: latest reviewer summary, when configured.
+- `current/identity.json`: latest redacted identity mapping summary, when configured.
 - `tables/*.jsonl`: normalized row-shaped tables for traces, audit events,
   approval decisions, blocked rules, syscall summaries, evidence-ref summaries,
-  notification outbox entries, and reviewers.
+  notification outbox entries, reviewers, and identity mappings.
 - `store-schema.json`: durable store contract and version.
 
 The store contains redacted evidence and hashes, not raw tool payloads or secret
 values. Re-running `agentk store-sync` refreshes the current view and rewrites
 the normalized tables from the signed trace plus append-only decision log.
 `tables/notifications.jsonl` is a credential-free outbox; Slack, GitHub, email,
-or ticketing bridges can consume it without AgentK storing delivery tokens.
+or ticketing bridges can consume it without AgentK storing delivery tokens. Run
+`agentk store-slack --root . --out ../slack` to generate Slack-ready local JSON
+payloads, `agentk store-slack-send --payload-root ../slack --dry-run` to
+preflight webhook delivery, `agentk store-github --root . --out ../github
+--repository owner/repo` to generate GitHub issue-ready local JSON payloads, or
+`agentk store-github-send --payload-root ../github --dry-run` to preflight
+GitHub delivery. `agentk store-email --root . --out ../email --to
+alerts@example.com` generates sendmail-ready email payloads, and
+`agentk store-email-send --payload-root ../email --dry-run` preflights local
+sendmail delivery for a separate bridge process.
+"#
+    .to_string()
+}
+
+fn slack_notification_readme() -> String {
+    r#"# AgentK Slack Notification Payloads
+
+This directory contains Slack-ready JSON payloads derived from
+`tables/notifications.jsonl` in a durable AgentK team store.
+
+- `manifest.json`: source store, payload count, optional channel, and schema.
+- `payloads.jsonl`: one Slack message payload per approval notification.
+
+AgentK does not store Slack tokens in this directory. A separate bridge can read
+`payloads.jsonl`, attach its own delivery credentials, and post to Slack. For a
+packaged local bridge, run `agentk store-slack-send --payload-root . --dry-run`,
+then set `AGENTK_SLACK_WEBHOOK_URL` and rerun without `--dry-run`; the command
+passes the webhook to `curl` through stdin config so the URL is not printed in
+AgentK output. Payloads are redacted, escaped, and bounded; they contain
+approval IDs, hashes, targets, rules, and review status rather than raw tool
+payloads or secret values.
+"#
+    .to_string()
+}
+
+fn github_notification_readme() -> String {
+    r#"# AgentK GitHub Notification Payloads
+
+This directory contains GitHub issue-ready JSON payloads derived from
+`tables/notifications.jsonl` in a durable AgentK team store.
+
+- `manifest.json`: source store, payload count, optional repository, labels,
+  and schema.
+- `payloads.jsonl`: one issue/upsert payload per approval notification.
+
+AgentK does not store GitHub tokens in this directory. A separate GitHub App,
+Action, or bridge can read `payloads.jsonl`, attach its own delivery
+credentials, and create or update issues. For a packaged local bridge, run
+`agentk store-github-send --payload-root . --dry-run`, then set `GITHUB_TOKEN`
+or `AGENTK_GITHUB_TOKEN_ENV` and rerun without `--dry-run`; the command passes
+the token to `gh` through environment only and does not print it. Payloads are
+redacted and bounded; they contain approval IDs, hashes, targets, rules, and
+review status rather than raw tool payloads or secret values.
+"#
+    .to_string()
+}
+
+fn email_notification_readme() -> String {
+    r#"# AgentK Email Notification Payloads
+
+This directory contains sendmail-ready email payloads derived from
+`tables/notifications.jsonl` in a durable AgentK team store.
+
+- `manifest.json`: source store, payload count, recipients, and schema.
+- `payloads.jsonl`: one redacted email message payload per approval notification.
+
+AgentK does not store SMTP credentials in this directory. A local MTA, relay,
+or supervisor-managed bridge can read `payloads.jsonl` and deliver messages.
+For a packaged local bridge, run `agentk store-email-send --payload-root .
+--dry-run`, then rerun without `--dry-run` after configuring the service
+account's `sendmail` relay. Payloads are redacted and bounded; they contain
+approval IDs, hashes, targets, rules, and review status rather than raw tool
+payloads or secret values.
 "#
     .to_string()
 }
@@ -16853,6 +20475,13 @@ create table if not exists agentk_team_role_scopes (
   decision text not null check (decision in ('approve', 'deny')),
   scope_pattern text not null,
   primary key (role_id, decision, scope_pattern)
+);
+
+create table if not exists agentk_team_identity_mappings (
+  provider_id text not null,
+  external_group text not null,
+  reviewer text not null,
+  primary key (provider_id, external_group)
 );
 
 create index if not exists agentk_audit_events_trace_step_idx
@@ -16999,6 +20628,7 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+IDENTITY="${AGENTK_IDENTITY:-$ROOT/sidecar/team-identity.toml}"
 STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
 HOST="${AGENTK_DASHBOARD_HOST:-127.0.0.1}"
 PORT="${AGENTK_DASHBOARD_PORT:-8765}"
@@ -17013,6 +20643,7 @@ fi
 exec "$AGENTK_BIN" dashboard-serve "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
+  --identity "$IDENTITY" \
   --host "$HOST" \
   --port "$PORT" \
   --admin-token-env "$ADMIN_TOKEN_ENV" \
@@ -17021,6 +20652,20 @@ exec "$AGENTK_BIN" dashboard-serve "$TRACE" \
   --max-header-bytes "$MAX_HEADER_BYTES" \
   --store-root "$STORE_ROOT" \
   "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_identity_check_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+IDENTITY="${AGENTK_IDENTITY:-$ROOT/sidecar/team-identity.toml}"
+PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" identity-check --identity "$IDENTITY" --permissions "$PERMISSIONS" "$@"
 "#
     .to_string()
 }
@@ -17034,11 +20679,13 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+IDENTITY="${AGENTK_IDENTITY:-$ROOT/sidecar/team-identity.toml}"
 STORE_EXPORT_ROOT="${AGENTK_STORE_EXPORT_ROOT:-$ROOT/sidecar/.agentk/store}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-export "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
+  --identity "$IDENTITY" \
   --out "$STORE_EXPORT_ROOT" \
   "$@"
 "#
@@ -17067,11 +20714,13 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 TRACE="${AGENTK_TRACE:-$ROOT/sidecar/.agentk/runs/team-sidecar.jsonl}"
 DECISIONS="${AGENTK_DECISIONS:-$ROOT/sidecar/.agentk/approvals.jsonl}"
 PERMISSIONS="${AGENTK_PERMISSIONS:-$ROOT/sidecar/team-permissions.toml}"
+IDENTITY="${AGENTK_IDENTITY:-$ROOT/sidecar/team-identity.toml}"
 STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" store-sync "$TRACE" \
   --decisions "$DECISIONS" \
   --permissions "$PERMISSIONS" \
+  --identity "$IDENTITY" \
   --root "$STORE_ROOT" \
   "$@"
 "#
@@ -17091,6 +20740,112 @@ exec "$AGENTK_BIN" store-push --root "$STORE_EXPORT_ROOT" "$@"
     .to_string()
 }
 
+fn sidecar_store_slack_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+SLACK_OUT="${AGENTK_SLACK_OUT:-$ROOT/sidecar/.agentk/slack}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-slack --root "$STORE_ROOT" --out "$SLACK_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_slack_send_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+SLACK_OUT="${AGENTK_SLACK_OUT:-$ROOT/sidecar/.agentk/slack}"
+WEBHOOK_ENV="${AGENTK_SLACK_WEBHOOK_URL_ENV:-AGENTK_SLACK_WEBHOOK_URL}"
+CURL="${AGENTK_CURL:-curl}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-slack-send \
+  --payload-root "$SLACK_OUT" \
+  --webhook-url-env "$WEBHOOK_ENV" \
+  --curl "$CURL" \
+  "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_github_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+GITHUB_OUT="${AGENTK_GITHUB_OUT:-$ROOT/sidecar/.agentk/github}"
+if [ -n "${AGENTK_GITHUB_REPOSITORY:-}" ]; then
+  set -- --repository "$AGENTK_GITHUB_REPOSITORY" "$@"
+fi
+if [ -n "${AGENTK_GITHUB_LABEL:-}" ]; then
+  set -- --label "$AGENTK_GITHUB_LABEL" "$@"
+fi
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-github --root "$STORE_ROOT" --out "$GITHUB_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_github_send_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+GITHUB_OUT="${AGENTK_GITHUB_OUT:-$ROOT/sidecar/.agentk/github}"
+TOKEN_ENV="${AGENTK_GITHUB_TOKEN_ENV:-GITHUB_TOKEN}"
+GH="${AGENTK_GH:-gh}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-github-send \
+  --payload-root "$GITHUB_OUT" \
+  --github-token-env "$TOKEN_ENV" \
+  --gh "$GH" \
+  "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_email_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+STORE_ROOT="${AGENTK_STORE_ROOT:-$ROOT/sidecar/.agentk/team-store}"
+EMAIL_OUT="${AGENTK_EMAIL_OUT:-$ROOT/sidecar/.agentk/email}"
+if [ -n "${AGENTK_EMAIL_TO:-}" ]; then
+  set -- --to "$AGENTK_EMAIL_TO" "$@"
+fi
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-email --root "$STORE_ROOT" --out "$EMAIL_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_store_email_send_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+EMAIL_OUT="${AGENTK_EMAIL_OUT:-$ROOT/sidecar/.agentk/email}"
+SENDMAIL="${AGENTK_SENDMAIL:-sendmail}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" store-email-send \
+  --payload-root "$EMAIL_OUT" \
+  --sendmail "$SENDMAIL" \
+  "$@"
+"#
+    .to_string()
+}
+
 fn sidecar_systemd_http_service(package_root: &Path) -> String {
     format!(
         r#"[Unit]
@@ -17102,7 +20857,7 @@ Type=simple
 WorkingDirectory={}
 Environment=AGENTK_BIN=agentk
 # Set AGENTK_MCP_HTTP_TOKEN in an EnvironmentFile before exposing non-local binds.
-# EnvironmentFile=%h/.config/agentk/sidecar-http.env
+EnvironmentFile=-%h/.config/agentk/sidecar-http.env
 ExecStart={}
 Restart=on-failure
 RestartSec=3
@@ -17131,7 +20886,7 @@ Type=simple
 WorkingDirectory={}
 Environment=AGENTK_BIN=agentk
 # Set AGENTK_DASHBOARD_ADMIN_TOKEN in an EnvironmentFile to require write API auth.
-# EnvironmentFile=%h/.config/agentk/dashboard.env
+EnvironmentFile=-%h/.config/agentk/dashboard.env
 ExecStart={}
 Restart=on-failure
 RestartSec=3
@@ -17288,6 +21043,80 @@ fn sidecar_docker_compose() -> String {
     .to_string()
 }
 
+fn sidecar_http_env_example() -> String {
+    let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
+    format!(
+        r#"# Copy to a supervisor-owned env file and replace CHANGE_ME values there.
+# Keep the edited file outside source control and readable only by the service user.
+AGENTK_BIN=/usr/local/bin/agentk
+AGENTK_MCP_HTTP_HOST=127.0.0.1
+AGENTK_MCP_HTTP_PORT=9798
+AGENTK_MCP_HTTP_ENDPOINT=/mcp
+AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0
+{http_token_key}=CHANGE_ME_MCP_HTTP_BEARER_TOKEN
+AGENTK_MCP_HTTP_ALLOW_ORIGINS=http://127.0.0.1:3000
+AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS=16
+AGENTK_MCP_HTTP_MAX_ACTIVE_SESSIONS=32
+AGENTK_MCP_HTTP_SESSION_IDLE_TIMEOUT_MS=900000
+AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS=30000
+AGENTK_MCP_HTTP_MAX_BODY_BYTES=65536
+AGENTK_MCP_HTTP_MAX_HEADER_BYTES=16384
+"#
+    )
+}
+
+fn sidecar_dashboard_env_example() -> String {
+    let dashboard_admin_token_key = ["AGENTK_DASHBOARD_ADMIN", "_TOKEN"].concat();
+    format!(
+        r#"# Copy to a supervisor-owned env file and replace CHANGE_ME values there.
+# Keep the edited file outside source control and readable only by the service user.
+AGENTK_BIN=/usr/local/bin/agentk
+AGENTK_DASHBOARD_HOST=127.0.0.1
+AGENTK_DASHBOARD_PORT=8765
+AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=0
+AGENTK_DASHBOARD_ADMIN_TOKEN_ENV={dashboard_admin_token_key}
+{dashboard_admin_token_key}=CHANGE_ME_DASHBOARD_ADMIN_TOKEN
+AGENTK_DASHBOARD_STREAM_TIMEOUT_MS=30000
+AGENTK_DASHBOARD_MAX_BODY_BYTES=8192
+AGENTK_DASHBOARD_MAX_HEADER_BYTES=16384
+AGENTK_STORE_ROOT=sidecar/.agentk/team-store
+"#
+    )
+}
+
+fn sidecar_store_postgres_env_example() -> String {
+    r#"# Used by bin/agentk-store-push after bin/agentk-store-export and store-check pass.
+# Replace CHANGE_ME_PASSWORD in the supervisor or CI secret store, not in git.
+DATABASE_URL=postgres://agentk:CHANGE_ME_PASSWORD@localhost:5432/agentk_audit
+AGENTK_STORE_ROOT=sidecar/.agentk/team-store
+AGENTK_STORE_EXPORT_ROOT=sidecar/.agentk/store
+"#
+    .to_string()
+}
+
+fn sidecar_notifications_env_example() -> String {
+    let github_token_key = ["GITHUB", "_TOKEN"].concat();
+    format!(
+        r#"# Local notification payload export and delivery settings.
+# Keep real webhook URLs and tokens in a supervisor or CI secret store, not in git.
+AGENTK_STORE_ROOT=sidecar/.agentk/team-store
+AGENTK_SLACK_OUT=sidecar/.agentk/slack
+AGENTK_SLACK_WEBHOOK_URL_ENV=AGENTK_SLACK_WEBHOOK_URL
+AGENTK_SLACK_WEBHOOK_URL=CHANGE_ME_SLACK_WEBHOOK_URL
+AGENTK_CURL=curl
+AGENTK_GITHUB_OUT=sidecar/.agentk/github
+AGENTK_GITHUB_REPOSITORY=OWNER/REPO
+AGENTK_GITHUB_LABEL=agentk
+AGENTK_GITHUB_TOKEN_ENV={github_token_key}
+{github_token_key}=CHANGE_ME_GITHUB_DELIVERY_VALUE
+AGENTK_GH=gh
+AGENTK_EMAIL_OUT=sidecar/.agentk/email
+AGENTK_EMAIL_TO=agentk-alerts@example.com
+AGENTK_SENDMAIL=sendmail
+"#
+    )
+}
+
 fn sidecar_deploy_readme() -> String {
     r#"# AgentK Deployment Templates
 
@@ -17308,6 +21137,13 @@ The packaged sidecar gateway and dashboard launchers run
 to validate the package manifest, launcher modes, deploy templates, storage
 schema, and embedded sidecar bundle. Service and container starts fail closed
 when policy, permissions, secret references, or client snippets stop validating.
+`deploy/env/*.env.example` files list the supervisor environment expected by
+the packaged HTTP gateway, dashboard, Postgres push, and local
+Slack/GitHub/email payload exporters. Copy them to your service manager or CI secret store,
+replace only `CHANGE_ME` placeholders outside source control, and keep edited
+env files readable only by the service account. `agentk-package-check` verifies
+that the packaged examples stay dummy and do not contain real-looking
+credentials.
 The systemd templates set no-new-privileges, private temp directories,
 SUID/SGID restrictions, and owner-only file creation masks. The Dockerfile uses
 a minimal Debian base, no recommended packages, apt-cache cleanup, and a
@@ -17324,8 +21160,11 @@ identity, and network policy in the deployment layer.
 
 ```sh
 mkdir -p ~/.config/systemd/user
+mkdir -p ~/.config/agentk
 cp deploy/systemd/agentk-sidecar-http.service ~/.config/systemd/user/
 cp deploy/systemd/agentk-dashboard.service ~/.config/systemd/user/
+install -m 600 deploy/env/sidecar-http.env.example ~/.config/agentk/sidecar-http.env
+install -m 600 deploy/env/dashboard.env.example ~/.config/agentk/dashboard.env
 systemctl --user daemon-reload
 systemctl --user enable --now agentk-sidecar-http.service
 systemctl --user enable --now agentk-dashboard.service
@@ -17336,6 +21175,8 @@ systemctl --user enable --now agentk-dashboard.service
 ```sh
 cp deploy/launchd/com.agentk.sidecar-http.plist ~/Library/LaunchAgents/
 cp deploy/launchd/com.agentk.dashboard.plist ~/Library/LaunchAgents/
+launchctl setenv AGENTK_MCP_HTTP_TOKEN CHANGE_ME_MCP_HTTP_BEARER_TOKEN
+launchctl setenv AGENTK_DASHBOARD_ADMIN_TOKEN CHANGE_ME_DASHBOARD_ADMIN_TOKEN
 launchctl load ~/Library/LaunchAgents/com.agentk.sidecar-http.plist
 launchctl load ~/Library/LaunchAgents/com.agentk.dashboard.plist
 ```
@@ -17354,8 +21195,17 @@ docker compose -f deploy/docker/compose.yml up --build
 ```
 
 Use `bin/agentk-store-sync` to refresh the live local team store. Use
+`bin/agentk-store-slack`, `bin/agentk-store-slack-send --dry-run`,
+`bin/agentk-store-github`, `bin/agentk-store-github-send --dry-run`,
+`bin/agentk-store-email`, and `bin/agentk-store-email-send --dry-run` to create
+or preflight local bridge payload delivery, and use
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
 `bin/agentk-store-push --dry-run` before loading audit rows into Postgres.
+`deploy/env/store-postgres.env.example` and
+`deploy/env/notifications.env.example` document the env values those packaged
+store commands read; Slack/GitHub delivery credentials and the local email
+relay path stay in those env files or a supervisor secret store, not in AgentK
+payload artifacts.
 "#
     .to_string()
 }
@@ -17398,13 +21248,22 @@ AGENTK_TRACE={} {} --json
 # Sidecar bundle check:
 {}
 
+# Identity mapping check:
+{}
+
 # Dashboard:
 {}
 
 # Dashboard server:
 {}
 
-# Audit store sync/export/check/push:
+# Audit store sync/export/check/push/bridge payloads:
+{}
+{}
+{}
+{}
+{}
+{}
 {}
 {}
 {}
@@ -17418,12 +21277,19 @@ AGENTK_TRACE={} {} --json
             .display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-sidecar-check").display(),
+        package_root.join("bin/agentk-identity-check").display(),
         package_root.join("bin/agentk-dashboard").display(),
         package_root.join("bin/agentk-dashboard-server").display(),
         package_root.join("bin/agentk-store-export").display(),
         package_root.join("bin/agentk-store-check").display(),
         package_root.join("bin/agentk-store-sync").display(),
-        package_root.join("bin/agentk-store-push").display()
+        package_root.join("bin/agentk-store-push").display(),
+        package_root.join("bin/agentk-store-slack").display(),
+        package_root.join("bin/agentk-store-slack-send").display(),
+        package_root.join("bin/agentk-store-github").display(),
+        package_root.join("bin/agentk-store-github-send").display(),
+        package_root.join("bin/agentk-store-email").display(),
+        package_root.join("bin/agentk-store-email-send").display()
     )
 }
 
@@ -18038,10 +21904,11 @@ mod tests {
         let report = init_sidecar_bundle(&root, false).expect("sidecar bundle should be generated");
 
         assert_eq!(report.root, root);
-        assert_eq!(report.files.len(), 8);
+        assert_eq!(report.files.len(), 9);
         assert!(root.join("README.md").exists());
         assert!(root.join("agentk-sidecar.toml").exists());
         assert!(root.join("team-permissions.toml").exists());
+        assert!(root.join("team-identity.toml").exists());
         assert!(root.join("policies/team-sidecar.toml").exists());
         assert!(root.join("secrets.toml").exists());
         assert!(root.join("clients/claude-desktop.mcp.json").exists());
@@ -18054,6 +21921,7 @@ mod tests {
         let config = fs::read_to_string(root.join("agentk-sidecar.toml"))
             .expect("sidecar config should be readable");
         assert!(config.contains("max_client_messages = 10000"));
+        assert!(config.contains("identity = \"team-identity.toml\""));
 
         let client = fs::read_to_string(root.join("clients/claude-desktop.mcp.json"))
             .expect("client snippet should be readable");
@@ -18068,6 +21936,15 @@ mod tests {
         let secrets = secret_reference_manifest_report_from_path(root.join("secrets.toml"))
             .expect("generated secret refs should parse without secret values");
         assert_eq!(secrets.secret_count, 3);
+        let permissions_path = root.join("team-permissions.toml");
+        let identity = team_identity_report_from_path(
+            root.join("team-identity.toml"),
+            Some(permissions_path.as_path()),
+        )
+        .expect("generated identity mappings should parse");
+        assert_eq!(identity.providers, 1);
+        assert_eq!(identity.mappings, 3);
+        assert_eq!(identity.mapped_reviewers, 3);
 
         fs::remove_dir_all(root).ok();
     }
@@ -18107,6 +21984,9 @@ mod tests {
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "sidecar team permissions" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "sidecar team identity" && check.status == ReadinessStatus::Pass
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "sidecar downstream command" && check.status == ReadinessStatus::Pass
@@ -18326,10 +22206,12 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 25);
+        assert_eq!(report.files.len(), 37);
         assert!(out.join("manifest.json").exists());
+        assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
         assert!(out.join("sidecar/team-permissions.toml").exists());
+        assert!(out.join("sidecar/team-identity.toml").exists());
         assert!(out.join("bin/agentk-package-info").exists());
         assert!(out.join("bin/agentk-package-check").exists());
         assert!(out.join("bin/agentk-safe-agent-demo").exists());
@@ -18337,12 +22219,19 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-tcp").exists());
         assert!(out.join("bin/agentk-sidecar-http").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
+        assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
         assert!(out.join("bin/agentk-dashboard-server").exists());
         assert!(out.join("bin/agentk-store-export").exists());
         assert!(out.join("bin/agentk-store-check").exists());
         assert!(out.join("bin/agentk-store-sync").exists());
         assert!(out.join("bin/agentk-store-push").exists());
+        assert!(out.join("bin/agentk-store-slack").exists());
+        assert!(out.join("bin/agentk-store-slack-send").exists());
+        assert!(out.join("bin/agentk-store-github").exists());
+        assert!(out.join("bin/agentk-store-github-send").exists());
+        assert!(out.join("bin/agentk-store-email").exists());
+        assert!(out.join("bin/agentk-store-email-send").exists());
         assert!(out.join("clients/claude-desktop.mcp.json").exists());
         assert!(out.join("storage/postgres-schema.sql").exists());
         assert!(
@@ -18360,6 +22249,10 @@ can_deny = ["*"]
         );
         assert!(out.join("deploy/docker/Dockerfile").exists());
         assert!(out.join("deploy/docker/compose.yml").exists());
+        assert!(out.join("deploy/env/sidecar-http.env.example").exists());
+        assert!(out.join("deploy/env/dashboard.env.example").exists());
+        assert!(out.join("deploy/env/store-postgres.env.example").exists());
+        assert!(out.join("deploy/env/notifications.env.example").exists());
         assert!(out.join("deploy/README.md").exists());
 
         let launcher =
@@ -18397,8 +22290,30 @@ can_deny = ["*"]
         let package_readme =
             fs::read_to_string(out.join("README.md")).expect("package README should read");
         assert!(package_readme.contains("manifest.json"));
+        assert!(package_readme.contains("--archive-out"));
+        assert!(package_readme.contains("neighboring `.sha256` file"));
+        assert!(package_readme.contains("archive SHA-256"));
+        assert!(package_readme.contains("sidecar-package-archive-check"));
+        assert!(package_readme.contains("sidecar-package-install"));
+        assert!(package_readme.contains("package.lock.json"));
+        assert!(package_readme.contains("install-receipt.json"));
+        assert!(package_readme.contains("sidecar-package-release-manifest"));
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
+        assert!(package_readme.contains("bin/agentk-store-slack"));
+        assert!(package_readme.contains("bin/agentk-store-slack-send"));
+        assert!(package_readme.contains("Slack/GitHub tokens, email"));
+        assert!(package_readme.contains("delivery URLs"));
+        assert!(package_readme.contains("bin/agentk-store-github"));
+        assert!(package_readme.contains("bin/agentk-store-github-send"));
+        assert!(package_readme.contains("bin/agentk-store-email"));
+        assert!(package_readme.contains("bin/agentk-store-email-send"));
+        assert!(package_readme.contains("sendmail-ready"));
+        assert!(package_readme.contains("sendmail"));
+        assert!(package_readme.contains("bin/agentk-identity-check"));
+        assert!(package_readme.contains("agentk identity-check"));
+        assert!(package_readme.contains("mapped reviewers"));
+        assert!(package_readme.contains("calling the GitHub API"));
         assert!(package_readme.contains("runs the package self-check before launch"));
         assert!(package_readme.contains("verifies `AGENTK_BIN`"));
         assert!(package_readme.contains("missing AgentK"));
@@ -18538,6 +22453,10 @@ can_deny = ["*"]
             serde_json::json!("sidecar")
         );
         assert_eq!(
+            package_manifest_json["package_lock"],
+            serde_json::json!("package.lock.json")
+        );
+        assert_eq!(
             package_manifest_json["default_transports"][2]["default_url"],
             serde_json::json!("http://127.0.0.1:9798/mcp")
         );
@@ -18554,6 +22473,13 @@ can_deny = ["*"]
                 .expect("deploy templates should be an array")
                 .iter()
                 .any(|template| template == "deploy/launchd/com.agentk.sidecar-http.plist")
+        );
+        assert!(
+            package_manifest_json["deploy_env_examples"]
+                .as_array()
+                .expect("deploy env examples should be an array")
+                .iter()
+                .any(|template| template == "deploy/env/sidecar-http.env.example")
         );
         assert!(
             package_manifest_json["launchers"]
@@ -18577,13 +22503,102 @@ can_deny = ["*"]
                 .any(|launcher| launcher == "bin/agentk-safe-agent-demo")
         );
         assert_eq!(
+            package_manifest_json["identity"]["manifest"],
+            serde_json::json!("sidecar/team-identity.toml")
+        );
+        assert_eq!(
+            package_manifest_json["identity"]["permissions"],
+            serde_json::json!("sidecar/team-permissions.toml")
+        );
+        assert_eq!(
+            package_manifest_json["identity"]["check"],
+            serde_json::json!("bin/agentk-identity-check")
+        );
+        assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-identity-check")
+        );
+        assert_eq!(
             package_manifest_json["store_workflow"]["push"],
             serde_json::json!("bin/agentk-store-push")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["slack"],
+            serde_json::json!("bin/agentk-store-slack")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["slack_send"],
+            serde_json::json!("bin/agentk-store-slack-send")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["github"],
+            serde_json::json!("bin/agentk-store-github")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["github_send"],
+            serde_json::json!("bin/agentk-store-github-send")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["email"],
+            serde_json::json!("bin/agentk-store-email")
+        );
+        assert_eq!(
+            package_manifest_json["store_workflow"]["email_send"],
+            serde_json::json!("bin/agentk-store-email-send")
         );
         assert!(
             !package_manifest.contains(&out.display().to_string()),
             "package manifest should use relative paths"
         );
+        let package_lock =
+            fs::read_to_string(out.join("package.lock.json")).expect("package lock should read");
+        let package_lock_json: serde_json::Value =
+            serde_json::from_str(&package_lock).expect("package lock should parse");
+        assert_eq!(
+            package_lock_json["package"],
+            serde_json::json!("agentk-team-sidecar")
+        );
+        assert_eq!(
+            package_lock_json["hash_algorithm"],
+            serde_json::json!("sha256")
+        );
+        assert!(
+            package_lock_json["excludes"]
+                .as_array()
+                .expect("excludes should be an array")
+                .iter()
+                .any(|value| value == "package.lock.json")
+        );
+        assert!(
+            package_lock_json["excludes"]
+                .as_array()
+                .expect("excludes should be an array")
+                .iter()
+                .any(|value| value == "sidecar/.agentk")
+        );
+        let lock_files = package_lock_json["files"]
+            .as_array()
+            .expect("lock files should be an array");
+        assert!(lock_files.iter().any(|file| {
+            file["path"] == "manifest.json"
+                && file["sha256"]
+                    .as_str()
+                    .is_some_and(|value| value.len() == 64)
+                && file["executable"] == serde_json::json!(false)
+        }));
+        assert!(lock_files.iter().any(|file| {
+            file["path"] == "bin/agentk-sidecar" && file["executable"] == serde_json::json!(true)
+        }));
+        assert!(lock_files.iter().all(|file| {
+            file["path"].as_str().is_some_and(|path| {
+                !path.starts_with('/')
+                    && path != "package.lock.json"
+                    && !path.starts_with("sidecar/.agentk/")
+            })
+        }));
         let package_info = fs::read_to_string(out.join("bin/agentk-package-info"))
             .expect("package info should read");
         assert!(package_info.contains("manifest.json"));
@@ -18632,6 +22647,8 @@ can_deny = ["*"]
         assert!(dashboard_server.contains("AGENTK_TRACE"));
         assert!(dashboard_server.contains("AGENTK_DECISIONS"));
         assert!(dashboard_server.contains("AGENTK_PERMISSIONS"));
+        assert!(dashboard_server.contains("AGENTK_IDENTITY"));
+        assert!(dashboard_server.contains("--identity"));
         assert!(dashboard_server.contains("AGENTK_STORE_ROOT"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_HOST"));
         assert!(dashboard_server.contains("AGENTK_DASHBOARD_PORT"));
@@ -18647,14 +22664,26 @@ can_deny = ["*"]
         assert!(dashboard_server.contains("--store-root"));
         assert!(dashboard_server.contains("team-store"));
         assert!(dashboard_server.contains("\"$@\""));
+        let identity_check = fs::read_to_string(out.join("bin/agentk-identity-check"))
+            .expect("identity check launcher should read");
+        assert!(identity_check.contains("identity-check"));
+        assert!(identity_check.contains("AGENTK_IDENTITY"));
+        assert!(identity_check.contains("team-identity.toml"));
+        assert!(identity_check.contains("AGENTK_PERMISSIONS"));
+        assert!(identity_check.contains("team-permissions.toml"));
+        assert!(identity_check.contains("agentk-package-check"));
+        assert!(identity_check.contains("\"$@\""));
         let store_export = fs::read_to_string(out.join("bin/agentk-store-export"))
             .expect("store export should read");
         assert!(store_export.contains("store-export"));
         assert!(store_export.contains("AGENTK_TRACE"));
         assert!(store_export.contains("AGENTK_DECISIONS"));
         assert!(store_export.contains("AGENTK_PERMISSIONS"));
+        assert!(store_export.contains("AGENTK_IDENTITY"));
         assert!(store_export.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_export.contains("team-permissions.toml"));
+        assert!(store_export.contains("team-identity.toml"));
+        assert!(store_export.contains("--identity"));
         assert!(store_export.contains("agentk-package-check"));
         assert!(store_export.contains("\"$@\""));
         let store_check = fs::read_to_string(out.join("bin/agentk-store-check"))
@@ -18669,8 +22698,11 @@ can_deny = ["*"]
         assert!(store_sync.contains("AGENTK_TRACE"));
         assert!(store_sync.contains("AGENTK_DECISIONS"));
         assert!(store_sync.contains("AGENTK_PERMISSIONS"));
+        assert!(store_sync.contains("AGENTK_IDENTITY"));
         assert!(store_sync.contains("AGENTK_STORE_ROOT"));
         assert!(store_sync.contains("team-store"));
+        assert!(store_sync.contains("team-identity.toml"));
+        assert!(store_sync.contains("--identity"));
         assert!(store_sync.contains("agentk-package-check"));
         assert!(store_sync.contains("\"$@\""));
         let store_push =
@@ -18679,6 +22711,55 @@ can_deny = ["*"]
         assert!(store_push.contains("AGENTK_STORE_EXPORT_ROOT"));
         assert!(store_push.contains("agentk-package-check"));
         assert!(store_push.contains("\"$@\""));
+        let store_slack = fs::read_to_string(out.join("bin/agentk-store-slack"))
+            .expect("store slack should read");
+        assert!(store_slack.contains("store-slack"));
+        assert!(store_slack.contains("AGENTK_STORE_ROOT"));
+        assert!(store_slack.contains("AGENTK_SLACK_OUT"));
+        assert!(store_slack.contains("agentk-package-check"));
+        assert!(store_slack.contains("\"$@\""));
+        let store_slack_send = fs::read_to_string(out.join("bin/agentk-store-slack-send"))
+            .expect("store slack send should read");
+        assert!(store_slack_send.contains("store-slack-send"));
+        assert!(store_slack_send.contains("AGENTK_SLACK_OUT"));
+        assert!(store_slack_send.contains("AGENTK_SLACK_WEBHOOK_URL_ENV"));
+        assert!(store_slack_send.contains("AGENTK_SLACK_WEBHOOK_URL"));
+        assert!(store_slack_send.contains("AGENTK_CURL"));
+        assert!(store_slack_send.contains("agentk-package-check"));
+        assert!(store_slack_send.contains("\"$@\""));
+        let store_github = fs::read_to_string(out.join("bin/agentk-store-github"))
+            .expect("store github should read");
+        assert!(store_github.contains("store-github"));
+        assert!(store_github.contains("AGENTK_STORE_ROOT"));
+        assert!(store_github.contains("AGENTK_GITHUB_OUT"));
+        assert!(store_github.contains("AGENTK_GITHUB_REPOSITORY"));
+        assert!(store_github.contains("AGENTK_GITHUB_LABEL"));
+        assert!(store_github.contains("agentk-package-check"));
+        assert!(store_github.contains("\"$@\""));
+        let store_github_send = fs::read_to_string(out.join("bin/agentk-store-github-send"))
+            .expect("store github send should read");
+        assert!(store_github_send.contains("store-github-send"));
+        assert!(store_github_send.contains("AGENTK_GITHUB_OUT"));
+        assert!(store_github_send.contains("AGENTK_GITHUB_TOKEN_ENV"));
+        assert!(store_github_send.contains("GITHUB_TOKEN"));
+        assert!(store_github_send.contains("AGENTK_GH"));
+        assert!(store_github_send.contains("agentk-package-check"));
+        assert!(store_github_send.contains("\"$@\""));
+        let store_email = fs::read_to_string(out.join("bin/agentk-store-email"))
+            .expect("store email should read");
+        assert!(store_email.contains("store-email"));
+        assert!(store_email.contains("AGENTK_STORE_ROOT"));
+        assert!(store_email.contains("AGENTK_EMAIL_OUT"));
+        assert!(store_email.contains("AGENTK_EMAIL_TO"));
+        assert!(store_email.contains("agentk-package-check"));
+        assert!(store_email.contains("\"$@\""));
+        let store_email_send = fs::read_to_string(out.join("bin/agentk-store-email-send"))
+            .expect("store email send should read");
+        assert!(store_email_send.contains("store-email-send"));
+        assert!(store_email_send.contains("AGENTK_EMAIL_OUT"));
+        assert!(store_email_send.contains("AGENTK_SENDMAIL"));
+        assert!(store_email_send.contains("agentk-package-check"));
+        assert!(store_email_send.contains("\"$@\""));
         let client = fs::read_to_string(out.join("clients/claude-desktop.mcp.json"))
             .expect("client should read");
         assert!(client.contains("bin/agentk-sidecar"));
@@ -18689,13 +22770,23 @@ can_deny = ["*"]
         assert!(command.contains("AGENTK_TRACE"));
         assert!(command.contains("safe-agent-demo.jsonl"));
         assert!(command.contains("agentk-sidecar-check"));
+        assert!(command.contains("agentk-identity-check"));
         assert!(command.contains("agentk-store-sync"));
         assert!(command.contains("agentk-store-push"));
+        assert!(command.contains("agentk-store-slack"));
+        assert!(command.contains("agentk-store-slack-send"));
+        assert!(command.contains("agentk-store-github"));
+        assert!(command.contains("agentk-store-github-send"));
+        assert!(command.contains("agentk-store-email"));
+        assert!(command.contains("agentk-store-email-send"));
         let sidecar_http_service =
             fs::read_to_string(out.join("deploy/systemd/agentk-sidecar-http.service"))
                 .expect("sidecar HTTP service should read");
         assert!(sidecar_http_service.contains("agentk-sidecar-http"));
         assert!(sidecar_http_service.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(
+            sidecar_http_service.contains("EnvironmentFile=-%h/.config/agentk/sidecar-http.env")
+        );
         assert!(sidecar_http_service.contains("NoNewPrivileges=true"));
         assert!(sidecar_http_service.contains("PrivateTmp=true"));
         assert!(sidecar_http_service.contains("RestrictSUIDSGID=true"));
@@ -18704,6 +22795,7 @@ can_deny = ["*"]
             .expect("service should read");
         assert!(service.contains("agentk-dashboard-server"));
         assert!(service.contains("AGENTK_DASHBOARD_ADMIN_TOKEN"));
+        assert!(service.contains("EnvironmentFile=-%h/.config/agentk/dashboard.env"));
         assert!(service.contains("NoNewPrivileges=true"));
         assert!(service.contains("PrivateTmp=true"));
         assert!(service.contains("RestrictSUIDSGID=true"));
@@ -18742,11 +22834,35 @@ can_deny = ["*"]
         assert!(compose.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(compose.contains("AGENTK_DASHBOARD_ADMIN_TOKEN:?"));
         assert!(compose.contains("127.0.0.1:8765:8765"));
+        let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
+        let dashboard_admin_token_key = ["AGENTK_DASHBOARD_ADMIN", "_TOKEN"].concat();
+        let sidecar_env = fs::read_to_string(out.join("deploy/env/sidecar-http.env.example"))
+            .expect("sidecar env example should read");
+        assert!(sidecar_env.contains(&format!("{http_token_key}=CHANGE_ME")));
+        assert!(sidecar_env.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0"));
+        let dashboard_env = fs::read_to_string(out.join("deploy/env/dashboard.env.example"))
+            .expect("dashboard env example should read");
+        assert!(dashboard_env.contains(&format!("{dashboard_admin_token_key}=CHANGE_ME")));
+        assert!(dashboard_env.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=0"));
+        let postgres_env = fs::read_to_string(out.join("deploy/env/store-postgres.env.example"))
+            .expect("postgres env example should read");
+        assert!(postgres_env.contains(
+            "DATABASE_URL=postgres://agentk:CHANGE_ME_PASSWORD@localhost:5432/agentk_audit"
+        ));
+        let notifications_env =
+            fs::read_to_string(out.join("deploy/env/notifications.env.example"))
+                .expect("notifications env example should read");
+        assert!(notifications_env.contains("AGENTK_GITHUB_REPOSITORY=OWNER/REPO"));
+        assert!(notifications_env.contains("AGENTK_GITHUB_LABEL=agentk"));
         let deploy_readme =
             fs::read_to_string(out.join("deploy/README.md")).expect("deploy readme should read");
         assert!(deploy_readme.contains("agentk-package-check --json"));
         assert!(deploy_readme.contains("sidecar gateway and dashboard launchers"));
         assert!(deploy_readme.contains("AGENTK_MCP_HTTP_TOKEN"));
+        assert!(deploy_readme.contains("deploy/env/*.env.example"));
+        assert!(deploy_readme.contains("`CHANGE_ME` placeholders"));
+        assert!(deploy_readme.contains("store-postgres.env.example"));
+        assert!(deploy_readme.contains("notifications.env.example"));
         assert!(deploy_readme.contains("no-new-privileges"));
         assert!(deploy_readme.contains("non-login `agentk` user"));
         assert!(deploy_readme.contains("read-only container filesystem"));
@@ -18770,9 +22886,424 @@ can_deny = ["*"]
         assert!(package_check_report.checks.iter().any(|check| {
             check.name == "package deploy templates" && check.status == ReadinessStatus::Pass
         }));
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package deploy env examples" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(package_check_report.checks.iter().any(|check| {
+            check.name == "package lock" && check.status == ReadinessStatus::Pass
+        }));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_archive_writes_handoff_tar() {
+        fn tar_text_field(field: &[u8]) -> String {
+            let end = field
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(field.len());
+            String::from_utf8_lossy(&field[..end]).trim().to_string()
+        }
+
+        fn tar_entry_names(path: &Path) -> Vec<String> {
+            let bytes = fs::read(path).expect("archive should read");
+            let mut offset = 0usize;
+            let mut names = Vec::new();
+            loop {
+                let header = &bytes[offset..offset + 512];
+                if header.iter().all(|byte| *byte == 0) {
+                    break;
+                }
+                let name = tar_text_field(&header[0..100]);
+                let prefix = tar_text_field(&header[345..500]);
+                let full_name = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                names.push(full_name);
+
+                let size_field = tar_text_field(&header[124..136]);
+                let size_digits = size_field.trim_start_matches('0');
+                let size = u64::from_str_radix(
+                    if size_digits.is_empty() {
+                        "0"
+                    } else {
+                        size_digits
+                    },
+                    8,
+                )
+                .expect("tar size should be octal");
+                let padded_size = ((size + 511) / 512) * 512;
+                offset += 512 + padded_size as usize;
+            }
+            names
+        }
+
+        let root = temp_path("agentk-sidecar-package-archive-root", "dir");
+        let out = temp_path("agentk-sidecar-package-archive-out", "dir");
+        let archive = temp_path("agentk-sidecar-package-archive", "tar");
+        let install = temp_path("agentk-sidecar-package-install", "dir");
+        let release_manifest = temp_path("agentk-sidecar-package-release-manifest", "json");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        fs::create_dir_all(out.join("sidecar/.agentk/runs"))
+            .expect("runtime state parent should write");
+        fs::write(
+            out.join("sidecar/.agentk/runs/safe-agent-demo.jsonl"),
+            "{}\n",
+        )
+        .expect("runtime state should write");
+
+        let report =
+            archive_sidecar_package(&out, &archive, false).expect("package archive should write");
+        assert_eq!(report.package, out);
+        assert_eq!(report.archive, archive);
+        assert_eq!(
+            report.checksum,
+            report.archive.with_file_name(format!(
+                "{}.sha256",
+                report
+                    .archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("archive filename should be UTF-8")
+            ))
+        );
+        assert!(report.files >= 26);
+        assert!(report.bytes > 1024);
+        assert_eq!(report.sha256.len(), 64);
+        assert!(report.sha256.chars().all(|ch| ch.is_ascii_hexdigit()));
+        let checksum = fs::read_to_string(&report.checksum).expect("checksum should read");
+        assert_eq!(
+            checksum,
+            format!(
+                "{}  {}\n",
+                report.sha256,
+                report
+                    .archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("archive filename should be UTF-8")
+            )
+        );
+        let archive_check = check_sidecar_package_archive(&report.archive, None)
+            .expect("archive checksum check should run");
+        assert!(archive_check.passed);
+        assert_eq!(archive_check.expected_sha256, Some(report.sha256.clone()));
+        assert_eq!(archive_check.actual_sha256, Some(report.sha256.clone()));
+        assert!(archive_check.checks.iter().any(|check| {
+            check.name == "package archive checksum match" && check.status == ReadinessStatus::Pass
+        }));
+        let install_report =
+            install_sidecar_package_archive(&report.archive, None, &install, false)
+                .expect("package archive should install");
+        assert_eq!(install_report.archive, report.archive);
+        assert_eq!(install_report.checksum, report.checksum);
+        assert_eq!(install_report.package, install);
+        assert_eq!(
+            install_report.receipt,
+            install.join(SIDECAR_PACKAGE_INSTALL_RECEIPT)
+        );
+        assert_eq!(install_report.archive_sha256, report.sha256);
+        assert!(install_report.files >= 26);
+        assert!(install_report.package_check.passed);
+        assert_eq!(install_report.package_check.root, install_report.package);
+        assert!(install.join("manifest.json").exists());
+        assert!(install.join("package.lock.json").exists());
+        assert!(install.join("bin/agentk-sidecar").exists());
+        assert!(install.join(SIDECAR_PACKAGE_INSTALL_RECEIPT).exists());
+        assert!(!install.join("sidecar/.agentk/runs").exists());
+        let receipt: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&install_report.receipt).expect("install receipt should read"),
+        )
+        .expect("install receipt should parse");
+        assert_eq!(
+            receipt["schema_version"],
+            serde_json::json!(SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION)
+        );
+        assert_eq!(receipt["package"], serde_json::json!(SIDECAR_PACKAGE_NAME));
+        assert_eq!(
+            receipt["agentk_version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            receipt["archive_file"],
+            serde_json::json!(
+                report
+                    .archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("archive filename should be UTF-8")
+            )
+        );
+        assert_eq!(
+            receipt["checksum_file"],
+            serde_json::json!(
+                report
+                    .checksum
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("checksum filename should be UTF-8")
+            )
+        );
+        assert_eq!(receipt["hash_algorithm"], serde_json::json!("sha256"));
+        assert_eq!(
+            receipt["archive_sha256"],
+            serde_json::json!(report.sha256.clone())
+        );
+        assert_eq!(
+            receipt["installed_files"],
+            serde_json::json!(install_report.files)
+        );
+        assert!(receipt["installed_at_unix_seconds"].as_u64().is_some());
+        let receipt_package_check =
+            check_sidecar_package(&install).expect("package check should tolerate install receipt");
+        assert!(receipt_package_check.passed);
+        let release_report = write_sidecar_package_release_manifest(
+            &install,
+            &report.archive,
+            Some(report.checksum.clone()),
+            None,
+            &release_manifest,
+            false,
+        )
+        .expect("release manifest should write");
+        assert_eq!(release_report.output, release_manifest);
+        assert_eq!(release_report.package_root, install);
+        assert_eq!(
+            release_report.package_manifest,
+            install.join("manifest.json")
+        );
+        assert_eq!(
+            release_report.package_lock,
+            install.join(SIDECAR_PACKAGE_LOCK)
+        );
+        assert_eq!(release_report.install_receipt, install_report.receipt);
+        assert_eq!(release_report.archive_sha256, report.sha256);
+        assert_eq!(release_report.installed_files, install_report.files);
+        assert!(release_report.passed);
+        assert!(release_report.package_check.passed);
+        assert!(release_report.archive_check.passed);
+        assert_eq!(
+            release_report.receipt.archive_sha256,
+            install_report.archive_sha256
+        );
+        assert_eq!(release_report.package_manifest_sha256.len(), 64);
+        assert_eq!(release_report.package_lock_sha256.len(), 64);
+        assert_eq!(release_report.install_receipt_sha256.len(), 64);
+        let release_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&release_report.output).expect("release manifest should read"),
+        )
+        .expect("release manifest should parse");
+        assert_eq!(
+            release_json["schema_version"],
+            serde_json::json!(SIDECAR_PACKAGE_RELEASE_MANIFEST_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            release_json["package_name"],
+            serde_json::json!(SIDECAR_PACKAGE_NAME)
+        );
+        assert_eq!(
+            release_json["archive_sha256"],
+            serde_json::json!(report.sha256.clone())
+        );
+        assert_eq!(release_json["hash_algorithm"], serde_json::json!("sha256"));
+        assert_eq!(
+            release_json["receipt"]["archive_sha256"],
+            serde_json::json!(report.sha256.clone())
+        );
+        let release_exists_error = write_sidecar_package_release_manifest(
+            &install,
+            &report.archive,
+            Some(report.checksum.clone()),
+            None,
+            &release_report.output,
+            false,
+        )
+        .expect_err("release manifest should require force when output exists")
+        .to_string();
+        assert!(release_exists_error.contains("file already exists"));
+        let release_inside_error = write_sidecar_package_release_manifest(
+            &install,
+            &report.archive,
+            Some(report.checksum.clone()),
+            None,
+            install.join("release-manifest.json"),
+            false,
+        )
+        .expect_err("release manifest should stay outside package directory")
+        .to_string();
+        assert!(release_inside_error.contains("outside the package directory"));
+        let install_error =
+            install_sidecar_package_archive(&report.archive, None, &install_report.package, false)
+                .expect_err("install should require force when package output exists")
+                .to_string();
+        assert!(install_error.contains("file already exists"));
+
+        let names = tar_entry_names(&report.archive);
+        let package_root_name = out
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("package root should be UTF-8");
+        assert!(
+            names
+                .iter()
+                .any(|name| name == &format!("{package_root_name}/manifest.json"))
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == &format!("{package_root_name}/package.lock.json"))
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == &format!("{package_root_name}/bin/agentk-sidecar"))
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with(&format!("{package_root_name}/sidecar/.agentk")))
+        );
+
+        let inside_error = archive_sidecar_package(&out, out.join("agentk-sidecar.tar"), false)
+            .expect_err("archive inside package should be rejected")
+            .to_string();
+        assert!(inside_error.contains("outside the package directory"));
+
+        fs::write(
+            &report.checksum,
+            format!(
+                "{}  {}\n",
+                "0".repeat(64),
+                report
+                    .archive
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("archive filename should be UTF-8")
+            ),
+        )
+        .expect("test should tamper checksum");
+        let mismatch = check_sidecar_package_archive(&report.archive, None)
+            .expect("archive checksum check should run");
+        assert!(!mismatch.passed);
+        assert!(mismatch.checks.iter().any(|check| {
+            check.name == "package archive checksum match" && check.status == ReadinessStatus::Fail
+        }));
+        fs::write(&report.checksum, checksum).expect("test should restore checksum");
+
+        let error = archive_sidecar_package(&out, &report.archive, false)
+            .expect_err("archive should require force when output exists")
+            .to_string();
+        assert!(error.contains("file already exists"));
+        fs::remove_file(&report.archive).expect("test should remove archive");
+        let checksum_error = archive_sidecar_package(&out, &report.archive, false)
+            .expect_err("existing checksum should require force")
+            .to_string();
+        assert!(checksum_error.contains("file already exists"));
+        archive_sidecar_package(&out, &report.archive, true).expect("force should overwrite");
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+        fs::remove_dir_all(install_report.package).ok();
+        fs::remove_file(report.archive).ok();
+        fs::remove_file(report.checksum).ok();
+        fs::remove_file(release_report.output).ok();
+    }
+
+    #[test]
+    fn homebrew_formula_writes_release_formula_and_validates_sha() {
+        let archive = temp_path("agentk-homebrew-source", "tar.gz");
+        let out = temp_path("agentk-homebrew-formula", "rb");
+        fs::write(&archive, b"agentk source release archive").expect("source archive should write");
+
+        let report = write_homebrew_formula(
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            None,
+            Some(&archive),
+            &out,
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+            false,
+        )
+        .expect("formula should write");
+
+        assert_eq!(report.output, out);
+        assert_eq!(report.class_name, "Agentk");
+        assert_eq!(report.formula_name, "agentk");
+        assert_eq!(report.version, "0.1.0");
+        assert_eq!(
+            report.source_url,
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"
+        );
+        assert_eq!(report.source_archive, Some(archive.clone()));
+        assert_eq!(report.sha256.len(), 64);
+        assert!(report.sha256.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(report.files, vec![out.clone()]);
+
+        let formula = fs::read_to_string(&out).expect("formula should read");
+        assert!(formula.contains("class Agentk < Formula"));
+        assert!(formula.contains("Agent security kernel and installable MCP sidecar"));
+        assert!(
+            formula.contains(
+                "url \"https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz\""
+            )
+        );
+        assert!(formula.contains(&format!("sha256 \"{}\"", report.sha256)));
+        assert!(formula.contains("license \"MIT\""));
+        assert!(formula.contains("depends_on \"rust\" => :build"));
+        assert!(formula.contains("cargo\", \"install\""));
+        assert!(formula.contains("#{bin}/agentk"));
+
+        let exists = write_homebrew_formula(
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            Some(&report.sha256),
+            Some(&archive),
+            &out,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect_err("formula should require force when output exists")
+        .to_string();
+        assert!(exists.contains("file already exists"));
+
+        let mismatch = write_homebrew_formula(
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            Some(&archive),
+            &out,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect_err("formula should reject mismatched archive sha")
+        .to_string();
+        assert!(mismatch.contains("does not match source archive"));
+
+        let bad_url = write_homebrew_formula(
+            "http://example.com/agentk.tar.gz",
+            Some(&report.sha256),
+            None,
+            &out,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect_err("formula should require https source URL")
+        .to_string();
+        assert!(bad_url.contains("clean https:// URL"));
+
+        let _ = fs::remove_file(archive);
+        let _ = fs::remove_file(out);
     }
 
     #[test]
@@ -18811,6 +23342,28 @@ can_deny = ["*"]
         }));
 
         package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        fs::write(out.join("README.md"), "tampered package readme\n")
+            .expect("test should tamper package readme");
+        let tampered_lock_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!tampered_lock_report.passed);
+        assert!(tampered_lock_report.checks.iter().any(|check| {
+            check.name == "package lock"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("README.md")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        fs::write(out.join("UNLISTED.txt"), "unexpected package file\n")
+            .expect("test should add unlisted package file");
+        let unlisted_lock_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!unlisted_lock_report.passed);
+        assert!(unlisted_lock_report.checks.iter().any(|check| {
+            check.name == "package lock"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("UNLISTED.txt")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
         let service_path = out.join("deploy/systemd/agentk-sidecar-http.service");
         let service = fs::read_to_string(&service_path).expect("service should read");
         fs::write(&service_path, service.replace("NoNewPrivileges=true\n", ""))
@@ -18835,6 +23388,26 @@ can_deny = ["*"]
             check.name == "package deploy templates"
                 && check.status == ReadinessStatus::Fail
                 && check.detail.contains("USER agentk")
+        }));
+
+        package_sidecar_bundle(&root, &out, true).expect("force should replace package");
+        let sidecar_env_path = out.join("deploy/env/sidecar-http.env.example");
+        let sidecar_env = fs::read_to_string(&sidecar_env_path).expect("env example should read");
+        let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
+        fs::write(
+            &sidecar_env_path,
+            sidecar_env.replace(
+                &format!("{http_token_key}=CHANGE_ME_MCP_HTTP_BEARER_TOKEN"),
+                &format!("{http_token_key}=ghp_realishvalue"),
+            ),
+        )
+        .expect("env example should write");
+        let unsafe_env_report = check_sidecar_package(&out).expect("package check should run");
+        assert!(!unsafe_env_report.passed);
+        assert!(unsafe_env_report.checks.iter().any(|check| {
+            check.name == "package deploy env examples"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("CHANGE_ME placeholder")
         }));
 
         package_sidecar_bundle(&root, &out, true).expect("force should replace package");
@@ -20137,6 +24710,88 @@ printf '%s\n' 'client eof observed' > "$1"
     }
 
     #[test]
+    fn secret_reference_manifest_validates_known_provider_shapes_without_logging_refs() {
+        let manifest = SecretReferenceManifest::parse_toml(
+            r#"
+            version = 1
+
+            [[secrets]]
+            target = "secret://aws-token"
+            provider = "aws-secrets-manager"
+            reference = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/prod/api-key-AbCd"
+
+            [[secrets]]
+            target = "secret://gcp-token"
+            provider = "gcp-secret-manager"
+            reference = "projects/agentk-prod/secrets/github_token/versions/latest"
+
+            [[secrets]]
+            target = "secret://azure-token"
+            provider = "azure-key-vault"
+            reference = "https://agentkvault.vault.azure.net/secrets/github-token"
+
+            [[secrets]]
+            target = "secret://vault-token"
+            provider = "vault"
+            reference = "kv/team/github-token#value"
+
+            [[secrets]]
+            target = "secret://onepassword-token"
+            provider = "onepassword"
+            reference = "op://Platform/AgentK/github-token"
+            "#,
+        )
+        .expect("known provider references should parse");
+        let report = secret_reference_manifest_report(&manifest);
+        assert_eq!(report.secret_count, 5);
+        assert_eq!(report.provider_count, 5);
+        assert_eq!(report.production_provider_ref_count, 5);
+        assert_eq!(report.shape_checked_ref_count, 5);
+
+        let serialized = serde_json::to_string(&report).expect("report should serialize");
+        for raw in [
+            "arn:aws:secretsmanager",
+            "projects/agentk-prod",
+            "agentkvault.vault.azure.net",
+            "kv/team/github-token",
+            "op://Platform",
+        ] {
+            assert!(!serialized.contains(raw));
+        }
+
+        for (provider, reference) in [
+            (
+                "aws-secrets-manager",
+                "arn:aws:secretsmanager:us-east-1:123456789012:bad:team/prod",
+            ),
+            (
+                "gcp-secret-manager",
+                "projects/agentk-prod/bad/github_token",
+            ),
+            (
+                "azure-key-vault",
+                "https://agentkvault.vault.azure.net/keys/github-token",
+            ),
+            ("vault", "kv"),
+            ("onepassword", "op://Platform/AgentK"),
+        ] {
+            let error = SecretReferenceManifest::parse_toml(&format!(
+                r#"
+                version = 1
+
+                [[secrets]]
+                target = "secret://bad-token"
+                provider = "{provider}"
+                reference = "{reference}"
+                "#
+            ))
+            .expect_err("invalid provider reference should fail");
+            assert!(error.to_string().contains("reference must"));
+            assert!(!error.to_string().contains(reference));
+        }
+    }
+
+    #[test]
     fn secret_reference_manifest_report_serializes_only_metadata() {
         let env_reference = "AGENTK_TOKEN";
         let manifest = SecretReferenceManifest::parse_toml(&format!(
@@ -20150,14 +24805,14 @@ printf '%s\n' 'client eof observed' > "$1"
             "#
         ))
         .expect("manifest should parse");
-        let report = SecretReferenceManifestReport {
-            version: manifest.version(),
-            secret_count: manifest.secrets().len(),
-        };
+        let report = secret_reference_manifest_report(&manifest);
 
         let json = serde_json::to_string(&report).expect("report should serialize");
         assert!(json.contains("\"version\":1"));
         assert!(json.contains("\"secret_count\":1"));
+        assert!(json.contains("\"provider_count\":1"));
+        assert!(json.contains("\"shape_checked_ref_count\":1"));
+        assert!(json.contains("\"production_provider_ref_count\":0"));
         assert!(!json.contains("secret://github-token"));
         assert!(!json.contains(EnvironmentSecretStore::PROVIDER));
         assert!(!json.contains(env_reference));
@@ -22939,6 +27594,145 @@ can_deny = ["*"]
     }
 
     #[test]
+    fn team_identity_maps_external_groups_to_permissioned_reviewers() {
+        let permissions_path = temp_path("agentk-identity-permissions", "toml");
+        let identity_path = temp_path("agentk-team-identity", "toml");
+        let bad_identity_path = temp_path("agentk-bad-team-identity", "toml");
+        fs::write(
+            &permissions_path,
+            r#"version = 1
+
+[[users]]
+id = "tom"
+roles = ["owner"]
+token_env = "AGENTK_REVIEWER_TOM_TOKEN"
+
+[[users]]
+id = "observer"
+roles = ["observer"]
+
+[[roles]]
+id = "owner"
+can_approve = ["*"]
+can_deny = ["*"]
+
+[[roles]]
+id = "observer"
+can_approve = []
+can_deny = []
+"#,
+        )
+        .expect("permissions should write");
+        fs::write(
+            &identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+groups_claim = "groups"
+email_claim = "email"
+allowed_email_domains = ["example.com"]
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+"#,
+        )
+        .expect("identity should write");
+
+        let report = team_identity_report_from_path(&identity_path, Some(&permissions_path))
+            .expect("identity report should parse");
+        assert_eq!(report.providers, 1);
+        assert_eq!(report.mappings, 1);
+        assert_eq!(report.mapped_reviewers, 1);
+        assert_eq!(report.permission_reviewers, Some(1));
+        assert_eq!(report.covered_permission_reviewers, Some(1));
+        assert_eq!(report.token_protected_reviewers, Some(1));
+
+        fs::write(
+            &bad_identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "missing-reviewer"
+"#,
+        )
+        .expect("bad identity should write");
+        let unknown_reviewer =
+            team_identity_report_from_path(&bad_identity_path, Some(&permissions_path))
+                .expect_err("identity mapped to unknown reviewer should fail")
+                .to_string();
+        assert!(unknown_reviewer.contains("reviewer was not found in team permissions"));
+
+        fs::write(
+            &bad_identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "http://localhost/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+"#,
+        )
+        .expect("bad issuer identity should write");
+        let unsafe_issuer =
+            team_identity_report_from_path(&bad_identity_path, Some(&permissions_path))
+                .expect_err("unsafe issuer should fail")
+                .to_string();
+        assert!(unsafe_issuer.contains("issuer must be an https URL"));
+
+        fs::write(
+            &bad_identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+"#,
+        )
+        .expect("duplicate identity should write");
+        let duplicate_group =
+            team_identity_report_from_path(&bad_identity_path, Some(&permissions_path))
+                .expect_err("duplicate mapping should fail")
+                .to_string();
+        assert!(duplicate_group.contains("duplicate team identity mapping"));
+
+        let _ = fs::remove_file(permissions_path);
+        let _ = fs::remove_file(identity_path);
+        let _ = fs::remove_file(bad_identity_path);
+    }
+
+    #[test]
     fn approval_dashboard_writes_escaped_local_review_html() {
         let trace_path = temp_path("agentk-dashboard-trace", "jsonl");
         let decisions_path = temp_path("agentk-dashboard-decisions", "jsonl");
@@ -23023,6 +27817,7 @@ can_deny = ["*"]
         let trace_path = temp_path("agentk-store-trace", "jsonl");
         let decisions_path = temp_path("agentk-store-decisions", "jsonl");
         let permissions_path = temp_path("agentk-store-permissions", "toml");
+        let identity_path = temp_path("agentk-store-identity", "toml");
         let output_dir = temp_path("agentk-store-export", "dir");
         fs::write(
             &permissions_path,
@@ -23039,6 +27834,23 @@ can_deny = ["*"]
 "#,
         )
         .expect("permissions should write");
+        fs::write(
+            &identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+"#,
+        )
+        .expect("identity should write");
         let mut kernel = AgentKernel::new("agent://test");
         kernel.syscall(Syscall {
             kind: SyscallKind::ToolInvoke,
@@ -23068,18 +27880,21 @@ can_deny = ["*"]
             &trace_path,
             &decisions_path,
             Some(&permissions_path),
+            Some(&identity_path),
             &output_dir,
         )
         .expect("store export should write");
 
         assert_eq!(report.output_dir, output_dir);
-        assert_eq!(report.files.len(), 16);
+        assert_eq!(report.files.len(), 18);
         assert_eq!(report.open, 0);
         assert_eq!(report.denied, 1);
+        assert_eq!(report.identity_mappings, 1);
         assert!(report.signatures_ok);
         assert!(output_dir.join("audit.json").exists());
         assert!(output_dir.join("approvals.json").exists());
         assert!(output_dir.join("permissions.json").exists());
+        assert!(output_dir.join("identity.json").exists());
         assert!(output_dir.join("README.md").exists());
         assert!(output_dir.join("postgres/traces.tsv").exists());
         assert!(output_dir.join("postgres/audit_events.tsv").exists());
@@ -23088,6 +27903,11 @@ can_deny = ["*"]
         assert!(output_dir.join("postgres/syscall_summary.tsv").exists());
         assert!(output_dir.join("postgres/evidence_summary.tsv").exists());
         assert!(output_dir.join("postgres/team_users.tsv").exists());
+        assert!(
+            output_dir
+                .join("postgres/team_identity_mappings.tsv")
+                .exists()
+        );
         assert!(output_dir.join("postgres/load.sql").exists());
         let schema = fs::read_to_string(output_dir.join("postgres-schema.sql"))
             .expect("schema should be readable");
@@ -23095,6 +27915,7 @@ can_deny = ["*"]
         assert!(schema.contains("create table if not exists agentk_blocked_rules"));
         assert!(schema.contains("create table if not exists agentk_syscall_summary"));
         assert!(schema.contains("create table if not exists agentk_evidence_summary"));
+        assert!(schema.contains("create table if not exists agentk_team_identity_mappings"));
         let load_sql =
             fs::read_to_string(output_dir.join("postgres/load.sql")).expect("load should read");
         assert!(load_sql.contains("\\ir ../postgres-schema.sql"));
@@ -23102,6 +27923,7 @@ can_deny = ["*"]
         assert!(load_sql.contains("\\copy agentk_blocked_rules"));
         assert!(load_sql.contains("\\copy agentk_syscall_summary"));
         assert!(load_sql.contains("\\copy agentk_evidence_summary"));
+        assert!(load_sql.contains("\\copy agentk_team_identity_mappings"));
         let audit_events = fs::read_to_string(output_dir.join("postgres/audit_events.tsv"))
             .expect("audit event rows should read");
         assert!(audit_events.contains("slack.send_message"));
@@ -23122,6 +27944,14 @@ can_deny = ["*"]
         let team_users = fs::read_to_string(output_dir.join("postgres/team_users.tsv"))
             .expect("team user rows should read");
         assert!(team_users.contains("tom"));
+        let identity_rows =
+            fs::read_to_string(output_dir.join("postgres/team_identity_mappings.tsv"))
+                .expect("identity rows should read");
+        assert!(identity_rows.contains("oidc-prod\tagentk-owners\ttom"));
+        let identity = fs::read_to_string(output_dir.join("identity.json"))
+            .expect("identity summary should read");
+        assert!(identity.contains("\"mappings\": 1"));
+        assert!(!identity.contains("idp.example.com"));
         let approvals = fs::read_to_string(output_dir.join("approvals.json"))
             .expect("approvals should be readable");
         assert!(approvals.contains("\"denied\": 1"));
@@ -23146,6 +27976,7 @@ can_deny = ["*"]
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(decisions_path);
         let _ = fs::remove_file(permissions_path);
+        let _ = fs::remove_file(identity_path);
         fs::remove_dir_all(output_dir).ok();
     }
 
@@ -23154,6 +27985,7 @@ can_deny = ["*"]
         let trace_path = temp_path("agentk-durable-store-trace", "jsonl");
         let decisions_path = temp_path("agentk-durable-store-decisions", "jsonl");
         let permissions_path = temp_path("agentk-durable-store-permissions", "toml");
+        let identity_path = temp_path("agentk-durable-store-identity", "toml");
         let store_dir = temp_path("agentk-durable-team-store", "dir");
         fs::write(
             &permissions_path,
@@ -23170,6 +28002,23 @@ can_deny = ["*"]
 "#,
         )
         .expect("permissions should write");
+        fs::write(
+            &identity_path,
+            r#"version = 1
+
+[[providers]]
+id = "oidc-prod"
+issuer = "https://idp.example.com/oauth2/default"
+audience = "api://agentk-team-sidecar"
+subject_claim = "sub"
+
+[[mappings]]
+provider = "oidc-prod"
+external_group = "agentk-owners"
+reviewer = "tom"
+"#,
+        )
+        .expect("identity should write");
         let mut kernel = AgentKernel::new("agent://test");
         kernel.syscall(Syscall {
             kind: SyscallKind::ToolInvoke,
@@ -23199,21 +28048,24 @@ can_deny = ["*"]
             &trace_path,
             &decisions_path,
             Some(&permissions_path),
+            Some(&identity_path),
             &store_dir,
         )
         .expect("durable store should sync");
 
         assert_eq!(report.root, store_dir);
-        assert_eq!(report.files.len(), 14);
+        assert_eq!(report.files.len(), 16);
         assert_eq!(report.open, 0);
         assert_eq!(report.approved, 1);
         assert_eq!(report.reviewers, 1);
+        assert_eq!(report.identity_mappings, 1);
         assert_eq!(report.notifications, 1);
         assert!(report.signatures_ok);
         assert!(store_dir.join("current/audit.json").exists());
         assert!(store_dir.join("current/approvals.json").exists());
         assert!(store_dir.join("current/notifications.json").exists());
         assert!(store_dir.join("current/permissions.json").exists());
+        assert!(store_dir.join("current/identity.json").exists());
         assert!(store_dir.join("tables/traces.jsonl").exists());
         assert!(store_dir.join("tables/audit_events.jsonl").exists());
         assert!(store_dir.join("tables/approval_decisions.jsonl").exists());
@@ -23222,6 +28074,11 @@ can_deny = ["*"]
         assert!(store_dir.join("tables/evidence_summary.jsonl").exists());
         assert!(store_dir.join("tables/notifications.jsonl").exists());
         assert!(store_dir.join("tables/team_reviewers.jsonl").exists());
+        assert!(
+            store_dir
+                .join("tables/team_identity_mappings.jsonl")
+                .exists()
+        );
         let schema =
             fs::read_to_string(store_dir.join("store-schema.json")).expect("schema should read");
         assert!(schema.contains("\"raw_payloads\": false"));
@@ -23229,6 +28086,7 @@ can_deny = ["*"]
         assert!(schema.contains("tables/syscall_summary.jsonl"));
         assert!(schema.contains("tables/evidence_summary.jsonl"));
         assert!(schema.contains("tables/notifications.jsonl"));
+        assert!(schema.contains("tables/team_identity_mappings.jsonl"));
         let audit_events = fs::read_to_string(store_dir.join("tables/audit_events.jsonl"))
             .expect("audit events should read");
         assert!(audit_events.contains("slack.send_message"));
@@ -23261,6 +28119,16 @@ can_deny = ["*"]
         let reviewers = fs::read_to_string(store_dir.join("tables/team_reviewers.jsonl"))
             .expect("reviewer rows should read");
         assert!(reviewers.contains("\"user_id\":\"tom\""));
+        let identity_rows =
+            fs::read_to_string(store_dir.join("tables/team_identity_mappings.jsonl"))
+                .expect("identity mapping rows should read");
+        assert!(identity_rows.contains("\"provider\":\"oidc-prod\""));
+        assert!(identity_rows.contains("\"external_group\":\"agentk-owners\""));
+        assert!(identity_rows.contains("\"reviewer\":\"tom\""));
+        let identity = fs::read_to_string(store_dir.join("current/identity.json"))
+            .expect("identity summary should read");
+        assert!(identity.contains("\"mappings\": 1"));
+        assert!(!identity.contains("idp.example.com"));
         let check = check_audit_store(&store_dir).expect("durable store check should run");
         assert!(check.passed);
         assert!(check.checks.iter().any(|check| {
@@ -23281,6 +28149,7 @@ can_deny = ["*"]
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(decisions_path);
         let _ = fs::remove_file(permissions_path);
+        let _ = fs::remove_file(identity_path);
         fs::remove_dir_all(store_dir).ok();
     }
 
@@ -23289,18 +28158,21 @@ can_deny = ["*"]
         let trace_path = temp_path("agentk-durable-store-pending-trace", "jsonl");
         let decisions_path = temp_path("agentk-durable-store-pending-decisions", "jsonl");
         let store_dir = temp_path("agentk-durable-pending-outbox", "dir");
+        let slack_dir = temp_path("agentk-durable-pending-slack", "dir");
+        let github_dir = temp_path("agentk-durable-pending-github", "dir");
+        let email_dir = temp_path("agentk-durable-pending-email", "dir");
         let raw_input = "RAW_PENDING_NOTIFICATION_INPUT_SHOULD_NOT_APPEAR";
         let mut kernel = AgentKernel::new("agent://support-agent");
         kernel.syscall(Syscall {
             kind: SyscallKind::ToolInvoke,
-            target: "github.merge_pull_request".to_string(),
+            target: "github.merge_pull_request<&>".to_string(),
             intent: "merge after support review".to_string(),
             labels: labels(&[Label::Trusted]),
             inputs: vec![raw_input.to_string()],
         });
         kernel.write_jsonl(&trace_path).expect("log should write");
 
-        let report = sync_durable_audit_store(&trace_path, &decisions_path, None, &store_dir)
+        let report = sync_durable_audit_store(&trace_path, &decisions_path, None, None, &store_dir)
             .expect("durable store should sync");
 
         assert_eq!(report.open, 1);
@@ -23316,10 +28188,138 @@ can_deny = ["*"]
         assert!(notifications.contains("\"agent_id\":\"agent://support-agent\""));
         assert!(notifications.contains("github.merge_pull_request"));
         assert!(!notifications.contains(raw_input));
+        let slack_report =
+            export_slack_notification_payloads(&store_dir, &slack_dir, Some("#agentk-approvals"))
+                .expect("Slack payload export should write");
+        assert_eq!(slack_report.root, store_dir);
+        assert_eq!(slack_report.out, slack_dir);
+        assert_eq!(slack_report.channel, Some("#agentk-approvals".to_string()));
+        assert_eq!(slack_report.files.len(), 3);
+        assert_eq!(slack_report.notifications, 1);
+        assert_eq!(slack_report.pending, 1);
+        assert_eq!(slack_report.decided, 0);
+        assert_eq!(slack_report.payloads, 1);
+        assert!(slack_dir.join("manifest.json").exists());
+        assert!(slack_dir.join("payloads.jsonl").exists());
+        assert!(slack_dir.join("README.md").exists());
+        let slack_manifest =
+            fs::read_to_string(slack_dir.join("manifest.json")).expect("manifest should read");
+        assert!(slack_manifest.contains("agentk.slack_notification_payloads"));
+        assert!(slack_manifest.contains("\"raw_payloads\": false"));
+        let slack_payloads =
+            fs::read_to_string(slack_dir.join("payloads.jsonl")).expect("payloads should read");
+        assert!(slack_payloads.contains("\"channel\":\"#agentk-approvals\""));
+        assert!(slack_payloads.contains("AgentK approval requested"));
+        assert!(slack_payloads.contains("github.merge_pull_request&lt;&amp;&gt;"));
+        assert!(slack_payloads.contains("tool-invoke-capability-missing"));
+        assert!(!slack_payloads.contains(raw_input));
+        let github_report = export_github_notification_payloads(
+            &store_dir,
+            &github_dir,
+            Some("owner/repo"),
+            &["agentk".to_string(), "approval".to_string()],
+        )
+        .expect("GitHub payload export should write");
+        assert_eq!(github_report.root, store_dir);
+        assert_eq!(github_report.out, github_dir);
+        assert_eq!(github_report.repository, Some("owner/repo".to_string()));
+        assert_eq!(
+            github_report.labels,
+            vec!["agentk".to_string(), "approval".to_string()]
+        );
+        assert_eq!(github_report.files.len(), 3);
+        assert_eq!(github_report.notifications, 1);
+        assert_eq!(github_report.pending, 1);
+        assert_eq!(github_report.decided, 0);
+        assert_eq!(github_report.payloads, 1);
+        assert!(github_dir.join("manifest.json").exists());
+        assert!(github_dir.join("payloads.jsonl").exists());
+        assert!(github_dir.join("README.md").exists());
+        let github_manifest =
+            fs::read_to_string(github_dir.join("manifest.json")).expect("manifest should read");
+        assert!(github_manifest.contains("agentk.github_notification_payloads"));
+        assert!(github_manifest.contains("\"raw_payloads\": false"));
+        assert!(github_manifest.contains("\"repository\": \"owner/repo\""));
+        let github_payloads =
+            fs::read_to_string(github_dir.join("payloads.jsonl")).expect("payloads should read");
+        assert!(github_payloads.contains("\"repository\":\"owner/repo\""));
+        assert!(github_payloads.contains("\"operation\":\"upsert_issue\""));
+        assert!(github_payloads.contains("AgentK approval requested"));
+        assert!(github_payloads.contains("github.merge_pull_request&lt;&amp;&gt;"));
+        assert!(github_payloads.contains("tool-invoke-capability-missing"));
+        assert!(github_payloads.contains("no raw tool payloads or secret values"));
+        assert!(!github_payloads.contains(raw_input));
+        let bad_repository = export_github_notification_payloads(
+            &store_dir,
+            &github_dir,
+            Some("not owner/repo"),
+            &[],
+        )
+        .expect_err("GitHub repository should be owner/name")
+        .to_string();
+        assert!(bad_repository.contains("owner/name"));
+        let inside_error =
+            export_slack_notification_payloads(&store_dir, store_dir.join("slack"), None)
+                .expect_err("Slack export should stay outside durable store")
+                .to_string();
+        assert!(inside_error.contains("outside the durable store"));
+        let github_inside_error =
+            export_github_notification_payloads(&store_dir, store_dir.join("github"), None, &[])
+                .expect_err("GitHub export should stay outside durable store")
+                .to_string();
+        assert!(github_inside_error.contains("outside the durable store"));
+        let email_report = export_email_notification_payloads(
+            &store_dir,
+            &email_dir,
+            &["agentk-alerts@example.com".to_string()],
+        )
+        .expect("Email payload export should write");
+        assert_eq!(email_report.root, store_dir);
+        assert_eq!(email_report.out, email_dir);
+        assert_eq!(
+            email_report.to,
+            vec!["agentk-alerts@example.com".to_string()]
+        );
+        assert_eq!(email_report.files.len(), 3);
+        assert_eq!(email_report.notifications, 1);
+        assert_eq!(email_report.pending, 1);
+        assert_eq!(email_report.decided, 0);
+        assert_eq!(email_report.payloads, 1);
+        assert!(email_dir.join("manifest.json").exists());
+        assert!(email_dir.join("payloads.jsonl").exists());
+        assert!(email_dir.join("README.md").exists());
+        let email_manifest =
+            fs::read_to_string(email_dir.join("manifest.json")).expect("manifest should read");
+        assert!(email_manifest.contains("agentk.email_notification_payloads"));
+        assert!(email_manifest.contains("\"raw_payloads\": false"));
+        assert!(email_manifest.contains("agentk-alerts@example.com"));
+        let email_payloads =
+            fs::read_to_string(email_dir.join("payloads.jsonl")).expect("payloads should read");
+        assert!(email_payloads.contains("AgentK approval requested"));
+        assert!(email_payloads.contains("To: agentk-alerts@example.com"));
+        assert!(email_payloads.contains("github.merge_pull_request"));
+        assert!(email_payloads.contains("tool-invoke-capability-missing"));
+        assert!(email_payloads.contains("no raw tool payloads or secret values"));
+        assert!(!email_payloads.contains(raw_input));
+        let missing_recipient = export_email_notification_payloads(&store_dir, &email_dir, &[])
+            .expect_err("Email export should require at least one recipient")
+            .to_string();
+        assert!(missing_recipient.contains("requires at least one --to"));
+        let email_inside_error = export_email_notification_payloads(
+            &store_dir,
+            store_dir.join("email"),
+            &["agentk-alerts@example.com".to_string()],
+        )
+        .expect_err("Email export should stay outside durable store")
+        .to_string();
+        assert!(email_inside_error.contains("outside the durable store"));
 
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(decisions_path);
         fs::remove_dir_all(store_dir).ok();
+        fs::remove_dir_all(slack_dir).ok();
+        fs::remove_dir_all(github_dir).ok();
+        fs::remove_dir_all(email_dir).ok();
     }
 
     #[test]
@@ -23675,6 +28675,7 @@ can_deny = ["*"]
 
         assert!(report.invalid_provider_rejected);
         assert!(report.invalid_env_reference_rejected);
+        assert!(report.invalid_provider_shape_rejected);
         assert!(!report.raw_provider_logged);
         assert!(!report.raw_reference_logged);
     }
@@ -24442,6 +29443,20 @@ can_deny = ["*"]
             ],
         );
         assert!(!failed.passed);
+    }
+
+    #[test]
+    fn release_audit_commands_include_packaged_rc_smoke() {
+        let smoke = RELEASE_AUDIT_COMMANDS
+            .iter()
+            .find(|command| command.name == "release candidate smoke")
+            .expect("release audit should run the packaged RC smoke");
+
+        assert_eq!(smoke.program, "cargo");
+        assert_eq!(
+            smoke.args,
+            &["run", "--locked", "--", "release-candidate-smoke", "--json"]
+        );
     }
 
     #[test]

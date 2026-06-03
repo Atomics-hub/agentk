@@ -40,20 +40,57 @@ Implemented today:
 - local release audit and signed v0.1 release evidence;
 - `sidecar-init`, which generates a starter team sidecar bundle with policy,
   secret-reference, MCP client, and safe-agent demo files;
+- secret-reference manifests that validate local env refs plus production-shaped
+  AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, Vault, and
+  1Password refs without fetching secret bytes or printing raw refs;
 - `sidecar-check`, which validates a generated sidecar bundle without spawning
   downstream tools or touching credentials, including Claude Desktop and
   Codex/Cursor client snippet shape.
 - `safe-agent-demo`, which runs a no-credential mock GitHub/Postgres/Slack/
   filesystem workflow where risky writes and exfiltration are blocked while
-  safe reads and drafts still work.
+  safe reads and drafts still work;
+- `sidecar-package`, which writes a deployable sidecar folder plus optional
+  single-file tar handoff and checksum with stable launchers,
+  Claude/Codex/Cursor snippets, service/container templates, dummy deploy env
+  examples, `manifest.json`, and a hash/mode `package.lock.json`;
+- `sidecar-package-archive-check`, which verifies the tar handoff against the
+  generated checksum before a team unpacks or deploys it;
+- `sidecar-package-install`, which verifies the tar handoff, safely unpacks it,
+  runs the package self-check, and writes an install receipt before placing an
+  installed sidecar directory;
+- `sidecar-package-release-manifest`, which writes a machine-readable release
+  handoff binding the installed package, package lock, archive checksum, and
+  install receipt without changing the locked package directory;
+- `dashboard` and `dashboard-serve`, which provide static and local served
+  approval/audit review surfaces with permission-checked approve/deny APIs;
+- `team-permissions.toml`, scoped reviewer roles, reviewer tokens, and durable
+  local audit-store sync/export/check/push with identity mapping metadata that
+  omits issuer, audience, and claim values plus Slack/GitHub/email payload paths
+  for team workflows;
+- `store-slack`, `store-slack-send`, `store-github`, and
+  `store-github-send`, `store-email`, and `store-email-send`, which export
+  Slack-ready, GitHub issue-ready, and sendmail-ready JSON payloads from the
+  durable notification outbox and can deliver those payloads with
+  webhook/token/relay values read only from environment without storing delivery
+  secrets;
+- a release-candidate smoke gate that recreates the package/archive, runs the
+  packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
+  Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
+- `release-homebrew-formula`, which writes a reviewed local Homebrew formula
+  from a source release URL plus SHA-256 without publishing a tap.
 
 Still missing for a team product:
 
-- package/install path beyond building from source;
-- production-grade MCP transport/deployment story;
-- local approval broker and dashboard beyond the current CLI review surface;
-- durable multi-user policy, identity, and audit storage;
-- polished install/package flow for the sidecar and demo beyond `cargo run`.
+- final signed release run on a protected public branch;
+- production secret/key storage integrations beyond local env/file adapters and
+  provider-specific reference-shape checks;
+- live external identity verification, hosted/ticket notification
+  delivery, and hosted control-plane integrations;
+- published binary distribution channels such as a maintained Homebrew tap or
+  package-manager formulas;
+- long-running production operations hardening beyond the current local
+  sidecar, service templates, env examples, and release-gated HTTP/TCP
+  transports.
 
 ## Milestones
 
@@ -105,7 +142,7 @@ Exit criteria:
 - policy bundles scoped by team/project/server/tool;
 - durable Postgres-backed audit and approval store;
 - secret references remain references, not raw secret values;
-- Slack/GitHub identity integration can notify and review without granting
+- Slack/GitHub/email notification integrations can notify and review without granting
   broad tool execution authority.
 
 ### P4: Production MCP Gateway
@@ -142,6 +179,9 @@ The safest first productization slice is the local team sidecar path:
    trace. The demo report embeds the redacted trace-inspect summary so one JSON
    run shows the scorecard, audit inbox, syscall summary, evidence-ref summary,
    and blocked rules without requiring source-code inspection.
+   `release-audit` also runs the packaged release-candidate smoke so the
+   generated sidecar, launchers, dashboard, durable store, Postgres export, and
+   dry-run push path are release-gated together.
 5. `sidecar-run --root agentk-sidecar` reads the reviewed TOML bundle, resolves
    the configured downstream MCP command, copies only explicit allowed env vars,
    proxies stdio through AgentK, and writes the configured audit log. The
@@ -153,9 +193,12 @@ The safest first productization slice is the local team sidecar path:
    final hashes, so a changed trace makes old decisions stale instead of
    silently carrying them forward.
 7. `team-permissions.toml` gives the starter bundle local users, reviewer roles,
-   and approval scopes. `agentk permissions` reports configured reviewers, and
-   `approve`/`deny --permissions ...` enforce reviewer authority before appending
-   a decision.
+   and approval scopes. `team-identity.toml` maps external IdP groups onto
+   those local reviewers without storing or printing live identity claims.
+   `agentk permissions` reports configured reviewers, `agentk identity-check`
+   verifies mapped-reviewer coverage against permissions, and
+   `approve`/`deny --permissions ...` enforce reviewer authority before
+   appending a decision.
 8. `dashboard` writes a static local HTML approval dashboard from the signed
    trace, append-only decisions, and optional permissions manifest. The static
    and served dashboards surface the redacted inspect evidence summary directly:
@@ -168,22 +211,50 @@ The safest first productization slice is the local team sidecar path:
    client snippets, and a relative-path
    `manifest.json` that records the AgentK version, schema version, launchers,
    local transports, store workflow, and deploy artifacts for support and
-   inventory checks. A package-local `agentk-package-check` launcher validates
-   the manifest, package artifacts, launcher modes, launcher preflights,
-   deploy-template hardening, the configured `AGENTK_BIN`, and embedded sidecar
-   bundle after copy/deploy/image-build steps. Packaged runtime launchers run
-   that check before launching, serving, writing demo traces, rendering
-   dashboards, or updating store artifacts.
+   inventory checks. It also writes `package.lock.json` with relative paths,
+   byte counts, SHA-256 hashes, and executable-bit expectations for every
+   packaged install file while excluding runtime state under `sidecar/.agentk`.
+   A package-local `agentk-package-check` launcher validates the manifest,
+   package lock, package artifacts, launcher modes, launcher preflights,
+   deploy-template hardening, dummy deploy env examples, the configured
+   `AGENTK_BIN`, and embedded sidecar bundle after copy/deploy/image-build
+   steps. Packaged runtime launchers run that check before launching, serving,
+   checking identity mappings, writing demo traces, rendering dashboards, or
+   updating store artifacts.
+   `--archive-out` writes a
+   deterministic uncompressed tar only after that package self-check passes,
+   writes a neighboring `.sha256` file, and reports the archive SHA-256 plus
+   checksum path for release notes or inventory systems. The receiver-side
+   `sidecar-package-archive-check` command verifies that handoff before
+   unpacking, and `sidecar-package-install` verifies, safely unpacks, and
+   package-checks the installed directory in one step while writing
+   `sidecar/.agentk/install-receipt.json` with the archive filename, checksum
+   filename, SHA-256, AgentK version, and installed file count.
+   `sidecar-package-release-manifest` writes a separate JSON handoff manifest
+   outside the package, binding the package manifest, `package.lock.json`, tar
+   checksum, and install receipt hashes for release notes or deployment tickets.
    The package includes systemd, launchd, and Docker Compose templates for both
    the MCP HTTP gateway and the dashboard. Package checks now validate baseline
    deploy-template hardening markers, including no-new-privileges systemd
    services, a non-root package Dockerfile, and loopback-published,
-   capability-dropped, read-only Compose services.
-10. `store-export` writes normalized audit, approval, and permission JSON plus a
-    Postgres schema contract, psql-loadable TSV rows, and `postgres/load.sql`
-    for teams that want a shared audit store. `store-check` validates both
-    those export artifacts and the live durable team store produced by
-    `store-sync`, and `store-push` preflights the export shape then invokes
+   capability-dropped, read-only Compose services, plus env examples for the
+   HTTP gateway, dashboard, Postgres push, local Slack delivery, and
+   Slack/GitHub/email payload exporters that must keep dummy `CHANGE_ME`
+   credentials.
+10. `store-export` writes normalized audit, approval, permission, and identity
+    mapping JSON that omits issuer, audience, and claim values plus a Postgres
+    schema contract, psql-loadable TSV rows, and `postgres/load.sql` for teams
+    that want a shared audit store.
+    `store-check` validates both those export artifacts and the live durable
+    team store produced by `store-sync`, including identity mapping row counts
+    when `--identity` is configured. `store-slack` exports Slack-ready local
+    payloads from the durable notification outbox, `store-slack-send` delivers
+    those payloads through `curl` using a webhook URL read only from
+    environment, `store-github` exports GitHub issue-ready local payloads from
+    the same outbox, `store-github-send` delivers them through `gh` using a
+    token read only from environment, `store-email` exports sendmail-ready local
+    payloads from the same outbox, `store-email-send` delivers them through a
+    local mail relay, and `store-push` preflights the export shape then invokes
     `psql` without printing the database URL.
 11. `dashboard-serve` serves the same approvals/audit UI plus `/api/review`
     JSON over localhost for team review without a hosted control plane. The
@@ -258,6 +329,15 @@ The safest first productization slice is the local team sidecar path:
     `tables/notifications.jsonl`, a redacted credential-free outbox for pending
     approval requests and recorded decisions. Slack, GitHub, email, or ticket
     bridges can consume those rows without AgentK storing delivery credentials.
+    `store-slack`, `store-github`, and `store-email` convert the durable outbox
+    into Slack-ready, GitHub issue-ready, and sendmail-ready local JSON payloads
+    for bridge processes while keeping delivery tokens outside AgentK.
+    `store-slack-send` can deliver Slack payloads through `curl` using an
+    env-held webhook URL that is not printed in AgentK output.
+    `store-github-send` can upsert GitHub issue payloads through `gh` using an
+    env-held token that is not printed in AgentK output. `store-email-send` can
+    deliver email payloads through a local mail relay without storing relay
+    credentials in AgentK payload artifacts.
 20. `mcp-proxy-tcp` and `sidecar-serve-tcp` expose the same mediated JSON-RPC
     line protocol over a bounded local TCP listener. The packaged sidecar now
     includes `bin/agentk-sidecar-tcp`, which loads the reviewed bundle, spawns a
@@ -340,19 +420,22 @@ The safest first productization slice is the local team sidecar path:
     syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
     checks, and fail closed with sanitized 501 responses plus redacted
     unsupported-SSE metrics until resumable SSE support exists.
-    Full hosted HTTP/SSE transport, TLS, and external identity remain future
-    production-gateway work.
+    Full hosted HTTP/SSE transport, TLS, and live external identity verification
+    remain future production-gateway work.
 
 Recommended file-level plan for the next slice:
 
 - `src/lib.rs` and `src/main.rs`: continue production gateway hardening beyond
   the local TCP/HTTP adapters toward full Streamable HTTP/SSE service
-  operation, deployment-grade auth, and long-running observability.
+  operation, deployment-grade auth, live external secret custody, and
+  long-running observability.
 - `README.md`: show the install/run/review path as `cargo install --path .`,
   then `agentk sidecar-init`, `agentk sidecar-check`, `agentk sidecar-package`,
   `agentk dashboard-serve`, `agentk store-sync`, `agentk store-export`,
-  `agentk store-check`, `agentk store-push`, and the packaged launcher/review
-  commands.
+  `agentk store-check`, `agentk store-push`, `agentk store-slack`,
+  `agentk store-slack-send`, `agentk store-github`, `agentk store-github-send`,
+  `agentk store-email`, `agentk store-email-send`, and the packaged
+  launcher/review commands.
 - `docs/mcp-proxy.md`: keep client-specific sidecar wiring guidance current
   for Claude, Codex, Cursor, and generic command/args MCP clients.
 

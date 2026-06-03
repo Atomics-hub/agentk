@@ -19,7 +19,13 @@ keep the same checks in CI and protect the default branch.
 - [ ] License files present and intentional.
 - [ ] `Cargo.lock` is present for reproducible application builds.
 - [ ] README claims match implemented behavior.
-- [ ] `docs/v0.1-target.md` distinguishes ready behavior from accepted limits.
+- [ ] `docs/productization-plan.md` distinguishes ready behavior from accepted
+      alpha limits and post-alpha work.
+- [ ] Historical v0.1 target/limit/dry-run docs are treated as archived
+      evidence, not the current release source of truth.
+- [ ] `docs/v0.2-alpha-release-notes.md`, or the release-specific successor
+      notes file, lists implemented behavior, accepted limits, and final
+      evidence without overclaiming production readiness.
 - [ ] `docs/key-lifecycle.md` covers signing-key generation, custody, rotation, retirement, revocation, and incident response.
 
 ## Code Quality
@@ -28,6 +34,11 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo test` passes.
 - [ ] `cargo clippy` reviewed.
 - [ ] `cargo run -- release-audit` passes.
+- [ ] `cargo run --locked -- release-candidate-smoke --json` passes and writes
+      package, archive, install receipt, release manifest, demo trace, dashboard,
+      durable store, notification payload, and deploy-template artifacts.
+- [ ] `agentk sidecar-package-release-manifest` output is attached to the
+      release handoff or deployment ticket.
 - [ ] Errors do not leak sensitive syscall payloads by default.
 - [ ] All policy deny paths have tests.
 - [ ] All receipt/hash verification paths have tests.
@@ -91,6 +102,7 @@ cargo run -- release-audit --strict
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features
+cargo run --locked -- release-candidate-smoke --json
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
