@@ -136,9 +136,10 @@ initializing or progressing. `--max-body-bytes` bounds the POST body read before
 JSON parsing; oversized requests return 413. `--max-header-bytes` bounds the
 request line plus headers before body reads; oversized headers return 431.
 SSE-shaped `GET` requests to the MCP endpoint require `Accept:
-text/event-stream` plus a syntactically valid `Mcp-Session-Id`, pass the same
-auth/origin/protocol checks, and then fail closed with sanitized 501 responses
-plus a redacted unsupported-SSE counter until resumable SSE support lands.
+text/event-stream` plus an existing, syntactically valid `Mcp-Session-Id`, pass
+the same auth/origin/protocol checks, and then fail closed with sanitized 501
+responses plus a redacted unsupported-SSE counter until resumable SSE support
+lands.
 Malformed request lines or header lines, including invalid UTF-8, duplicate or
 non-decimal `Content-Length` headers, LF-only line endings, control characters
 in header values, and any `Transfer-Encoding`, `Expect`, or `Upgrade` header

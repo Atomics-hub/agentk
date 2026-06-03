@@ -16185,7 +16185,7 @@ the same bearer token as MCP requests; `GET /healthz` remains open for minimal
 liveness checks.
 When the bounded HTTP gateway exits, it drains any still-active initialized
 sessions and writes their redacted trace/session reports.
-SSE-shaped `GET` requests require `Accept: text/event-stream` plus a
+SSE-shaped `GET` requests require `Accept: text/event-stream` plus an existing,
 syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol checks,
 then fail closed with sanitized 501 responses and a redacted unsupported-SSE
 counter until the gateway grows resumable SSE support.
@@ -17926,6 +17926,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("All accepted HTTP requests"));
         assert!(package_readme.contains("unknown routes, CORS preflights"));
         assert!(package_readme.contains("Accept: text/event-stream"));
+        assert!(package_readme.contains("existing,"));
         assert!(package_readme.contains("syntactically valid `Mcp-Session-Id`"));
         assert!(package_readme.contains("sanitized 501"));
         assert!(package_readme.contains("unsupported-SSE"));
