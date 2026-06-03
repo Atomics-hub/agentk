@@ -5533,8 +5533,7 @@ fn mcp_http_cors_origin(origin: Option<&str>, allow_origins: &[String]) -> Optio
 }
 
 fn mcp_http_is_builtin_local_origin(origin: &str) -> bool {
-    origin == "null"
-        || mcp_http_origin_matches_http_host(origin, "127.0.0.1")
+    mcp_http_origin_matches_http_host(origin, "127.0.0.1")
         || mcp_http_origin_matches_http_host(origin, "localhost")
         || mcp_http_origin_matches_http_host(origin, "[::1]")
 }
@@ -7045,6 +7044,72 @@ done
         );
         let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
         assert_eq!(metrics.preflight_rejections, 4);
+    }
+
+    #[test]
+    fn mcp_http_response_requires_explicit_null_origin_opt_in() {
+        let default_state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let null_preflight = dashboard_test_request_with_headers(
+            "OPTIONS",
+            "/mcp",
+            [
+                ("Origin", "null"),
+                ("Access-Control-Request-Method", "POST"),
+            ],
+            Vec::new(),
+        );
+        let rejected = mcp_http_response(&null_preflight, &default_state)
+            .expect("default null origin should be rejected");
+        assert_eq!(rejected.status, "403 Forbidden");
+        assert_eq!(
+            response_header(&rejected, "Access-Control-Allow-Origin"),
+            None
+        );
+        assert_eq!(
+            mcp_http_metrics_snapshot(&default_state)
+                .expect("metrics should snapshot")
+                .origin_rejections,
+            1
+        );
+
+        let opt_in_state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: vec!["null".to_string()],
+            auth_token: Some("secret".to_string()),
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let allowed = mcp_http_response(&null_preflight, &opt_in_state)
+            .expect("explicit null origin should be allowed");
+        assert_eq!(allowed.status, "204 No Content");
+        assert_eq!(
+            response_header(&allowed, "Access-Control-Allow-Origin"),
+            Some("null")
+        );
     }
 
     #[test]
