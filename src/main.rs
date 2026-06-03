@@ -1965,6 +1965,9 @@ fn dashboard_http_html(
                 "reviewer-scoped dashboard views require --permissions\n",
             );
         };
+        if let Err(error) = dashboard_reviewer_token_carrier_error(request) {
+            return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
+        }
         if let Err(error) =
             dashboard_verify_reviewer_token_from_request(request, permissions_path, reviewer)
         {
@@ -2442,6 +2445,9 @@ fn dashboard_http_json(
                 "reviewer-scoped dashboard reads require --permissions\n",
             );
         };
+        if let Err(error) = dashboard_reviewer_token_carrier_error(request) {
+            return dashboard_http_text("400 Bad Request", &format!("{error}\n"));
+        }
         if let Err(error) =
             dashboard_verify_reviewer_token_from_request(request, permissions_path, reviewer)
         {
@@ -2667,6 +2673,20 @@ fn dashboard_reviewer_token_from_request(
         return Ok(Some(value.to_string()));
     }
     dashboard_query_param(&request.target, "reviewer_token")
+}
+
+fn dashboard_reviewer_token_carrier_error(
+    request: &DashboardHttpRequest,
+) -> Result<(), AgentKError> {
+    let has_header = request.header("x-agentk-reviewer-token").is_some();
+    let has_query = dashboard_query_param(&request.target, "reviewer_token")?.is_some();
+    if has_header && has_query {
+        return Err(AgentKError::InvalidMcpRequest(
+            "dashboard reviewer token must use either X-AgentK-Reviewer-Token or reviewer_token query parameter"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn dashboard_verify_reviewer_token_from_request(
@@ -8651,6 +8671,32 @@ can_deny = []
             serde_json::json!(full_open)
         );
 
+        let reviewer_token_param = "reviewer_token";
+        let dual_reviewer_targets = [
+            format!("/api/review?reviewer=tom&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT"),
+            format!("/?reviewer=tom&{reviewer_token_param}=VALUE_SHOULD_NOT_REFLECT"),
+        ];
+        for target in dual_reviewer_targets {
+            let dual_reviewer_carrier = dashboard_http_response(
+                &dashboard_test_request_with_headers(
+                    "GET",
+                    target.as_str(),
+                    [("X-AgentK-Reviewer-Token", "VALUE_SHOULD_NOT_REFLECT")],
+                    Vec::new(),
+                ),
+                &trace_path,
+                &decisions_path,
+                Some(&permissions_path),
+                None,
+                None,
+            );
+            assert_eq!(dual_reviewer_carrier.status, "400 Bad Request");
+            let dual_reviewer_carrier_body = String::from_utf8(dual_reviewer_carrier.body)
+                .expect("reviewer carrier body should be utf8");
+            assert!(dual_reviewer_carrier_body.contains("dashboard reviewer token"));
+            assert!(!dual_reviewer_carrier_body.contains("VALUE_SHOULD_NOT_REFLECT"));
+        }
+
         let read_only_scoped = dashboard_http_response(
             &dashboard_test_request("GET", "/api/review?reviewer=viewer", Vec::new()),
             &trace_path,
@@ -8719,6 +8765,25 @@ can_deny = []
         assert!(owner_html_body.contains("Reviewer view:"));
         assert!(owner_html_body.contains(">tom<"));
         assert!(owner_html_body.contains(&approval_id));
+
+        let owner_html_query_token = dashboard_http_response(
+            &dashboard_test_request(
+                "GET",
+                format!("/?reviewer=tom&{reviewer_token_param}=dashboard-token").as_str(),
+                Vec::new(),
+            ),
+            &trace_path,
+            &decisions_path,
+            Some(&permissions_path),
+            None,
+            None,
+        );
+        assert_eq!(owner_html_query_token.status, "200 OK");
+        let owner_html_query_token_body = String::from_utf8(owner_html_query_token.body)
+            .expect("query-token HTML should be utf8");
+        assert!(owner_html_query_token_body.contains("Reviewer view:"));
+        assert!(owner_html_query_token_body.contains(">tom<"));
+        assert!(owner_html_query_token_body.contains(&approval_id));
 
         let slack_scoped = dashboard_http_response(
             &dashboard_test_request("GET", "/api/review?reviewer=slack-reviewer", Vec::new()),

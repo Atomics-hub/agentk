@@ -530,7 +530,9 @@ curl -sS -H "X-AgentK-Admin-Token: <admin-secret>" \
 The served dashboard has a reviewer view. Enter a reviewer id and token, then
 use **My View** to load only the approvals and decisions that reviewer is
 authorized to see. Direct scoped HTML views are also available at
-`/?reviewer=<id>` and enforce the same reviewer token checks.
+`/?reviewer=<id>` and enforce the same reviewer token checks. Token-protected
+reviewer reads must choose either `X-AgentK-Reviewer-Token` or the
+`reviewer_token` query parameter, not both.
 It also has a requester view: enter an AgentK agent id and use **Agent View**,
 or open `/?requester=<agent-id>`, to see only approvals and decisions produced
 by that signed agent identity.
