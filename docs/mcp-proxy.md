@@ -314,6 +314,10 @@ the narrower authorization proof. It validates reviewer roles,
 reviewer-scoped reads, token coverage counts, identity mapping coverage,
 authorized approval recording, and unknown reviewer rejection without
 contacting an IdP or claiming hosted SaaS.
+Run `<package>/bin/agentk-sidecar-production-preflight --json` when deployment
+review should focus on env and secret-reference readiness. It validates deploy
+env templates, `sidecar/secrets.toml`, placeholder coverage, and non-local bind
+defaults without reading live secrets or claiming hosted SaaS.
 Run `<package>/bin/agentk-sidecar-demo-handoff --json` when the first team
 review should focus on the packaged no-credential demo. It refreshes the
 GitHub/Postgres/Slack/filesystem demo evidence through the operator handoff

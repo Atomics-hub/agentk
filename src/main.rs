@@ -23,8 +23,9 @@ use agentk::{
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
     write_sidecar_package_demo_handoff, write_sidecar_package_deploy_handoff,
     write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
-    write_sidecar_package_permissions_handoff, write_sidecar_package_quickstart,
-    write_sidecar_package_release_manifest, write_sidecar_package_support_bundle,
+    write_sidecar_package_permissions_handoff, write_sidecar_package_production_preflight,
+    write_sidecar_package_quickstart, write_sidecar_package_release_manifest,
+    write_sidecar_package_support_bundle,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -847,6 +848,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write one packaged production preflight artifact for env and secret-reference review.
+    SidecarPackageProductionPreflight {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for production-preflight.json and production-preflight.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the production preflight report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1578,6 +1591,9 @@ fn run() -> Result<(), AgentKError> {
         } => sidecar_package_quickstart(root, out, release_manifest, json),
         Command::SidecarPackagePermissionsHandoff { root, out, json } => {
             sidecar_package_permissions_handoff(root, out, json)
+        }
+        Command::SidecarPackageProductionPreflight { root, out, json } => {
+            sidecar_package_production_preflight(root, out, json)
         }
         Command::SidecarPackageArchiveCheck {
             archive,
@@ -9169,6 +9185,53 @@ fn sidecar_package_permissions_handoff(
     Ok(())
 }
 
+fn sidecar_package_production_preflight(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir = out.unwrap_or_else(|| {
+        root.join("sidecar")
+            .join(".agentk")
+            .join("production-preflight")
+    });
+    let report = write_sidecar_package_production_preflight(&root, &output_dir)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar production preflight");
+        println!("root          {}", report.root.display());
+        println!("out           {}", report.output_dir.display());
+        println!("json          {}", report.json_path.display());
+        println!("markdown      {}", report.markdown_path.display());
+        println!("secrets       {}", report.secrets_path.display());
+        println!("env templates {}", report.env_templates);
+        println!("placeholders  {}", report.placeholder_assignments);
+        println!(
+            "verdict       {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package production preflight failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -9639,6 +9702,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "quickstart markdown",
     "permissions handoff json",
     "permissions handoff markdown",
+    "production preflight json",
+    "production preflight markdown",
     "trace",
     "dashboard",
     "store readme",
@@ -10169,6 +10234,9 @@ fn run_release_candidate_smoke(
     let permissions_handoff_root = installed_package.join("sidecar/.agentk/permissions-handoff");
     let permissions_handoff_json = permissions_handoff_root.join("permissions-handoff.json");
     let permissions_handoff_markdown = permissions_handoff_root.join("permissions-handoff.md");
+    let production_preflight_root = installed_package.join("sidecar/.agentk/production-preflight");
+    let production_preflight_json = production_preflight_root.join("production-preflight.json");
+    let production_preflight_markdown = production_preflight_root.join("production-preflight.md");
     let release_evidence_root = installed_package.join("sidecar/.agentk/release");
     let package_check_json = release_evidence_root.join("package-check.json");
     let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
@@ -10206,6 +10274,7 @@ fn run_release_candidate_smoke(
     let demo_handoff = demo_handoff_root.display().to_string();
     let quickstart = quickstart_root.display().to_string();
     let permissions_handoff = permissions_handoff_root.display().to_string();
+    let production_preflight = production_preflight_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -10581,6 +10650,19 @@ fn run_release_candidate_smoke(
             ),
         ],
     )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "production preflight",
+        &bin.join("agentk-sidecar-production-preflight"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            (
+                "AGENTK_PRODUCTION_PREFLIGHT_OUT",
+                production_preflight.as_str(),
+            ),
+        ],
+    )?;
 
     let mut artifacts = Vec::new();
     release_candidate_smoke_artifact(
@@ -10686,6 +10768,16 @@ fn run_release_candidate_smoke(
         &mut artifacts,
         "permissions handoff markdown",
         permissions_handoff_markdown,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "production preflight json",
+        production_preflight_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "production preflight markdown",
+        production_preflight_markdown,
     )?;
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
@@ -17016,6 +17108,43 @@ done
             out,
             Some(PathBuf::from(
                 "dist/agentk-sidecar/sidecar/.agentk/permissions-handoff"
+            ))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_production_preflight_accepts_root_and_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-production-preflight-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_production_preflight_accepts_root_and_out_inner)
+            .expect("sidecar-package-production-preflight parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-production-preflight parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_production_preflight_accepts_root_and_out_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-production-preflight",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/production-preflight",
+            "--json",
+        ])
+        .expect("sidecar-package-production-preflight should parse");
+
+        let Some(Command::SidecarPackageProductionPreflight { root, out, json }) = cli.command
+        else {
+            panic!("expected sidecar-package-production-preflight command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from(
+                "dist/agentk-sidecar/sidecar/.agentk/production-preflight"
             ))
         );
         assert!(json);
