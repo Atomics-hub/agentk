@@ -9929,6 +9929,7 @@ struct ReleaseTicketReport {
     smoke_root: PathBuf,
     smoke_evidence: PathBuf,
     finalization: PathBuf,
+    publication_check: PathBuf,
     ticket: PathBuf,
     artifacts: Vec<ReleaseTicketArtifact>,
     checks: Vec<ReleaseTicketCheckItem>,
@@ -9937,6 +9938,7 @@ struct ReleaseTicketReport {
     smoke: ReleaseCandidateSmokeReport,
     evidence_check: ReleaseEvidenceCheckReport,
     finalization_report: ReleaseFinalizeReport,
+    publication_report: ReleasePublicationCheckReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -11480,6 +11482,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let smoke_root = out.join("release-candidate-smoke");
     let smoke_evidence = out.join("release-candidate-smoke.json");
     let finalization = out.join("release-finalization.json");
+    let publication_check = out.join("release-publication-check.json");
     let ticket = out.join("release-ticket.json");
 
     let status = alpha_release_status_report(".");
@@ -11501,12 +11504,17 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         release: release.clone(),
         evidence: smoke_evidence.clone(),
         root: Some(smoke_root.clone()),
-        notes,
+        notes: notes.clone(),
         tag,
         out: finalization.clone(),
         strict,
         force: true,
     })?;
+    let publication_report = run_release_publication_check(&finalization, Some(&notes))?;
+    fs::write(
+        &publication_check,
+        format!("{}\n", serde_json::to_string_pretty(&publication_report)?),
+    )?;
     let dashboard_handoff_artifacts = ["dashboard handoff json", "dashboard handoff markdown"];
     let dashboard_handoff_missing = dashboard_handoff_artifacts
         .iter()
@@ -11594,6 +11602,29 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
             },
         ),
         release_ticket_check_item(
+            "publication preflight",
+            if publication_report.passed {
+                ReadinessStatus::Pass
+            } else {
+                release_finalize_review_status(strict)
+            },
+            if publication_report.passed {
+                "release-publication-check passed against the ticket finalization and notes"
+                    .to_string()
+            } else {
+                let failing = publication_report
+                    .checks
+                    .iter()
+                    .filter(|check| check.status == ReadinessStatus::Fail)
+                    .map(|check| check.name.as_str())
+                    .collect::<Vec<_>>();
+                format!(
+                    "release-publication-check pending/failing gates: {}",
+                    failing.join(", ")
+                )
+            },
+        ),
+        release_ticket_check_item(
             "publish action",
             ReadinessStatus::Pass,
             "release-ticket writes local evidence only; it does not tag, push, upload, or publish",
@@ -11633,6 +11664,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         release_ticket_artifact("release status", &release_status_path)?,
         release_ticket_artifact("smoke evidence", &smoke_evidence)?,
         release_ticket_artifact("finalization", &finalization)?,
+        release_ticket_artifact("publication preflight", &publication_check)?,
     ];
     artifacts.extend(release_ticket_smoke_inventory_artifacts(&smoke)?);
     artifacts.extend(homebrew_handoff.artifacts);
@@ -11647,6 +11679,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         smoke_root,
         smoke_evidence,
         finalization,
+        publication_check,
         ticket: ticket.clone(),
         artifacts,
         checks,
@@ -11655,6 +11688,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         smoke,
         evidence_check,
         finalization_report,
+        publication_report,
     };
     fs::write(
         &ticket,
