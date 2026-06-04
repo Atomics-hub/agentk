@@ -13233,6 +13233,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ),
                 (
                     "src/main.rs",
+                    "quickstart evidence proves first-run package health",
+                ),
+                (
+                    "src/main.rs",
                     "support evidence proves operator handoff refresh",
                 ),
                 ("src/main.rs", "objective: safe-agent demo"),

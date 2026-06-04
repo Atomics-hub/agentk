@@ -11474,6 +11474,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .copied()
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
+    let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
     let accepted_limit_checks = release_ticket_accepted_limit_checks(&status);
@@ -11569,6 +11570,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
                     .to_string()
             },
         ),
+        quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
     ];
@@ -11601,6 +11603,120 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_quickstart_handoff_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = ["quickstart json", "quickstart markdown"]
+        .iter()
+        .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "quickstart handoff",
+            ReadinessStatus::Fail,
+            format!(
+                "missing quickstart artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_quickstart_handoff_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "quickstart handoff",
+            ReadinessStatus::Pass,
+            "quickstart evidence proves first-run package health, HTTP/team handoff, demo, deploy, support, permissions, preflight, client, dashboard, artifact inventory, and local non-hosted scope",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("quickstart handoff", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_quickstart_handoff_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let quickstart = release_ticket_json_artifact(smoke, "quickstart json")?;
+
+    release_ticket_require_bool(&quickstart, "passed", true, "quickstart json")?;
+    release_ticket_require_bool(
+        &quickstart,
+        "local_team_sidecar_alpha",
+        true,
+        "quickstart json",
+    )?;
+    release_ticket_require_bool(&quickstart, "hosted_saas", false, "quickstart json")?;
+    release_ticket_require_empty_array(&quickstart, "remediation_steps", "quickstart json")?;
+    release_ticket_require_checks(
+        &quickstart,
+        "quickstart json",
+        &[
+            ("package preflight", "package readiness checks"),
+            ("HTTP gateway handoff", "HTTP/SSE readiness checks"),
+            (
+                "team dashboard/store handoff",
+                "dashboard/store readiness checks",
+            ),
+            ("safe-agent demo handoff", "demo artifacts"),
+            ("deploy handoff", "deploy artifacts"),
+            ("support bundle", "support artifacts"),
+            ("permissions handoff", "permission artifacts"),
+            ("production preflight", "production-preflight artifacts"),
+            ("client handoff", "client artifacts"),
+            ("dashboard handoff", "dashboard handoff artifacts"),
+            (
+                "quickstart artifact inventory",
+                "quickstart artifacts inspected",
+            ),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+    release_ticket_require_artifacts(
+        &quickstart,
+        "quickstart json",
+        &[
+            "demo handoff json",
+            "demo handoff markdown",
+            "deploy handoff json",
+            "deploy handoff markdown",
+            "support bundle json",
+            "support bundle markdown",
+            "permissions handoff json",
+            "permissions handoff markdown",
+            "production preflight json",
+            "production preflight markdown",
+            "client handoff json",
+            "client handoff markdown",
+            "dashboard handoff json",
+            "dashboard handoff markdown",
+            "operator handoff json",
+            "sidecar doctor json",
+            "safe-agent trace",
+            "dashboard html",
+            "durable approvals",
+            "slack payloads",
+            "github payloads",
+            "email payloads",
+        ],
+    )?;
+    for path in [
+        &["package_check", "passed"][..],
+        &["http_handoff_check", "passed"],
+        &["team_handoff_check", "passed"],
+        &["demo_handoff", "passed"],
+        &["deploy_handoff", "passed"],
+        &["support_bundle", "passed"],
+        &["permissions_handoff", "passed"],
+        &["production_preflight", "passed"],
+        &["client_handoff", "passed"],
+        &["dashboard_handoff", "passed"],
+    ] {
+        release_ticket_require_nested_bool(&quickstart, path, true, "quickstart json")?;
+    }
+    Ok(())
 }
 
 fn release_ticket_support_doctor_handoff_check(
