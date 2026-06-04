@@ -13233,6 +13233,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ),
                 (
                     "src/main.rs",
+                    "install/package evidence proves archive checksum",
+                ),
+                (
+                    "src/main.rs",
                     "quickstart evidence proves first-run package health",
                 ),
                 (

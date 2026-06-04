@@ -11474,6 +11474,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .copied()
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
+    let install_package_check = release_ticket_install_package_provenance_check(&smoke);
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
@@ -11570,6 +11571,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
                     .to_string()
             },
         ),
+        install_package_check,
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
@@ -11603,6 +11605,184 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_install_package_provenance_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = [
+        "manifest",
+        "package lock",
+        "package archive",
+        "package archive checksum",
+        "release manifest",
+        "install receipt",
+        "package check json",
+    ]
+    .iter()
+    .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+    .copied()
+    .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "install/package provenance",
+            ReadinessStatus::Fail,
+            format!(
+                "missing install/package artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_install_package_provenance_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "install/package provenance",
+            ReadinessStatus::Pass,
+            "install/package evidence proves archive checksum, release manifest binding, install receipt, package lock, launchers, client snippets, deploy templates, and package self-check",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("install/package provenance", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_install_package_provenance_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let manifest = release_ticket_json_artifact(smoke, "manifest")?;
+    let package_lock = release_ticket_json_artifact(smoke, "package lock")?;
+    let release_manifest = release_ticket_json_artifact(smoke, "release manifest")?;
+    let install_receipt = release_ticket_json_artifact(smoke, "install receipt")?;
+    let package_check = release_ticket_json_artifact(smoke, "package check json")?;
+
+    release_ticket_require_string(&manifest, "package", "agentk-team-sidecar", "manifest")?;
+    release_ticket_require_array_len_at_least(&manifest, "launchers", 30, "manifest")?;
+    release_ticket_require_array_len_at_least(&manifest, "client_snippets", 5, "manifest")?;
+    release_ticket_require_array_len_at_least(&manifest, "deploy_templates", 8, "manifest")?;
+    release_ticket_require_array_len_at_least(&manifest, "deploy_env_examples", 4, "manifest")?;
+    release_ticket_require_array_len_at_least(&manifest, "storage_contracts", 1, "manifest")?;
+    release_ticket_require_nested_bool(
+        &manifest,
+        &[
+            "default_transports",
+            "2",
+            "sse_alpha",
+            "hosted_control_plane",
+        ],
+        false,
+        "manifest",
+    )?;
+
+    release_ticket_require_u64(&package_lock, "schema_version", 1, "package lock")?;
+    release_ticket_require_array_len_at_least(&package_lock, "files", 60, "package lock")?;
+
+    release_ticket_require_bool(&release_manifest, "passed", true, "release manifest")?;
+    release_ticket_require_string(
+        &release_manifest,
+        "package_name",
+        "agentk-team-sidecar",
+        "release manifest",
+    )?;
+    release_ticket_require_string(
+        &release_manifest,
+        "hash_algorithm",
+        "sha256",
+        "release manifest",
+    )?;
+    release_ticket_require_hex_sha256(&release_manifest, "archive_sha256", "release manifest")?;
+    release_ticket_require_hex_sha256(
+        &release_manifest,
+        "package_manifest_sha256",
+        "release manifest",
+    )?;
+    release_ticket_require_hex_sha256(
+        &release_manifest,
+        "package_lock_sha256",
+        "release manifest",
+    )?;
+    release_ticket_require_hex_sha256(
+        &release_manifest,
+        "install_receipt_sha256",
+        "release manifest",
+    )?;
+    if release_manifest
+        .get("installed_files")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        < 60
+    {
+        return Err("release manifest does not prove installed file coverage".to_string());
+    }
+
+    release_ticket_require_string(
+        &install_receipt,
+        "package",
+        "agentk-team-sidecar",
+        "install receipt",
+    )?;
+    release_ticket_require_string(
+        &install_receipt,
+        "hash_algorithm",
+        "sha256",
+        "install receipt",
+    )?;
+    release_ticket_require_hex_sha256(&install_receipt, "archive_sha256", "install receipt")?;
+    if install_receipt
+        .get("archive_sha256")
+        .and_then(|value| value.as_str())
+        != release_manifest
+            .get("archive_sha256")
+            .and_then(|value| value.as_str())
+    {
+        return Err(
+            "install receipt archive_sha256 does not match release manifest archive_sha256"
+                .to_string(),
+        );
+    }
+    if install_receipt
+        .get("installed_files")
+        .and_then(|value| value.as_u64())
+        != release_manifest
+            .get("installed_files")
+            .and_then(|value| value.as_u64())
+    {
+        return Err(
+            "install receipt installed_files does not match release manifest installed_files"
+                .to_string(),
+        );
+    }
+    let checksum = release_ticket_text_artifact(smoke, "package archive checksum")?;
+    let archive_sha256 = release_manifest
+        .get("archive_sha256")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "release manifest is missing archive_sha256".to_string())?;
+    if !checksum.contains(archive_sha256) {
+        return Err(
+            "package archive checksum file does not contain release manifest archive_sha256"
+                .to_string(),
+        );
+    }
+
+    release_ticket_require_bool(&package_check, "passed", true, "package check json")?;
+    release_ticket_require_checks(
+        &package_check,
+        "package check json",
+        &[
+            ("manifest.json", "present"),
+            ("package.lock.json", "present"),
+            ("bin/agentk-sidecar-quickstart", "present"),
+            ("clients/onboarding.md", "present"),
+            ("package manifest identity", "AgentK"),
+            ("package manifest inventory", "expected launchers"),
+            ("package manifest transports", "stdio, TCP JSONL"),
+            ("package manifest team handoff", "local alpha contract"),
+            ("package launcher modes", "executable launchers"),
+            ("package launcher preflights", "runtime launchers"),
+            ("package lock", "files match"),
+            ("package sidecar bundle", "sidecar checks passed"),
+        ],
+    )?;
+    Ok(())
 }
 
 fn release_ticket_quickstart_handoff_check(
@@ -12073,6 +12253,20 @@ fn release_ticket_json_artifact(
     })
 }
 
+fn release_ticket_text_artifact(
+    smoke: &ReleaseCandidateSmokeReport,
+    name: &str,
+) -> Result<String, String> {
+    let artifact = release_ticket_smoke_artifact(smoke, name)
+        .ok_or_else(|| format!("{name} artifact is missing"))?;
+    fs::read_to_string(&artifact.path).map_err(|err| {
+        format!(
+            "{name} could not be read as UTF-8 at {}: {err}",
+            artifact.path.display()
+        )
+    })
+}
+
 fn release_ticket_require_bool(
     report: &serde_json::Value,
     field: &str,
@@ -12086,6 +12280,66 @@ fn release_ticket_require_bool(
     }
 }
 
+fn release_ticket_require_string(
+    report: &serde_json::Value,
+    field: &str,
+    expected: &str,
+    label: &str,
+) -> Result<(), String> {
+    if report.get(field).and_then(|value| value.as_str()) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{label} does not prove {field} == {expected}"))
+    }
+}
+
+fn release_ticket_require_u64(
+    report: &serde_json::Value,
+    field: &str,
+    expected: u64,
+    label: &str,
+) -> Result<(), String> {
+    if report.get(field).and_then(|value| value.as_u64()) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{label} does not prove {field} == {expected}"))
+    }
+}
+
+fn release_ticket_require_array_len_at_least(
+    report: &serde_json::Value,
+    field: &str,
+    min_len: usize,
+    label: &str,
+) -> Result<(), String> {
+    match report.get(field).and_then(|value| value.as_array()) {
+        Some(values) if values.len() >= min_len => Ok(()),
+        Some(values) => Err(format!(
+            "{label} reports {} entries in {field}, expected at least {min_len}",
+            values.len()
+        )),
+        None => Err(format!("{label} is missing array {field}")),
+    }
+}
+
+fn release_ticket_require_hex_sha256(
+    report: &serde_json::Value,
+    field: &str,
+    label: &str,
+) -> Result<(), String> {
+    let value = report
+        .get(field)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("{label} is missing {field}"))?;
+    if value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} does not prove {field} is a SHA-256 hex digest"
+        ))
+    }
+}
+
 fn release_ticket_require_nested_bool(
     report: &serde_json::Value,
     path: &[&str],
@@ -12094,9 +12348,16 @@ fn release_ticket_require_nested_bool(
 ) -> Result<(), String> {
     let mut value = report;
     for field in path {
-        value = value
-            .get(*field)
-            .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?;
+        value = if let Ok(index) = field.parse::<usize>() {
+            value
+                .as_array()
+                .and_then(|values| values.get(index))
+                .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?
+        } else {
+            value
+                .get(*field)
+                .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?
+        };
     }
     if value.as_bool() == Some(expected) {
         Ok(())
