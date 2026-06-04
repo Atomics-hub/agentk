@@ -127,6 +127,7 @@ cargo run --locked -- sidecar-package-demo-handoff --root installed/agentk-sidec
 cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-permissions-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-production-preflight --root installed/agentk-sidecar --json
+cargo run --locked -- sidecar-package-client-handoff --root installed/agentk-sidecar --json
 ```
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
