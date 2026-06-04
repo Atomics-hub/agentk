@@ -143,7 +143,9 @@ stdio/TCP/HTTP launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo
 including blocked filesystem patch proof. It checks install/package provenance
 for archive checksum, release-manifest binding, install receipt, package lock,
 launchers, client snippets, deploy templates, and package self-check evidence.
-It also checks quickstart handoff evidence for first-run package health,
+It checks store/notification handoff evidence for durable approvals, Postgres
+load coverage, Slack/GitHub/email redacted payloads, and local env-held bridge
+config. It also checks quickstart handoff evidence for first-run package health,
 HTTP/team handoff, demo, deploy, support, permissions, preflight, client,
 dashboard, and artifact inventory coverage. It checks support/doctor handoff
 evidence for operator refresh, no-remediation doctor output, release-manifest
