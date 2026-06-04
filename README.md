@@ -255,10 +255,13 @@ artifact inventory coverage. It also
 checks support/doctor handoff evidence for operator refresh, no-remediation
 doctor output, release-manifest binding, and hashed support inventory. It also
 checks deploy/preflight handoff evidence for templates, placeholders,
-secret-reference manifests, and non-local bind defaults. It includes accepted alpha
-limits as explicit deferred-scope checks, so the same handoff distinguishes
-local/team sidecar readiness from hosted SaaS, live IdP, production secret
-retrieval, and public internet gateway claims.
+secret-reference manifests, and non-local bind defaults. It also checks the
+publication handoff evidence for strict finalization, signed tag evidence,
+package archive hash, final release notes, owner-scoped publication steps, and
+`release-publication-check` coverage. It includes accepted alpha limits as
+explicit deferred-scope checks, so the same handoff distinguishes local/team
+sidecar readiness from hosted SaaS, live IdP, production secret retrieval, and
+public internet gateway claims.
 
 Or run the packaged sidecar release-candidate gates individually:
 
