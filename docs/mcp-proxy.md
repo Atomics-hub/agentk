@@ -180,6 +180,10 @@ with sanitized 400 responses, and clients must choose either `Authorization` or
 `X-AgentK-MCP-Token` per request. Malformed `Mcp-Session-Id` values are
 rejected with sanitized 400 responses before session lookup. POSTs require an
 exact `application/json` media type; parameters such as `charset` are allowed.
+POST bodies must be single JSON-RPC 2.0 request or notification objects with a
+string `method`; batches, non-object JSON, response-shaped objects, and invalid
+JSON-RPC version fields are rejected before session lookup or downstream
+forwarding.
 Request bodies are accepted only on MCP endpoint `POST`; unknown routes, CORS
 preflights, DELETEs, GET/SSE placeholders, and operational probes reject bodies
 before route fallback, auth, session, or probe handling.

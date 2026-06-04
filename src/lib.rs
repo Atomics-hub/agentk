@@ -23334,9 +23334,13 @@ configured header byte cap is enforced
 while each request line and header line is read, so oversized unterminated lines
 fail closed before unbounded buffering. Duplicate MCP control headers and dual
 token-carrier headers are rejected as ambiguous, and POSTs require an exact
-`application/json` media type. Request bodies are accepted only on MCP endpoint
-`POST`, so unknown routes, CORS preflights, probes, and session-control requests
-reject bodies before route fallback or auth handling.
+`application/json` media type. MCP POST bodies must be single JSON-RPC 2.0
+request or notification objects with string `method` fields; batches,
+non-object JSON, response-shaped objects, and invalid JSON-RPC version fields
+fail before session lookup or downstream forwarding.
+Request bodies are accepted only on MCP endpoint `POST`, so unknown routes, CORS preflights,
+probes, and session-control requests reject bodies before route fallback or auth
+handling.
 Allowed browser preflights must include an allowed `Origin`, request `POST` or
 `DELETE`, and only known MCP HTTP headers. Private Network Access preflights are
 rejected until AgentK has an explicit private-network policy.
@@ -24644,7 +24648,9 @@ Claude, Codex, and Cursor onboarding:
 
 HTTP/SSE alpha contract:
 
-- `POST /mcp` accepts JSON-RPC requests with bounded body and header sizes.
+- `POST /mcp` accepts single JSON-RPC 2.0 request/notification objects with
+  bounded body and header sizes and rejects batches, non-object JSON, and
+  response-shaped payloads before session forwarding.
 - `GET /mcp` requires `Accept: text/event-stream`, a syntactically valid
   existing `Mcp-Session-Id`, the supported `MCP-Protocol-Version`, and the
   same auth/origin policy as POST.
