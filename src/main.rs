@@ -9336,6 +9336,7 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "package archive checksum",
     "release manifest",
     "install receipt",
+    "onboarding guide",
     "claude client",
     "codex cursor client",
     "http sse handoff",
