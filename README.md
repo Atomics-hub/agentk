@@ -514,6 +514,13 @@ drafts, identity summary, and permissions summary, then writes
 `sidecar/.agentk/operator-handoff/operator-handoff.json` and
 `sidecar/.agentk/operator-handoff/operator-handoff.md` without sending
 notifications or loading Postgres.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-doctor --json` after unpacking,
+copying, or updating a package. It verifies required launchers, dummy env
+templates, bounded HTTP/SSE handoff readiness, dashboard/store handoff
+readiness, install receipt provenance, operator handoff artifacts, audit
+evidence retention, and safe-agent demo integrity, then writes
+`sidecar/.agentk/doctor/sidecar-doctor.json` and
+`sidecar/.agentk/doctor/sidecar-doctor.md` with concrete remediation steps.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -755,6 +762,7 @@ agentk sidecar-package-release-manifest --package installed/agentk-sidecar --arc
 dist/agentk-sidecar/bin/agentk-sidecar-http-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json
+dist/agentk-sidecar/bin/agentk-sidecar-doctor --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json

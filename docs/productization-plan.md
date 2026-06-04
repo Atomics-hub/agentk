@@ -75,8 +75,8 @@ Implemented today:
   secrets;
 - a release-candidate smoke gate that recreates the package/archive, runs the
   packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
-  one compact operator handoff report, Slack/GitHub/email payload exporters,
-  and Postgres dry-run push flow.
+  one compact operator handoff report, one sidecar doctor support/remediation
+  report, Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 
