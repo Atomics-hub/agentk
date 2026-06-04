@@ -13223,6 +13223,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "multi-user permissions evidence proves reviewer roles",
                 ),
+                (
+                    "src/main.rs",
+                    "Claude/Codex/Cursor sidecar evidence proves packaged Claude JSON",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),

@@ -11622,21 +11622,153 @@ fn release_ticket_objective_checks(
         release_ticket_production_mcp_gateway_check(smoke),
         release_ticket_approvals_audit_dashboard_check(smoke),
         release_ticket_multi_user_permissions_check(smoke),
-        release_ticket_objective_check(
-            smoke,
-            "objective: Claude/Codex/Cursor sidecar",
-            &["client handoff", "package check"],
-            &[
-                "claude client",
-                "codex cursor client",
-                "client handoff json",
-            ],
-            "client snippets, package check, and client handoff are release-ticket evidence",
-        ),
+        release_ticket_claude_codex_cursor_sidecar_check(smoke),
         release_ticket_safe_agent_demo_check(smoke),
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_claude_codex_cursor_sidecar_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let base_check = release_ticket_objective_check(
+        smoke,
+        "objective: Claude/Codex/Cursor sidecar",
+        &["client handoff", "package check"],
+        &[
+            "claude client",
+            "codex cursor client",
+            "client handoff json",
+            "client handoff markdown",
+            "http sse handoff",
+        ],
+        "client snippets, package check, and client handoff are release-ticket evidence",
+    );
+    if base_check.status != ReadinessStatus::Pass {
+        return base_check;
+    }
+
+    match release_ticket_claude_codex_cursor_sidecar_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "objective: Claude/Codex/Cursor sidecar",
+            ReadinessStatus::Pass,
+            "Claude/Codex/Cursor sidecar evidence proves packaged Claude JSON, Codex/Cursor command, stdio/TCP/HTTP launchers, Streamable HTTP handoff, client artifact inventory, and local non-hosted scope",
+        ),
+        Err(detail) => release_ticket_check_item(
+            "objective: Claude/Codex/Cursor sidecar",
+            ReadinessStatus::Fail,
+            detail,
+        ),
+    }
+}
+
+fn release_ticket_claude_codex_cursor_sidecar_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let client_handoff = release_ticket_smoke_artifact(smoke, "client handoff json")
+        .ok_or_else(|| "client handoff json artifact is missing".to_string())?;
+    let bytes = fs::read(&client_handoff.path).map_err(|err| {
+        format!(
+            "client handoff json could not be read at {}: {err}",
+            client_handoff.path.display()
+        )
+    })?;
+    let report = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "client handoff json could not be parsed at {}: {err}",
+            client_handoff.path.display()
+        )
+    })?;
+    if report.get("passed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("client handoff json does not report passed".into());
+    }
+    if report
+        .get("local_team_sidecar_alpha")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+        || report.get("hosted_saas").and_then(|value| value.as_bool()) != Some(false)
+    {
+        return Err("client handoff json does not prove local/team non-hosted scope".into());
+    }
+    if report
+        .get("client_snippets")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        < 5
+        || report
+            .get("launchers")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            < 3
+        || report
+            .get("http_handoff_check")
+            .and_then(|value| value.get("passed"))
+            .and_then(|value| value.as_bool())
+            != Some(true)
+    {
+        return Err("client handoff json does not prove client snippets, launchers, and HTTP handoff readiness".into());
+    }
+
+    let artifact_names = report
+        .get("artifacts")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "client handoff json is missing artifacts".to_string())?;
+    for artifact_name in [
+        "clients/onboarding.md",
+        "clients/claude-desktop.mcp.json",
+        "clients/codex-cursor-command.txt",
+        "clients/http-sse-handoff.md",
+        "clients/team-audit-dashboard-handoff.md",
+        "bin/agentk-sidecar",
+        "bin/agentk-sidecar-tcp",
+        "bin/agentk-sidecar-http",
+    ] {
+        let present = artifact_names.iter().any(|artifact| {
+            artifact.get("name").and_then(|value| value.as_str()) == Some(artifact_name)
+                && artifact.get("present").and_then(|value| value.as_bool()) == Some(true)
+        });
+        if !present {
+            return Err(format!(
+                "client handoff json does not prove required artifact {artifact_name}"
+            ));
+        }
+    }
+
+    let checks = report
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "client handoff json is missing checks".to_string())?;
+    for (name, detail_fragment) in [
+        ("Claude Desktop MCP client", "bin/agentk-sidecar"),
+        ("Codex/Cursor MCP command", "review commands"),
+        (
+            "package HTTP/SSE handoff",
+            "bounded HTTP/SSE alpha contract",
+        ),
+        ("Streamable HTTP handoff", "HTTP/SSE handoff checks"),
+        ("stdio launcher", "Claude, Codex, and Cursor stdio launcher"),
+        (
+            "TCP and HTTP launchers",
+            "Streamable HTTP launchers are packaged",
+        ),
+        ("alpha scope", "hosted SaaS is false"),
+    ] {
+        let passed = checks.iter().any(|check| {
+            check.get("name").and_then(|value| value.as_str()) == Some(name)
+                && check.get("status").and_then(|value| value.as_str()) == Some("pass")
+                && check
+                    .get("detail")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|detail| detail.contains(detail_fragment))
+        });
+        if !passed {
+            return Err(format!(
+                "client handoff json does not prove {name}: {detail_fragment}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_multi_user_permissions_check(
