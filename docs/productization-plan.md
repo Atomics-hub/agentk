@@ -61,6 +61,9 @@ Implemented today:
 - `sidecar-package-release-manifest`, which writes a machine-readable release
   handoff binding the installed package, package lock, archive checksum, and
   install receipt without changing the locked package directory;
+- `sidecar-package-release-manifest-check`, which re-verifies that handoff
+  against the current package, archive checksum, package lock, and install
+  receipt before rollout or support handoff;
 - `dashboard` and `dashboard-serve`, which provide static and local served
   approval/audit review surfaces with permission-checked approve/deny APIs;
 - `team-permissions.toml`, scoped reviewer roles, reviewer tokens, and durable
@@ -76,8 +79,8 @@ Implemented today:
 - a release-candidate smoke gate that recreates the package/archive, runs the
   packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
   one compact operator handoff report, one sidecar doctor support/remediation
-  report with release-manifest binding, Slack/GitHub/email payload exporters,
-  and Postgres dry-run push flow.
+  report with release-manifest binding, release-manifest verification,
+  Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 
@@ -239,6 +242,9 @@ The safest first productization slice is the local team sidecar path:
    `sidecar-package-release-manifest` writes a separate JSON handoff manifest
    outside the package, binding the package manifest, `package.lock.json`, tar
    checksum, and install receipt hashes for release notes or deployment tickets.
+   `sidecar-package-release-manifest-check` re-verifies that handoff after copy,
+   relocation, or deployment-ticket review against the current package,
+   archive, checksum, and install receipt files.
    The package includes systemd, launchd, and Docker Compose templates for both
    the MCP HTTP gateway and the dashboard. Package checks now validate baseline
    deploy-template hardening markers, including no-new-privileges systemd

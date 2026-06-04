@@ -10468,12 +10468,14 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             &[
                 ("src/main.rs", "ReleaseCandidateSmoke"),
                 ("src/lib.rs", "sidecar-package-release-manifest"),
+                ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
             &[
                 "agentk sidecar-package --archive-out dist/agentk-sidecar.tar",
                 "agentk sidecar-package-install --archive dist/agentk-sidecar.tar",
                 "agentk sidecar-package-release-manifest --package installed/agentk-sidecar",
+                "agentk sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json",
             ],
         ),
         alpha_release_source_surface(
@@ -10669,6 +10671,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 (
                     "docs/release-checklist.md",
                     "sidecar-package-release-manifest",
+                ),
+                (
+                    "docs/release-checklist.md",
+                    "sidecar-package-release-manifest-check",
                 ),
             ],
             &["docs/release-checklist.md"],
@@ -16291,7 +16297,7 @@ pub struct SidecarPackageArchiveReport {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SidecarPackageArchiveCheckReport {
     pub archive: PathBuf,
     pub checksum: PathBuf,
@@ -16325,7 +16331,7 @@ pub struct SidecarPackageInstallReceipt {
     pub installed_at_unix_seconds: u64,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SidecarPackageReleaseManifestReport {
     pub schema_version: u32,
     pub package_name: String,
@@ -16350,6 +16356,20 @@ pub struct SidecarPackageReleaseManifestReport {
     pub receipt: SidecarPackageInstallReceipt,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageReleaseManifestCheckReport {
+    pub manifest: PathBuf,
+    pub package: Option<PathBuf>,
+    pub archive: Option<PathBuf>,
+    pub checksum: Option<PathBuf>,
+    pub install_receipt: Option<PathBuf>,
+    pub passed: bool,
+    pub archive_sha256: Option<String>,
+    pub checks: Vec<ReadinessCheck>,
+    pub package_check: Option<SidecarPackageCheckReport>,
+    pub archive_check: Option<SidecarPackageArchiveCheckReport>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct HomebrewFormulaReport {
     pub output: PathBuf,
@@ -16363,7 +16383,7 @@ pub struct HomebrewFormulaReport {
     pub files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SidecarPackageCheckReport {
     pub root: PathBuf,
     pub passed: bool,
@@ -17023,6 +17043,339 @@ pub fn write_sidecar_package_release_manifest(
     )?;
 
     Ok(report)
+}
+
+pub fn check_sidecar_package_release_manifest(
+    manifest: impl AsRef<Path>,
+    package: Option<PathBuf>,
+    archive: Option<PathBuf>,
+    checksum: Option<PathBuf>,
+    install_receipt: Option<PathBuf>,
+) -> Result<SidecarPackageReleaseManifestCheckReport, AgentKError> {
+    let manifest_path = manifest.as_ref();
+    let mut checks = Vec::new();
+    let mut manifest_report = None;
+
+    match fs::read_to_string(manifest_path) {
+        Ok(content) => {
+            match serde_json::from_str::<SidecarPackageReleaseManifestReport>(&content) {
+                Ok(report) => {
+                    checks.push(sidecar_check(
+                        "release manifest parse",
+                        ReadinessStatus::Pass,
+                        "release manifest parsed",
+                    ));
+                    manifest_report = Some(report);
+                }
+                Err(error) => checks.push(sidecar_check(
+                    "release manifest parse",
+                    ReadinessStatus::Fail,
+                    format!("release manifest did not parse: {error}"),
+                )),
+            }
+        }
+        Err(error) => checks.push(sidecar_check(
+            "release manifest file",
+            ReadinessStatus::Fail,
+            format!("release manifest could not be read: {error}"),
+        )),
+    }
+
+    if let Some(report) = &manifest_report {
+        checks.push(check_sidecar_package_release_manifest_identity(report));
+    }
+
+    let package = package.or_else(|| {
+        manifest_report
+            .as_ref()
+            .map(|report| report.package_root.clone())
+    });
+    let archive = archive.or_else(|| {
+        manifest_report
+            .as_ref()
+            .map(|report| report.archive.clone())
+    });
+    let checksum = checksum.or_else(|| {
+        manifest_report
+            .as_ref()
+            .map(|report| report.checksum.clone())
+    });
+    let install_receipt = install_receipt.or_else(|| {
+        manifest_report
+            .as_ref()
+            .map(|report| report.install_receipt.clone())
+    });
+
+    let package_check = if let Some(package) = &package {
+        match check_sidecar_package(package) {
+            Ok(report) => {
+                checks.push(sidecar_check(
+                    "release manifest package check",
+                    if report.passed {
+                        ReadinessStatus::Pass
+                    } else {
+                        ReadinessStatus::Fail
+                    },
+                    format!("{} package checks evaluated", report.checks.len()),
+                ));
+                Some(report)
+            }
+            Err(error) => {
+                checks.push(sidecar_check(
+                    "release manifest package check",
+                    ReadinessStatus::Fail,
+                    format!("package check failed: {error}"),
+                ));
+                None
+            }
+        }
+    } else {
+        checks.push(sidecar_check(
+            "release manifest package path",
+            ReadinessStatus::Fail,
+            "package path is missing; pass --package or regenerate the manifest",
+        ));
+        None
+    };
+
+    if let (Some(report), Some(package)) = (&manifest_report, &package) {
+        checks.push(check_sidecar_package_release_manifest_file_hash(
+            package.join("manifest.json"),
+            &report.package_manifest_sha256,
+            "release manifest package manifest hash",
+        ));
+        checks.push(check_sidecar_package_release_manifest_file_hash(
+            package.join(SIDECAR_PACKAGE_LOCK),
+            &report.package_lock_sha256,
+            "release manifest package lock hash",
+        ));
+    }
+
+    let archive_check = if let Some(archive) = &archive {
+        match check_sidecar_package_archive(archive, checksum.clone()) {
+            Ok(report) => {
+                checks.push(sidecar_check(
+                    "release manifest archive check",
+                    if report.passed {
+                        ReadinessStatus::Pass
+                    } else {
+                        ReadinessStatus::Fail
+                    },
+                    format!("{} archive checks evaluated", report.checks.len()),
+                ));
+                if let (Some(manifest), Some(actual_sha256)) =
+                    (&manifest_report, report.actual_sha256.as_deref())
+                {
+                    checks.push(check_sidecar_package_release_manifest_sha256(
+                        actual_sha256,
+                        &manifest.archive_sha256,
+                        "release manifest archive hash",
+                    ));
+                }
+                Some(report)
+            }
+            Err(error) => {
+                checks.push(sidecar_check(
+                    "release manifest archive check",
+                    ReadinessStatus::Fail,
+                    format!("archive check failed: {error}"),
+                ));
+                None
+            }
+        }
+    } else {
+        checks.push(sidecar_check(
+            "release manifest archive path",
+            ReadinessStatus::Fail,
+            "archive path is missing; pass --archive or regenerate the manifest",
+        ));
+        None
+    };
+
+    if let (Some(manifest), Some(receipt_path), Some(archive), Some(checksum)) =
+        (&manifest_report, &install_receipt, &archive, &checksum)
+    {
+        checks.extend(check_sidecar_package_release_manifest_receipt(
+            manifest,
+            receipt_path,
+            archive,
+            checksum,
+        ));
+    } else if manifest_report.is_some() {
+        checks.push(sidecar_check(
+            "release manifest install receipt",
+            ReadinessStatus::Fail,
+            "install receipt, archive, or checksum path is missing",
+        ));
+    }
+
+    let archive_sha256 = archive_check
+        .as_ref()
+        .and_then(|report| report.actual_sha256.clone())
+        .or_else(|| {
+            manifest_report
+                .as_ref()
+                .map(|report| report.archive_sha256.clone())
+        });
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(SidecarPackageReleaseManifestCheckReport {
+        manifest: manifest_path.to_path_buf(),
+        package,
+        archive,
+        checksum,
+        install_receipt,
+        passed,
+        archive_sha256,
+        checks,
+        package_check,
+        archive_check,
+    })
+}
+
+fn check_sidecar_package_release_manifest_identity(
+    report: &SidecarPackageReleaseManifestReport,
+) -> ReadinessCheck {
+    let ok = report.schema_version == SIDECAR_PACKAGE_RELEASE_MANIFEST_SCHEMA_VERSION
+        && report.package_name == SIDECAR_PACKAGE_NAME
+        && !report.agentk_version.trim().is_empty()
+        && report.hash_algorithm == "sha256"
+        && report.archive_sha256.len() == 64
+        && report
+            .archive_sha256
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit())
+        && report.installed_files > 0
+        && report.passed;
+    if ok {
+        sidecar_check(
+            "release manifest identity",
+            ReadinessStatus::Pass,
+            "schema, package, hash algorithm, and generated verdict are valid",
+        )
+    } else {
+        sidecar_check(
+            "release manifest identity",
+            ReadinessStatus::Fail,
+            "schema, package, hash algorithm, archive hash, installed files, or verdict is invalid",
+        )
+    }
+}
+
+fn check_sidecar_package_release_manifest_file_hash(
+    path: PathBuf,
+    expected: &str,
+    name: &'static str,
+) -> ReadinessCheck {
+    if expected.len() != 64 || !expected.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return sidecar_check(name, ReadinessStatus::Fail, "expected hash is not sha256");
+    }
+    match sidecar_package_file_sha256(&path) {
+        Ok(actual) if actual == expected => sidecar_check(
+            name,
+            ReadinessStatus::Pass,
+            format!("{} matches manifest hash", path.display()),
+        ),
+        Ok(_) => sidecar_check(
+            name,
+            ReadinessStatus::Fail,
+            format!("{} hash does not match release manifest", path.display()),
+        ),
+        Err(error) => sidecar_check(
+            name,
+            ReadinessStatus::Fail,
+            format!("{} could not be hashed: {error}", path.display()),
+        ),
+    }
+}
+
+fn check_sidecar_package_release_manifest_sha256(
+    actual: &str,
+    expected: &str,
+    name: &'static str,
+) -> ReadinessCheck {
+    if actual == expected {
+        sidecar_check(
+            name,
+            ReadinessStatus::Pass,
+            "current sha256 matches release manifest",
+        )
+    } else {
+        sidecar_check(
+            name,
+            ReadinessStatus::Fail,
+            "current sha256 does not match release manifest",
+        )
+    }
+}
+
+fn check_sidecar_package_release_manifest_receipt(
+    manifest: &SidecarPackageReleaseManifestReport,
+    receipt_path: &Path,
+    archive: &Path,
+    checksum: &Path,
+) -> Vec<ReadinessCheck> {
+    let mut checks = Vec::new();
+    let content = match fs::read_to_string(receipt_path) {
+        Ok(content) => content,
+        Err(error) => {
+            checks.push(sidecar_check(
+                "release manifest install receipt",
+                ReadinessStatus::Fail,
+                format!("install receipt could not be read: {error}"),
+            ));
+            return checks;
+        }
+    };
+    let receipt = match serde_json::from_str::<SidecarPackageInstallReceipt>(&content) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            checks.push(sidecar_check(
+                "release manifest install receipt",
+                ReadinessStatus::Fail,
+                format!("install receipt did not parse: {error}"),
+            ));
+            return checks;
+        }
+    };
+    match validate_sidecar_package_install_receipt(
+        &receipt,
+        archive,
+        checksum,
+        &manifest.archive_sha256,
+    ) {
+        Ok(()) => checks.push(sidecar_check(
+            "release manifest install receipt",
+            ReadinessStatus::Pass,
+            "install receipt matches archive, checksum, and manifest sha256",
+        )),
+        Err(error) => checks.push(sidecar_check(
+            "release manifest install receipt",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        )),
+    }
+    checks.push(check_sidecar_package_release_manifest_file_hash(
+        receipt_path.to_path_buf(),
+        &manifest.install_receipt_sha256,
+        "release manifest receipt hash",
+    ));
+    if receipt.installed_files == manifest.installed_files {
+        checks.push(sidecar_check(
+            "release manifest installed file count",
+            ReadinessStatus::Pass,
+            format!("{} installed files", receipt.installed_files),
+        ));
+    } else {
+        checks.push(sidecar_check(
+            "release manifest installed file count",
+            ReadinessStatus::Fail,
+            "install receipt file count does not match release manifest",
+        ));
+    }
+    checks
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -21848,7 +22201,11 @@ count for deployment tickets. After install, run `agentk
 sidecar-package-release-manifest --package agentk-sidecar --archive
 agentk-sidecar.tar --out agentk-sidecar-release-manifest.json` to write a
 machine-readable handoff that binds the installed package, package lock, archive
-checksum, and install receipt without changing the package directory.
+checksum, and install receipt without changing the package directory. Run
+`agentk sidecar-package-release-manifest-check --manifest
+agentk-sidecar-release-manifest.json` after copying or relocating release
+artifacts to verify the package manifest, package lock, archive checksum, and
+install receipt still match the handoff.
 
 ## Contents
 
@@ -24546,6 +24903,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("package.lock.json"));
         assert!(package_readme.contains("install-receipt.json"));
         assert!(package_readme.contains("sidecar-package-release-manifest"));
+        assert!(package_readme.contains("sidecar-package-release-manifest-check"));
         assert!(package_readme.contains("bin/agentk-package-info"));
         assert!(package_readme.contains("bin/agentk-package-check"));
         assert!(package_readme.contains("bin/agentk-store-slack"));
@@ -25631,6 +25989,66 @@ can_deny = ["*"]
             release_json["receipt"]["archive_sha256"],
             serde_json::json!(report.sha256.clone())
         );
+        let release_check = check_sidecar_package_release_manifest(
+            &release_report.output,
+            Some(install.clone()),
+            Some(report.archive.clone()),
+            Some(report.checksum.clone()),
+            Some(install_report.receipt.clone()),
+        )
+        .expect("release manifest check should run");
+        assert!(release_check.passed);
+        assert_eq!(release_check.manifest, release_report.output);
+        assert_eq!(release_check.package, Some(install.clone()));
+        assert_eq!(release_check.archive, Some(report.archive.clone()));
+        assert_eq!(release_check.checksum, Some(report.checksum.clone()));
+        assert_eq!(
+            release_check.install_receipt,
+            Some(install_report.receipt.clone())
+        );
+        assert_eq!(release_check.archive_sha256, Some(report.sha256.clone()));
+        assert!(
+            release_check
+                .package_check
+                .as_ref()
+                .is_some_and(|check| check.passed)
+        );
+        assert!(
+            release_check
+                .archive_check
+                .as_ref()
+                .is_some_and(|check| check.passed)
+        );
+        assert!(release_check.checks.iter().any(|check| {
+            check.name == "release manifest archive hash" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(release_check.checks.iter().any(|check| {
+            check.name == "release manifest receipt hash" && check.status == ReadinessStatus::Pass
+        }));
+
+        let stale_release_manifest =
+            temp_path("agentk-sidecar-package-stale-release-manifest", "json");
+        let mut stale_manifest = release_json.clone();
+        stale_manifest["package_lock_sha256"] = serde_json::json!("0".repeat(64));
+        fs::write(
+            &stale_release_manifest,
+            serde_json::to_string_pretty(&stale_manifest).expect("stale manifest should encode"),
+        )
+        .expect("stale release manifest should write");
+        let stale_release_check = check_sidecar_package_release_manifest(
+            &stale_release_manifest,
+            Some(install.clone()),
+            Some(report.archive.clone()),
+            Some(report.checksum.clone()),
+            Some(install_report.receipt.clone()),
+        )
+        .expect("stale release manifest check should run");
+        assert!(!stale_release_check.passed);
+        assert!(stale_release_check.checks.iter().any(|check| {
+            check.name == "release manifest package lock hash"
+                && check.status == ReadinessStatus::Fail
+        }));
+
         let release_exists_error = write_sidecar_package_release_manifest(
             &install,
             &report.archive,
@@ -25728,6 +26146,7 @@ can_deny = ["*"]
         fs::remove_file(report.archive).ok();
         fs::remove_file(report.checksum).ok();
         fs::remove_file(release_report.output).ok();
+        fs::remove_file(stale_release_manifest).ok();
     }
 
     #[test]
@@ -32052,12 +32471,12 @@ reviewer = "tom"
         .expect("lib fixture should be writable");
         fs::write(
             root.join("docs/release-checklist.md"),
-            "sidecar-package-install sidecar-package-release-manifest",
+            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check",
         )
         .expect("release checklist fixture should be writable");
         fs::write(
             root.join("docs/public-readiness.md"),
-            "release-candidate-smoke sidecar-package-release-manifest",
+            "release-candidate-smoke sidecar-package-release-manifest sidecar-package-release-manifest-check",
         )
         .expect("public readiness fixture should be writable");
         fs::write(root.join("docs/productization-plan.md"), "v0.2 alpha")

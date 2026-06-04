@@ -494,6 +494,9 @@ count for deployment tickets. Run
 `agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json`
 to write a machine-readable release handoff that binds the installed package,
 package lock, archive checksum, and install receipt. Run
+`agentk sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json`
+to re-verify that handoff against current package, archive, checksum, and
+install receipt files after copy, relocation, or deployment-ticket review. Run
 `dist/agentk-sidecar/bin/agentk-package-info` to print the manifest after
 copying or installing the package. Run
 `dist/agentk-sidecar/bin/agentk-package-check` to validate the manifest,
@@ -763,6 +766,7 @@ AGENTK_BIN="$(command -v agentk)" dist/agentk-sidecar/bin/agentk-package-check
 agentk sidecar-package-archive-check --archive dist/agentk-sidecar.tar
 agentk sidecar-package-install --archive dist/agentk-sidecar.tar --out installed/agentk-sidecar
 agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json
+agentk sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json
 dist/agentk-sidecar/bin/agentk-sidecar-http-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json
@@ -792,8 +796,8 @@ package, `dist/agentk-sidecar.tar`, and
 `dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
 packaged HTTP and team handoff checks, safe-agent demo, dashboard, sidecar
 check, store export/check/sync, operator handoff artifact,
-sidecar doctor release-manifest binding, Slack/GitHub/email payload exporters,
-and Postgres dry-run push launchers, then
+release-manifest check, sidecar doctor release-manifest binding,
+Slack/GitHub/email payload exporters, and Postgres dry-run push launchers, then
 verify the install receipt and other artifacts before a release branch or tag.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
