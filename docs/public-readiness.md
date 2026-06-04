@@ -37,8 +37,8 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run --locked -- release-status --json` reports the shipped alpha
       surfaces, accepted limits, final blockers, and verification gates.
 - [ ] `cargo run --locked -- release-candidate-smoke --json` passes and writes
-      package, archive, install receipt, release manifest, demo trace, dashboard,
-      durable store, operator handoff, notification payload, and
+      package, archive, install receipt, verified release manifest, demo trace,
+      dashboard, durable store, operator handoff, notification payload, and
       deploy-template artifacts.
 - [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
       dist/agentk-sidecar --json` passes and the reviewer handoff includes
@@ -62,6 +62,9 @@ keep the same checks in CI and protect the default branch.
       and remediation steps.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
+- [ ] `agentk sidecar-package-release-manifest-check --manifest
+      dist/agentk-sidecar-release-manifest.json` passes against the package,
+      archive checksum, and install receipt used for the handoff.
 - [ ] Errors do not leak sensitive syscall payloads by default.
 - [ ] All policy deny paths have tests.
 - [ ] All receipt/hash verification paths have tests.
@@ -129,6 +132,7 @@ cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run -- readiness
 cargo run -- signing-key

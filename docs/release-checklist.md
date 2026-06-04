@@ -78,11 +78,11 @@ if its parent directory allows group/other writes.
 
 Run the packaged sidecar release-candidate smoke in an empty or disposable
 directory. This recreates the package/archive, verifies the archive checksum,
-installs the package, writes the package release manifest, runs the packaged
-safe-agent demo, dashboard, sidecar checks, durable store sync/export/check,
-operator handoff artifact, sidecar doctor support report, Slack/GitHub/email
-notification payload exporters, dry-run delivery launchers, and Postgres
-dry-run push:
+installs the package, writes and verifies the package release manifest, runs the
+packaged safe-agent demo, dashboard, sidecar checks, durable store
+sync/export/check, operator handoff artifact, sidecar doctor support report,
+Slack/GitHub/email notification payload exporters, dry-run delivery launchers,
+and Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json
@@ -90,6 +90,7 @@ cargo run --locked -- release-candidate-smoke --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 ```
 
@@ -117,6 +118,11 @@ cargo run --locked -- sidecar-package-release-manifest \
   --archive dist/agentk-sidecar.tar \
   --out dist/agentk-sidecar-release-manifest.json \
   --force \
+  --json
+cargo run --locked -- sidecar-package-release-manifest-check \
+  --manifest dist/agentk-sidecar-release-manifest.json \
+  --package installed/agentk-sidecar \
+  --archive dist/agentk-sidecar.tar \
   --json
 cargo run --locked -- sidecar-package-http-handoff-check \
   --root installed/agentk-sidecar \

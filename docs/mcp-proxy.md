@@ -247,7 +247,10 @@ checksum filename, SHA-256, AgentK version, and installed file count. Then run
 `agentk sidecar-package-release-manifest --package <install-dir> --archive <package>.tar --out <handoff>.json`
 to write a machine-readable release handoff that binds the installed package,
 package lock, archive checksum, and install receipt without changing the
-package directory. After
+package directory. Run
+`agentk sidecar-package-release-manifest-check --manifest <handoff>.json` after
+copying or relocating those files to verify the package manifest, package lock,
+archive checksum, and install receipt still match the handoff. After
 manual unpacking, run `<package>/bin/agentk-sidecar-check` to validate it
 without spawning downstream tools. The package writes a relative-path
 `manifest.json` with the

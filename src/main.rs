@@ -4,8 +4,9 @@ use agentk::{
     TeamPermissionsReport, Verdict, alpha_release_status_report, approval_review_jsonl,
     archive_sidecar_package, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
     check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive,
-    check_sidecar_package_http_handoff, check_sidecar_package_team_handoff, default_log_path,
-    export_audit_store, export_email_notification_payloads, export_github_notification_payloads,
+    check_sidecar_package_http_handoff, check_sidecar_package_release_manifest,
+    check_sidecar_package_team_handoff, default_log_path, export_audit_store,
+    export_email_notification_payloads, export_github_notification_payloads,
     export_slack_notification_payloads, fork_replay_behavior_jsonl, fork_replay_jsonl,
     generate_signing_key_file, init_sidecar_bundle, inspect_jsonl, install_sidecar_package_archive,
     mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
@@ -824,6 +825,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify a package release handoff manifest against current package/archive files.
+    SidecarPackageReleaseManifestCheck {
+        /// Release handoff manifest produced by sidecar-package-release-manifest.
+        #[arg(long, default_value = "agentk-sidecar-release-manifest.json")]
+        manifest: PathBuf,
+        /// Optional package directory override for relocated installs.
+        #[arg(long)]
+        package: Option<PathBuf>,
+        /// Optional tar archive override for relocated release artifacts.
+        #[arg(long)]
+        archive: Option<PathBuf>,
+        /// Optional checksum override. Defaults to the manifest checksum path.
+        #[arg(long)]
+        checksum: Option<PathBuf>,
+        /// Optional install receipt override. Defaults to the manifest receipt path.
+        #[arg(long)]
+        install_receipt: Option<PathBuf>,
+        /// Emit the manifest check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the active proof-signing public key and source.
     SigningKey {
         /// Emit the signer status as JSON.
@@ -1339,6 +1361,21 @@ fn run() -> Result<(), AgentKError> {
             install_receipt,
             out,
             force,
+            json,
+        ),
+        Command::SidecarPackageReleaseManifestCheck {
+            manifest,
+            package,
+            archive,
+            checksum,
+            install_receipt,
+            json,
+        } => sidecar_package_release_manifest_check(
+            manifest,
+            package,
+            archive,
+            checksum,
+            install_receipt,
             json,
         ),
         Command::SigningKey { json } => signing_key(json),
@@ -8212,6 +8249,66 @@ fn sidecar_package_release_manifest(
     Ok(())
 }
 
+fn sidecar_package_release_manifest_check(
+    manifest: PathBuf,
+    package: Option<PathBuf>,
+    archive: Option<PathBuf>,
+    checksum: Option<PathBuf>,
+    install_receipt: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = check_sidecar_package_release_manifest(
+        &manifest,
+        package,
+        archive,
+        checksum,
+        install_receipt,
+    )?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK team sidecar release manifest check");
+        println!("manifest {}", report.manifest.display());
+        if let Some(package) = &report.package {
+            println!("package  {}", package.display());
+        }
+        if let Some(archive) = &report.archive {
+            println!("archive  {}", archive.display());
+        }
+        if let Some(checksum) = &report.checksum {
+            println!("checksum {}", checksum.display());
+        }
+        if let Some(receipt) = &report.install_receipt {
+            println!("receipt  {}", receipt.display());
+        }
+        if let Some(sha256) = &report.archive_sha256 {
+            println!("sha256   {sha256}");
+        }
+        println!(
+            "verdict  {}",
+            if report.passed { "verified" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<40} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package release manifest check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn signing_key(json: bool) -> Result<(), AgentKError> {
     let status = signing_key_status();
 
@@ -8743,6 +8840,26 @@ fn run_release_candidate_smoke(
             install_receipt.as_str(),
             "--out",
             release_manifest.as_str(),
+            "--json",
+        ],
+        &[],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "release manifest check",
+        &current_exe,
+        &[
+            "sidecar-package-release-manifest-check",
+            "--manifest",
+            release_manifest.as_str(),
+            "--package",
+            installed.as_str(),
+            "--archive",
+            archive.as_str(),
+            "--checksum",
+            archive_checksum.as_str(),
+            "--install-receipt",
+            install_receipt.as_str(),
             "--json",
         ],
         &[],
@@ -13047,6 +13164,65 @@ done
             PathBuf::from("dist/agentk-sidecar-release-manifest.json")
         );
         assert!(force);
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_release_manifest_check_accepts_manifest_and_overrides() {
+        std::thread::Builder::new()
+            .name("agentk-cli-release-manifest-check-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_release_manifest_check_accepts_manifest_and_overrides_inner)
+            .expect("sidecar-package-release-manifest-check parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-release-manifest-check parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_release_manifest_check_accepts_manifest_and_overrides_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-release-manifest-check",
+            "--manifest",
+            "dist/agentk-sidecar-release-manifest.json",
+            "--package",
+            "installed/agentk-sidecar",
+            "--archive",
+            "dist/agentk-sidecar.tar",
+            "--checksum",
+            "dist/agentk-sidecar.tar.sha256",
+            "--install-receipt",
+            "installed/agentk-sidecar/sidecar/.agentk/install-receipt.json",
+            "--json",
+        ])
+        .expect("sidecar-package-release-manifest-check should parse");
+
+        let Some(Command::SidecarPackageReleaseManifestCheck {
+            manifest,
+            package,
+            archive,
+            checksum,
+            install_receipt,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-release-manifest-check command");
+        };
+        assert_eq!(
+            manifest,
+            PathBuf::from("dist/agentk-sidecar-release-manifest.json")
+        );
+        assert_eq!(package, Some(PathBuf::from("installed/agentk-sidecar")));
+        assert_eq!(archive, Some(PathBuf::from("dist/agentk-sidecar.tar")));
+        assert_eq!(
+            checksum,
+            Some(PathBuf::from("dist/agentk-sidecar.tar.sha256"))
+        );
+        assert_eq!(
+            install_receipt,
+            Some(PathBuf::from(
+                "installed/agentk-sidecar/sidecar/.agentk/install-receipt.json"
+            ))
+        );
         assert!(json);
     }
 
