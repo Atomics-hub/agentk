@@ -90,8 +90,9 @@ Implemented today:
   package release manifest, saved smoke evidence, active evidence-signing
   public key, worktree state, and optional signed-tag verification without
   tagging, pushing, uploading, or publishing.
-- `release-homebrew-formula`, which writes a reviewed local Homebrew formula
-  from a source release URL plus SHA-256 without publishing a tap.
+- `release-homebrew-formula` and `release-homebrew-formula-check`, which write
+  and verify a reviewed local Homebrew formula from a source release URL plus
+  SHA-256 without publishing a tap.
 
 Still missing for a team product:
 

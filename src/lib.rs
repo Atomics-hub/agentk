@@ -10569,6 +10569,21 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 "bin/agentk-sidecar-team-handoff-check --json",
             ],
         ),
+        alpha_release_source_surface(
+            root,
+            "local Homebrew formula handoff",
+            "formula generation and formula/archive verification are present without publishing a tap",
+            &[
+                ("src/main.rs", "ReleaseHomebrewFormula"),
+                ("src/main.rs", "ReleaseHomebrewFormulaCheck"),
+                ("src/lib.rs", "write_homebrew_formula"),
+                ("src/lib.rs", "check_homebrew_formula"),
+            ],
+            &[
+                "agentk release-homebrew-formula --source-url <release-tarball-url> --sha256 <sha256>",
+                "agentk release-homebrew-formula-check --formula dist/homebrew/agentk.rb --source-archive <release-tarball>",
+            ],
+        ),
     ]
 }
 
@@ -10708,6 +10723,26 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
             ],
             &[
                 "cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "Homebrew formula handoff checker",
+            "release checklist and notes include local formula generation plus formula/archive verification before tap review",
+            &[
+                ("src/main.rs", "ReleaseHomebrewFormulaCheck"),
+                ("README.md", "release-homebrew-formula-check"),
+                (
+                    "docs/release-checklist.md",
+                    "release-homebrew-formula-check",
+                ),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "release-homebrew-formula-check",
+                ),
+            ],
+            &[
+                "cargo run --locked -- release-homebrew-formula-check --formula dist/homebrew/agentk.rb --source-archive <release-tarball>",
             ],
         ),
         alpha_release_source_surface(
@@ -16414,6 +16449,39 @@ pub struct HomebrewFormulaReport {
     pub files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct HomebrewFormulaCheckReport {
+    pub formula: PathBuf,
+    pub source_archive: Option<PathBuf>,
+    pub expected_source_url: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub expected_version: Option<String>,
+    pub expected_homepage: Option<String>,
+    pub expected_class_name: Option<String>,
+    pub passed: bool,
+    pub class_name: Option<String>,
+    pub formula_name: Option<String>,
+    pub version: Option<String>,
+    pub homepage: Option<String>,
+    pub source_url: Option<String>,
+    pub sha256: Option<String>,
+    pub checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Default)]
+struct ParsedHomebrewFormula {
+    class_name: Option<String>,
+    desc: Option<String>,
+    homepage: Option<String>,
+    source_url: Option<String>,
+    sha256: Option<String>,
+    license: Option<String>,
+    version: Option<String>,
+    depends_on_rust_build: bool,
+    cargo_install: bool,
+    agentk_help_test: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SidecarPackageCheckReport {
     pub root: PathBuf,
@@ -17489,6 +17557,434 @@ pub fn write_homebrew_formula(
         sha256,
         files: vec![out.to_path_buf()],
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_homebrew_formula(
+    formula: impl AsRef<Path>,
+    source_archive: Option<&Path>,
+    expected_source_url: Option<&str>,
+    expected_sha256: Option<&str>,
+    expected_version: Option<&str>,
+    expected_homepage: Option<&str>,
+    expected_class_name: Option<&str>,
+) -> Result<HomebrewFormulaCheckReport, AgentKError> {
+    let formula = formula.as_ref();
+    let mut checks = Vec::new();
+    let content = match fs::read_to_string(formula) {
+        Ok(content) => {
+            checks.push(sidecar_check(
+                "Homebrew formula file",
+                ReadinessStatus::Pass,
+                "formula file is readable",
+            ));
+            content
+        }
+        Err(error) => {
+            checks.push(sidecar_check(
+                "Homebrew formula file",
+                ReadinessStatus::Fail,
+                format!("formula file could not be read: {error}"),
+            ));
+            return Ok(homebrew_formula_check_report(
+                formula,
+                source_archive,
+                expected_source_url,
+                expected_sha256,
+                expected_version,
+                expected_homepage,
+                expected_class_name,
+                ParsedHomebrewFormula::default(),
+                checks,
+            ));
+        }
+    };
+
+    let parsed = parse_homebrew_formula(&content);
+    checks.extend(check_homebrew_formula_class(
+        parsed.class_name.as_deref(),
+        expected_class_name,
+    ));
+    checks.extend(check_homebrew_formula_quoted_field(
+        "Homebrew formula description",
+        parsed.desc.as_deref(),
+        Some(env!("CARGO_PKG_DESCRIPTION")),
+        |value| !value.is_empty(),
+        "description is present",
+        "description must match Cargo package metadata",
+    ));
+    checks.extend(check_homebrew_formula_quoted_field(
+        "Homebrew formula homepage",
+        parsed.homepage.as_deref(),
+        expected_homepage,
+        |value| validate_homebrew_url(value, "homepage").is_ok(),
+        "homepage is a clean https:// URL",
+        "homepage does not match expected value",
+    ));
+    checks.extend(check_homebrew_formula_quoted_field(
+        "Homebrew formula source URL",
+        parsed.source_url.as_deref(),
+        expected_source_url,
+        |value| validate_homebrew_url(value, "source URL").is_ok(),
+        "source URL is a clean https:// URL",
+        "source URL does not match expected value",
+    ));
+    checks.extend(check_homebrew_formula_sha256(
+        parsed.sha256.as_deref(),
+        expected_sha256,
+        source_archive,
+    ));
+    checks.extend(check_homebrew_formula_quoted_field(
+        "Homebrew formula license",
+        parsed.license.as_deref(),
+        Some(env!("CARGO_PKG_LICENSE")),
+        |value| !value.is_empty(),
+        "license is present",
+        "license must match Cargo package metadata",
+    ));
+    checks.extend(check_homebrew_formula_quoted_field(
+        "Homebrew formula version",
+        parsed.version.as_deref(),
+        expected_version,
+        |value| validate_homebrew_version(value).is_ok(),
+        "version is a clean release version",
+        "version does not match expected value",
+    ));
+    checks.push(if parsed.depends_on_rust_build {
+        sidecar_check(
+            "Homebrew formula Rust dependency",
+            ReadinessStatus::Pass,
+            "formula declares rust build dependency",
+        )
+    } else {
+        sidecar_check(
+            "Homebrew formula Rust dependency",
+            ReadinessStatus::Fail,
+            "formula must declare `depends_on \"rust\" => :build`",
+        )
+    });
+    checks.push(if parsed.cargo_install {
+        sidecar_check(
+            "Homebrew formula install",
+            ReadinessStatus::Pass,
+            "formula installs with std_cargo_args",
+        )
+    } else {
+        sidecar_check(
+            "Homebrew formula install",
+            ReadinessStatus::Fail,
+            "formula must install with `cargo install *std_cargo_args`",
+        )
+    });
+    checks.push(if parsed.agentk_help_test {
+        sidecar_check(
+            "Homebrew formula test",
+            ReadinessStatus::Pass,
+            "formula test runs the installed agentk binary",
+        )
+    } else {
+        sidecar_check(
+            "Homebrew formula test",
+            ReadinessStatus::Fail,
+            "formula test must run `#{bin}/agentk --help`",
+        )
+    });
+
+    Ok(homebrew_formula_check_report(
+        formula,
+        source_archive,
+        expected_source_url,
+        expected_sha256,
+        expected_version,
+        expected_homepage,
+        expected_class_name,
+        parsed,
+        checks,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn homebrew_formula_check_report(
+    formula: &Path,
+    source_archive: Option<&Path>,
+    expected_source_url: Option<&str>,
+    expected_sha256: Option<&str>,
+    expected_version: Option<&str>,
+    expected_homepage: Option<&str>,
+    expected_class_name: Option<&str>,
+    parsed: ParsedHomebrewFormula,
+    checks: Vec<ReadinessCheck>,
+) -> HomebrewFormulaCheckReport {
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+    let formula_name = parsed
+        .class_name
+        .as_deref()
+        .filter(|class_name| validate_homebrew_class_name(class_name).is_ok())
+        .map(homebrew_formula_name);
+
+    HomebrewFormulaCheckReport {
+        formula: formula.to_path_buf(),
+        source_archive: source_archive.map(Path::to_path_buf),
+        expected_source_url: expected_source_url.map(str::to_string),
+        expected_sha256: expected_sha256.map(str::to_string),
+        expected_version: expected_version.map(str::to_string),
+        expected_homepage: expected_homepage.map(str::to_string),
+        expected_class_name: expected_class_name.map(str::to_string),
+        passed,
+        class_name: parsed.class_name,
+        formula_name,
+        version: parsed.version,
+        homepage: parsed.homepage,
+        source_url: parsed.source_url,
+        sha256: parsed.sha256,
+        checks,
+    }
+}
+
+fn parse_homebrew_formula(content: &str) -> ParsedHomebrewFormula {
+    let mut parsed = ParsedHomebrewFormula::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(class_name) = line
+            .strip_prefix("class ")
+            .and_then(|value| value.strip_suffix(" < Formula"))
+        {
+            parsed.class_name = Some(class_name.to_string());
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "desc") {
+            parsed.desc = Some(value);
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "homepage") {
+            parsed.homepage = Some(value);
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "url") {
+            parsed.source_url = Some(value);
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "sha256") {
+            parsed.sha256 = Some(value);
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "license") {
+            parsed.license = Some(value);
+        } else if let Some(value) = homebrew_formula_quoted_value(line, "version") {
+            parsed.version = Some(value);
+        }
+
+        if line == "depends_on \"rust\" => :build" {
+            parsed.depends_on_rust_build = true;
+        }
+        if line == "system \"cargo\", \"install\", *std_cargo_args" {
+            parsed.cargo_install = true;
+        }
+        if line == "system \"#{bin}/agentk\", \"--help\"" {
+            parsed.agentk_help_test = true;
+        }
+    }
+    parsed
+}
+
+fn homebrew_formula_quoted_value(line: &str, key: &str) -> Option<String> {
+    let quoted = line.strip_prefix(key)?.trim_start();
+    let quoted = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    Some(ruby_string_unescape(quoted))
+}
+
+fn ruby_string_unescape(value: &str) -> String {
+    let mut unescaped = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                unescaped.push(next);
+            }
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
+fn check_homebrew_formula_class(
+    class_name: Option<&str>,
+    expected_class_name: Option<&str>,
+) -> Vec<ReadinessCheck> {
+    let mut checks = Vec::new();
+    let Some(class_name) = class_name else {
+        checks.push(sidecar_check(
+            "Homebrew formula class",
+            ReadinessStatus::Fail,
+            "formula must declare `class Agentk < Formula`",
+        ));
+        return checks;
+    };
+
+    match validate_homebrew_class_name(class_name) {
+        Ok(()) => checks.push(sidecar_check(
+            "Homebrew formula class",
+            ReadinessStatus::Pass,
+            format!("class {class_name} is valid"),
+        )),
+        Err(error) => checks.push(sidecar_check(
+            "Homebrew formula class",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        )),
+    }
+
+    if let Some(expected) = expected_class_name {
+        match validate_homebrew_class_name(expected) {
+            Ok(()) if expected == class_name => checks.push(sidecar_check(
+                "Homebrew formula expected class",
+                ReadinessStatus::Pass,
+                "class matches expected value",
+            )),
+            Ok(()) => checks.push(sidecar_check(
+                "Homebrew formula expected class",
+                ReadinessStatus::Fail,
+                "class does not match expected value",
+            )),
+            Err(error) => checks.push(sidecar_check(
+                "Homebrew formula expected class",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            )),
+        }
+    }
+
+    checks
+}
+
+fn check_homebrew_formula_quoted_field<F>(
+    name: &str,
+    value: Option<&str>,
+    expected: Option<&str>,
+    validate: F,
+    ok_detail: &str,
+    mismatch_detail: &str,
+) -> Vec<ReadinessCheck>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut checks = Vec::new();
+    let Some(value) = value else {
+        checks.push(sidecar_check(
+            name,
+            ReadinessStatus::Fail,
+            "required formula field is missing",
+        ));
+        return checks;
+    };
+
+    if validate(value) {
+        checks.push(sidecar_check(name, ReadinessStatus::Pass, ok_detail));
+    } else {
+        checks.push(sidecar_check(
+            name,
+            ReadinessStatus::Fail,
+            "required formula field is not valid",
+        ));
+    }
+
+    if let Some(expected) = expected {
+        if expected == value {
+            checks.push(sidecar_check(
+                format!("{name} expected value"),
+                ReadinessStatus::Pass,
+                "field matches expected value",
+            ));
+        } else {
+            checks.push(sidecar_check(
+                format!("{name} expected value"),
+                ReadinessStatus::Fail,
+                mismatch_detail,
+            ));
+        }
+    }
+
+    checks
+}
+
+fn check_homebrew_formula_sha256(
+    formula_sha256: Option<&str>,
+    expected_sha256: Option<&str>,
+    source_archive: Option<&Path>,
+) -> Vec<ReadinessCheck> {
+    let mut checks = Vec::new();
+    let normalized_formula_sha256 = match formula_sha256 {
+        Some(value) => match normalize_sha256(value) {
+            Ok(sha256) => {
+                checks.push(sidecar_check(
+                    "Homebrew formula sha256",
+                    ReadinessStatus::Pass,
+                    "sha256 is 64 lowercase/uppercase hex characters",
+                ));
+                Some(sha256)
+            }
+            Err(error) => {
+                checks.push(sidecar_check(
+                    "Homebrew formula sha256",
+                    ReadinessStatus::Fail,
+                    error.to_string(),
+                ));
+                None
+            }
+        },
+        None => {
+            checks.push(sidecar_check(
+                "Homebrew formula sha256",
+                ReadinessStatus::Fail,
+                "required formula field is missing",
+            ));
+            None
+        }
+    };
+
+    if let Some(expected) = expected_sha256 {
+        match normalize_sha256(expected) {
+            Ok(expected) => {
+                if normalized_formula_sha256.as_deref() == Some(expected.as_str()) {
+                    checks.push(sidecar_check(
+                        "Homebrew formula expected sha256",
+                        ReadinessStatus::Pass,
+                        "sha256 matches expected value",
+                    ));
+                } else {
+                    checks.push(sidecar_check(
+                        "Homebrew formula expected sha256",
+                        ReadinessStatus::Fail,
+                        "sha256 does not match expected value",
+                    ));
+                }
+            }
+            Err(error) => checks.push(sidecar_check(
+                "Homebrew formula expected sha256",
+                ReadinessStatus::Fail,
+                error.to_string(),
+            )),
+        }
+    }
+
+    if let Some(source_archive) = source_archive {
+        match sidecar_package_file_sha256(source_archive) {
+            Ok(archive_sha256)
+                if normalized_formula_sha256.as_deref() == Some(archive_sha256.as_str()) =>
+            {
+                checks.push(sidecar_check(
+                    "Homebrew formula source archive",
+                    ReadinessStatus::Pass,
+                    "sha256 matches source archive bytes",
+                ));
+            }
+            Ok(_) => checks.push(sidecar_check(
+                "Homebrew formula source archive",
+                ReadinessStatus::Fail,
+                "sha256 does not match source archive bytes",
+            )),
+            Err(error) => checks.push(sidecar_check(
+                "Homebrew formula source archive",
+                ReadinessStatus::Fail,
+                format!("source archive could not be hashed: {error}"),
+            )),
+        }
+    }
+
+    checks
 }
 
 fn homebrew_formula(
@@ -26251,6 +26747,53 @@ can_deny = ["*"]
         assert!(formula.contains("cargo\", \"install\""));
         assert!(formula.contains("#{bin}/agentk"));
 
+        let check = check_homebrew_formula(
+            &out,
+            Some(&archive),
+            Some("https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"),
+            Some(&report.sha256),
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+        )
+        .expect("formula check should run");
+        assert!(check.passed);
+        assert_eq!(check.formula, out);
+        assert_eq!(check.source_archive, Some(archive.clone()));
+        assert_eq!(check.class_name.as_deref(), Some("Agentk"));
+        assert_eq!(check.formula_name.as_deref(), Some("agentk"));
+        assert!(check.checks.iter().any(|check| {
+            check.name == "Homebrew formula source archive" && check.status == ReadinessStatus::Pass
+        }));
+
+        fs::write(&archive, b"stale source release archive").expect("source archive should write");
+        let stale_archive_check =
+            check_homebrew_formula(&out, Some(&archive), None, None, None, None, None)
+                .expect("stale archive check should run");
+        assert!(!stale_archive_check.passed);
+        assert!(stale_archive_check.checks.iter().any(|check| {
+            check.name == "Homebrew formula source archive"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("does not match source archive")
+        }));
+
+        fs::write(
+            &out,
+            formula.replace(
+                "system \"cargo\", \"install\", *std_cargo_args",
+                "system \"cargo\", \"build\", \"--release\"",
+            ),
+        )
+        .expect("tampered formula should write");
+        let tampered_check = check_homebrew_formula(&out, None, None, None, None, None, None)
+            .expect("tampered formula check should run");
+        assert!(!tampered_check.passed);
+        assert!(tampered_check.checks.iter().any(|check| {
+            check.name == "Homebrew formula install"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("std_cargo_args")
+        }));
+
         let exists = write_homebrew_formula(
             "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
             Some(&report.sha256),
@@ -32515,7 +33058,8 @@ reviewer = "tom"
         fs::write(
             root.join("src/main.rs"),
             "ReleaseCandidateSmoke sidecar-serve-tcp sidecar-serve-http DashboardServe \
-             /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo",
+             /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo \
+             ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -32523,12 +33067,12 @@ reviewer = "tom"
             "sidecar-package-release-manifest package.lock.json bin/agentk-sidecar-http \
              team_identity_report_from_path token_env export_github_notification_payloads \
              export_email_notification_payloads run_safe_agent_demo agentk-safe-agent-demo \
-             release-candidate-smoke",
+             release-candidate-smoke write_homebrew_formula check_homebrew_formula",
         )
         .expect("lib fixture should be writable");
         fs::write(
             root.join("docs/release-checklist.md"),
-            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check",
+            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check release-homebrew-formula-check",
         )
         .expect("release checklist fixture should be writable");
         fs::write(
