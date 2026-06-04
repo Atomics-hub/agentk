@@ -10031,8 +10031,19 @@ struct ReleasePublicationCheckReport {
     package_release_manifest: PathBuf,
     publish_state: String,
     passed: bool,
+    release_assets: Vec<ReleasePublicationAsset>,
     publication_steps: Vec<ReleasePublicationStep>,
     checks: Vec<ReleasePublicationCheckItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleasePublicationAsset {
+    name: String,
+    path: PathBuf,
+    required: bool,
+    present: bool,
+    bytes: Option<u64>,
+    sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -14572,6 +14583,9 @@ fn run_release_publication_check(
         },
     ));
 
+    let release_assets = release_publication_assets(finalization_path, &notes_path, &finalization)?;
+    checks.push(release_publication_asset_manifest_check(&release_assets));
+
     let passed = checks
         .iter()
         .all(|check| check.status != ReadinessStatus::Fail);
@@ -14586,9 +14600,96 @@ fn run_release_publication_check(
         package_release_manifest: finalization.package_release_manifest,
         publish_state: finalization.publish_state,
         passed,
+        release_assets,
         publication_steps,
         checks,
     })
+}
+
+fn release_publication_assets(
+    finalization_path: &Path,
+    notes_path: &Path,
+    finalization: &ReleaseFinalizeReport,
+) -> Result<Vec<ReleasePublicationAsset>, AgentKError> {
+    Ok(vec![
+        release_publication_asset(
+            "sidecar package archive",
+            &finalization.package_archive,
+            Some(&finalization.package_archive_sha256),
+        )?,
+        release_publication_asset(
+            "sidecar package release manifest",
+            &finalization.package_release_manifest,
+            None,
+        )?,
+        release_publication_asset("final release handoff report", finalization_path, None)?,
+        release_publication_asset(
+            "final release notes",
+            notes_path,
+            finalization
+                .release_notes
+                .as_ref()
+                .map(|artifact| artifact.sha256.as_str()),
+        )?,
+    ])
+}
+
+fn release_publication_asset(
+    name: &str,
+    path: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<ReleasePublicationAsset, AgentKError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            let sha256 = release_candidate_smoke_file_sha256(path)?;
+            let present = expected_sha256.is_none_or(|expected| expected == sha256);
+            Ok(ReleasePublicationAsset {
+                name: name.to_string(),
+                path: path.to_path_buf(),
+                required: true,
+                present,
+                bytes: Some(metadata.len()),
+                sha256: Some(sha256),
+            })
+        }
+        _ => Ok(ReleasePublicationAsset {
+            name: name.to_string(),
+            path: path.to_path_buf(),
+            required: true,
+            present: false,
+            bytes: None,
+            sha256: None,
+        }),
+    }
+}
+
+fn release_publication_asset_manifest_check(
+    assets: &[ReleasePublicationAsset],
+) -> ReleasePublicationCheckItem {
+    let missing = assets
+        .iter()
+        .filter(|asset| asset.required && !asset.present)
+        .map(|asset| asset.name.as_str())
+        .collect::<Vec<_>>();
+    release_publication_check_item(
+        "release asset manifest",
+        if missing.is_empty() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if missing.is_empty() {
+            format!(
+                "{} required release assets recorded with hashes",
+                assets.len()
+            )
+        } else {
+            format!(
+                "missing or mismatched release assets: {}",
+                missing.join(", ")
+            )
+        },
+    )
 }
 
 fn release_publication_steps(
@@ -21747,6 +21848,27 @@ done
                 .all(|check| check.status == ReadinessStatus::Pass)
         );
         assert_eq!(publication.publication_steps.len(), 5);
+        assert_eq!(publication.release_assets.len(), 4);
+        for asset in [
+            "sidecar package archive",
+            "sidecar package release manifest",
+            "final release handoff report",
+            "final release notes",
+        ] {
+            assert!(
+                publication.release_assets.iter().any(|item| {
+                    item.name == asset
+                        && item.required
+                        && item.present
+                        && item.bytes.is_some_and(|bytes| bytes > 0)
+                        && item
+                            .sha256
+                            .as_deref()
+                            .is_some_and(release_evidence_valid_sha256)
+                }),
+                "missing release asset {asset}"
+            );
+        }
         for owner in [
             "release captain",
             "signing owner",
@@ -21772,6 +21894,13 @@ done
                 .expect("publication steps should be an array")
                 .len(),
             5
+        );
+        assert_eq!(
+            publication_json["release_assets"]
+                .as_array()
+                .expect("release assets should be an array")
+                .len(),
+            4
         );
 
         fs::remove_dir_all(root).ok();
