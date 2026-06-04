@@ -23,8 +23,8 @@ use agentk::{
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
     write_sidecar_package_demo_handoff, write_sidecar_package_deploy_handoff,
     write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
-    write_sidecar_package_quickstart, write_sidecar_package_release_manifest,
-    write_sidecar_package_support_bundle,
+    write_sidecar_package_permissions_handoff, write_sidecar_package_quickstart,
+    write_sidecar_package_release_manifest, write_sidecar_package_support_bundle,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -835,6 +835,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write one packaged permissions and identity handoff artifact.
+    SidecarPackagePermissionsHandoff {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for permissions-handoff.json and permissions-handoff.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the permissions handoff report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1564,6 +1576,9 @@ fn run() -> Result<(), AgentKError> {
             release_manifest,
             json,
         } => sidecar_package_quickstart(root, out, release_manifest, json),
+        Command::SidecarPackagePermissionsHandoff { root, out, json } => {
+            sidecar_package_permissions_handoff(root, out, json)
+        }
         Command::SidecarPackageArchiveCheck {
             archive,
             checksum,
@@ -9107,6 +9122,53 @@ fn sidecar_package_quickstart(
     Ok(())
 }
 
+fn sidecar_package_permissions_handoff(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir = out.unwrap_or_else(|| {
+        root.join("sidecar")
+            .join(".agentk")
+            .join("permissions-handoff")
+    });
+    let report = write_sidecar_package_permissions_handoff(&root, &output_dir)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar permissions handoff");
+        println!("root        {}", report.root.display());
+        println!("out         {}", report.output_dir.display());
+        println!("json        {}", report.json_path.display());
+        println!("markdown    {}", report.markdown_path.display());
+        println!("permissions {}", report.permissions_path.display());
+        println!("identity    {}", report.identity_path.display());
+        println!("reviewer    {}", report.authorized_reviewer);
+        println!(
+            "verdict     {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package permissions handoff failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -9575,6 +9637,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "demo handoff markdown",
     "quickstart json",
     "quickstart markdown",
+    "permissions handoff json",
+    "permissions handoff markdown",
     "trace",
     "dashboard",
     "store readme",
@@ -10102,6 +10166,9 @@ fn run_release_candidate_smoke(
     let quickstart_root = installed_package.join("sidecar/.agentk/quickstart");
     let quickstart_json = quickstart_root.join("quickstart.json");
     let quickstart_markdown = quickstart_root.join("quickstart.md");
+    let permissions_handoff_root = installed_package.join("sidecar/.agentk/permissions-handoff");
+    let permissions_handoff_json = permissions_handoff_root.join("permissions-handoff.json");
+    let permissions_handoff_markdown = permissions_handoff_root.join("permissions-handoff.md");
     let release_evidence_root = installed_package.join("sidecar/.agentk/release");
     let package_check_json = release_evidence_root.join("package-check.json");
     let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
@@ -10138,6 +10205,7 @@ fn run_release_candidate_smoke(
     let deploy_handoff = deploy_handoff_root.display().to_string();
     let demo_handoff = demo_handoff_root.display().to_string();
     let quickstart = quickstart_root.display().to_string();
+    let permissions_handoff = permissions_handoff_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -10500,6 +10568,19 @@ fn run_release_candidate_smoke(
             ("AGENTK_PACKAGE_RELEASE_MANIFEST", release_manifest.as_str()),
         ],
     )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "permissions handoff",
+        &bin.join("agentk-sidecar-permissions-handoff"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            (
+                "AGENTK_PERMISSIONS_HANDOFF_OUT",
+                permissions_handoff.as_str(),
+            ),
+        ],
+    )?;
 
     let mut artifacts = Vec::new();
     release_candidate_smoke_artifact(
@@ -10596,6 +10677,16 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_artifact(&mut artifacts, "quickstart json", quickstart_json)?;
     release_candidate_smoke_artifact(&mut artifacts, "quickstart markdown", quickstart_markdown)?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "permissions handoff json",
+        permissions_handoff_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "permissions handoff markdown",
+        permissions_handoff_markdown,
+    )?;
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
     release_candidate_smoke_artifact(
@@ -16889,6 +16980,43 @@ done
         assert_eq!(
             release_manifest,
             Some(PathBuf::from("dist/agentk-sidecar-release-manifest.json"))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_permissions_handoff_accepts_root_and_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-permissions-handoff-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_permissions_handoff_accepts_root_and_out_inner)
+            .expect("sidecar-package-permissions-handoff parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-permissions-handoff parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_permissions_handoff_accepts_root_and_out_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-permissions-handoff",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/permissions-handoff",
+            "--json",
+        ])
+        .expect("sidecar-package-permissions-handoff should parse");
+
+        let Some(Command::SidecarPackagePermissionsHandoff { root, out, json }) = cli.command
+        else {
+            panic!("expected sidecar-package-permissions-handoff command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from(
+                "dist/agentk-sidecar/sidecar/.agentk/permissions-handoff"
+            ))
         );
         assert!(json);
     }
