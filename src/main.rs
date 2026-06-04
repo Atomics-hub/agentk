@@ -10029,7 +10029,16 @@ struct ReleasePublicationCheckReport {
     package_release_manifest: PathBuf,
     publish_state: String,
     passed: bool,
+    publication_steps: Vec<ReleasePublicationStep>,
     checks: Vec<ReleasePublicationCheckItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleasePublicationStep {
+    owner: String,
+    action: String,
+    evidence: String,
+    publish_gate: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -11411,6 +11420,14 @@ fn release_publication_check(
         println!("notes     {}", report.notes.display());
         println!("archive   {}", report.package_archive.display());
         println!("sha256    {}", report.package_archive_sha256);
+        println!();
+        println!("Publication steps");
+        for step in &report.publication_steps {
+            println!(
+                "- {}: {} [{}; gate: {}]",
+                step.owner, step.action, step.evidence, step.publish_gate
+            );
+        }
         println!();
         for check in &report.checks {
             println!("[{}] {:<30} {}", check.status, check.name, check.detail);
@@ -14465,6 +14482,7 @@ fn run_release_publication_check(
     let passed = checks
         .iter()
         .all(|check| check.status != ReadinessStatus::Fail);
+    let publication_steps = release_publication_steps(&finalization, &notes_path);
     Ok(ReleasePublicationCheckReport {
         finalization: finalization_path.to_path_buf(),
         notes: notes_path,
@@ -14475,8 +14493,71 @@ fn run_release_publication_check(
         package_release_manifest: finalization.package_release_manifest,
         publish_state: finalization.publish_state,
         passed,
+        publication_steps,
         checks,
     })
+}
+
+fn release_publication_steps(
+    finalization: &ReleaseFinalizeReport,
+    notes_path: &Path,
+) -> Vec<ReleasePublicationStep> {
+    vec![
+        release_publication_step(
+            "release captain",
+            "Confirm release-publication-check is passing against the strict finalization report and final notes.",
+            finalization.output.display().to_string(),
+            "Do not publish while any publication check is failing.",
+        ),
+        release_publication_step(
+            "signing owner",
+            "Retain the production signing key evidence and signed-tag verification output with the release ticket.",
+            finalization
+                .tag
+                .tag
+                .as_deref()
+                .unwrap_or("<signed tag pending>")
+                .to_string(),
+            "Publish only after the tag is present and verified.",
+        ),
+        release_publication_step(
+            "package owner",
+            "Attach the sidecar archive, checksum, and release manifest exactly as recorded by release-finalize.",
+            finalization.package_archive.display().to_string(),
+            "Publish only when the archive hash and release manifest checks pass.",
+        ),
+        release_publication_step(
+            "docs owner",
+            "Publish the release notes after final evidence placeholders have been replaced with final values.",
+            notes_path.display().to_string(),
+            "Publish only when release notes match finalization evidence.",
+        ),
+        release_publication_step(
+            "GitHub release owner",
+            "Create the GitHub release from the verified signed tag and attach the ticket evidence bundle.",
+            finalization
+                .tag
+                .tag
+                .as_deref()
+                .unwrap_or("<signed tag pending>")
+                .to_string(),
+            "Publish only after release captain, signing, package, and docs gates are green.",
+        ),
+    ]
+}
+
+fn release_publication_step(
+    owner: &str,
+    action: &str,
+    evidence: String,
+    publish_gate: &str,
+) -> ReleasePublicationStep {
+    ReleasePublicationStep {
+        owner: owner.to_string(),
+        action: action.to_string(),
+        evidence,
+        publish_gate: publish_gate.to_string(),
+    }
 }
 
 fn release_finalize_git(args: &[&str]) -> Result<ReleaseFinalizeGitOutput, AgentKError> {
@@ -21545,6 +21626,33 @@ done
                 .checks
                 .iter()
                 .all(|check| check.status == ReadinessStatus::Pass)
+        );
+        assert_eq!(publication.publication_steps.len(), 5);
+        for owner in [
+            "release captain",
+            "signing owner",
+            "package owner",
+            "docs owner",
+            "GitHub release owner",
+        ] {
+            assert!(
+                publication.publication_steps.iter().any(|step| {
+                    step.owner == owner
+                        && !step.action.trim().is_empty()
+                        && !step.evidence.trim().is_empty()
+                        && !step.publish_gate.trim().is_empty()
+                }),
+                "missing publication step for {owner}"
+            );
+        }
+        let publication_json =
+            serde_json::to_value(&publication).expect("publication report should serialize");
+        assert_eq!(
+            publication_json["publication_steps"]
+                .as_array()
+                .expect("publication steps should be an array")
+                .len(),
+            5
         );
 
         fs::remove_dir_all(root).ok();
