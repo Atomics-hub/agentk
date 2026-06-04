@@ -6711,6 +6711,7 @@ pub struct SidecarPackageDoctorReport {
     pub output_dir: PathBuf,
     pub json_path: PathBuf,
     pub markdown_path: PathBuf,
+    pub release_manifest_path: Option<PathBuf>,
     pub local_team_sidecar_alpha: bool,
     pub hosted_saas: bool,
     pub passed: bool,
@@ -7830,6 +7831,7 @@ fn sidecar_package_ops_handoff_markdown(report: &SidecarPackageOpsHandoffReport)
 pub fn write_sidecar_package_doctor(
     root: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
+    release_manifest: Option<&Path>,
 ) -> Result<SidecarPackageDoctorReport, AgentKError> {
     let root = root.as_ref();
     let output_dir = output_dir.as_ref();
@@ -7859,6 +7861,7 @@ pub fn write_sidecar_package_doctor(
         ),
         check_sidecar_package_operator_handoff_for_doctor(root),
         check_sidecar_package_audit_retention_for_doctor(root),
+        check_sidecar_package_release_manifest_for_doctor(root, release_manifest),
         check_sidecar_package_demo_integrity_for_doctor(root),
         doctor_check(
             "alpha scope",
@@ -7877,6 +7880,7 @@ pub fn write_sidecar_package_doctor(
         output_dir: output_dir.to_path_buf(),
         json_path: json_path.clone(),
         markdown_path: markdown_path.clone(),
+        release_manifest_path: release_manifest.map(Path::to_path_buf),
         local_team_sidecar_alpha: true,
         hosted_saas: false,
         passed,
@@ -8072,6 +8076,129 @@ fn check_sidecar_package_audit_retention_for_doctor(root: &Path) -> ReadinessChe
     )
 }
 
+fn check_sidecar_package_release_manifest_for_doctor(
+    root: &Path,
+    release_manifest: Option<&Path>,
+) -> ReadinessCheck {
+    let Some(release_manifest) = release_manifest else {
+        return doctor_check(
+            "release manifest binding",
+            ReadinessStatus::Warn,
+            "not provided; pass --release-manifest to bind package, archive, lock, and install receipt evidence",
+        );
+    };
+    let content = match fs::read_to_string(release_manifest) {
+        Ok(content) => content,
+        Err(error) => {
+            return doctor_check(
+                "release manifest binding",
+                ReadinessStatus::Fail,
+                format!(
+                    "could not read release manifest {}: {error}",
+                    release_manifest.display()
+                ),
+            );
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) => value,
+        Err(error) => {
+            return doctor_check(
+                "release manifest binding",
+                ReadinessStatus::Fail,
+                format!("release manifest did not parse: {error}"),
+            );
+        }
+    };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    let package_name = value
+        .get("package_name")
+        .and_then(serde_json::Value::as_str);
+    let passed = value.get("passed").and_then(serde_json::Value::as_bool) == Some(true);
+    let package_check_passed = value
+        .pointer("/package_check/passed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let archive_check_passed = value
+        .pointer("/archive_check/passed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let archive_sha256 = value
+        .get("archive_sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let receipt_archive_sha256 = value
+        .pointer("/receipt/archive_sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let installed_files = value
+        .get("installed_files")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    if schema_version != Some(SIDECAR_PACKAGE_RELEASE_MANIFEST_SCHEMA_VERSION as u64)
+        || package_name != Some(SIDECAR_PACKAGE_NAME)
+        || value
+            .get("hash_algorithm")
+            .and_then(serde_json::Value::as_str)
+            != Some("sha256")
+        || archive_sha256.len() != 64
+        || archive_sha256 != receipt_archive_sha256
+        || installed_files == 0
+        || !passed
+        || !package_check_passed
+        || !archive_check_passed
+    {
+        return doctor_check(
+            "release manifest binding",
+            ReadinessStatus::Fail,
+            "release manifest schema, package identity, archive hash, receipt, or nested checks are invalid",
+        );
+    }
+
+    let expected_hashes = [
+        ("package_manifest_sha256", root.join("manifest.json")),
+        ("package_lock_sha256", root.join(SIDECAR_PACKAGE_LOCK)),
+        (
+            "install_receipt_sha256",
+            root.join(SIDECAR_PACKAGE_INSTALL_RECEIPT),
+        ),
+    ];
+    for (field, path) in expected_hashes {
+        let expected = match sidecar_package_file_sha256(&path) {
+            Ok(hash) => hash,
+            Err(error) => {
+                return doctor_check(
+                    "release manifest binding",
+                    ReadinessStatus::Fail,
+                    format!("could not hash {}: {error}", path.display()),
+                );
+            }
+        };
+        let actual = value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if actual != expected {
+            return doctor_check(
+                "release manifest binding",
+                ReadinessStatus::Fail,
+                format!("{field} does not match {}", path.display()),
+            );
+        }
+    }
+
+    doctor_check(
+        "release manifest binding",
+        ReadinessStatus::Pass,
+        format!(
+            "{} binds archive sha256, package manifest, package lock, and install receipt hashes",
+            release_manifest.display()
+        ),
+    )
+}
+
 fn check_sidecar_package_demo_integrity_for_doctor(root: &Path) -> ReadinessCheck {
     let demo_doc = root.join("sidecar/demos/safe-agent-demo.md");
     let demo_launcher = root.join("bin/agentk-safe-agent-demo");
@@ -8125,6 +8252,9 @@ fn sidecar_package_doctor_remediation_steps(checks: &[ReadinessCheck]) -> Vec<St
             "audit evidence retention" => {
                 "Rerun bin/agentk-sidecar-ops-handoff --json and archive the generated trace, store, durable store, and notification outbox artifacts."
             }
+            "release manifest binding" => {
+                "Run agentk sidecar-package-release-manifest for the installed package and pass its path to bin/agentk-sidecar-doctor with --release-manifest or AGENTK_PACKAGE_RELEASE_MANIFEST."
+            }
             "filesystem/demo package integrity" => {
                 "Regenerate the sidecar package or restore the safe-agent demo files, then rerun bin/agentk-sidecar-ops-handoff --json."
             }
@@ -8152,6 +8282,12 @@ fn sidecar_package_doctor_markdown(report: &SidecarPackageDoctorReport) -> Strin
         "- Markdown report: `{}`\n\n",
         report.markdown_path.display()
     ));
+    if let Some(release_manifest) = &report.release_manifest_path {
+        out.push_str(&format!(
+            "- Release manifest: `{}`\n\n",
+            release_manifest.display()
+        ));
+    }
     out.push_str("## Checks\n\n");
     out.push_str("| Status | Check | Detail |\n");
     out.push_str("| --- | --- | --- |\n");
@@ -13327,7 +13463,7 @@ done
                 TIMEOUT_PROBE_SCRIPT.to_string(),
                 "agentk-timeout-probe".to_string(),
             ])
-            .with_response_timeout(Duration::from_millis(50)),
+            .with_response_timeout(Duration::from_millis(500)),
     )?;
     let responses = report
         .output
@@ -21752,7 +21888,9 @@ checksum, and install receipt without changing the package directory.
   audit stores, notification payload drafts, identity and permission summaries,
   then writes one compact operator handoff JSON/Markdown artifact.
 - `bin/agentk-sidecar-doctor`: diagnoses a copied, installed, or updated
-  package and writes support-ready JSON/Markdown remediation reports.
+  package and writes support-ready JSON/Markdown remediation reports. Set
+  `AGENTK_PACKAGE_RELEASE_MANIFEST` or pass `--release-manifest` to bind the
+  package manifest, package lock, archive checksum, and install receipt hashes.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -21801,7 +21939,7 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-sidecar-http-handoff-check --json
 ./bin/agentk-sidecar-team-handoff-check --json
 ./bin/agentk-sidecar-ops-handoff --json
-./bin/agentk-sidecar-doctor --json
+AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/agentk-sidecar-doctor --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -22010,10 +22148,14 @@ notifications, load Postgres, or read delivery credentials.
 Run `bin/agentk-sidecar-doctor --json` after unpacking, copying, or updating a
 package. It verifies required launchers, dummy env templates, bounded HTTP/SSE
 handoff readiness, dashboard/store handoff readiness, install receipt
-provenance, operator handoff artifacts, audit evidence retention, and the
-safe-agent demo package, then writes
+provenance, operator handoff artifacts, audit evidence retention, optional
+release-manifest binding, and the safe-agent demo package, then writes
 `sidecar/.agentk/doctor/sidecar-doctor.json` and
 `sidecar/.agentk/doctor/sidecar-doctor.md` with concrete remediation steps.
+Set `AGENTK_PACKAGE_RELEASE_MANIFEST` or pass `--release-manifest` when a
+`sidecar-package-release-manifest` handoff is available so support can verify
+the package manifest, package lock, archive checksum, and install receipt
+hashes together.
 This is a local/team sidecar alpha, not hosted SaaS.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
@@ -22484,7 +22626,11 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 DOCTOR_OUT="${AGENTK_SIDECAR_DOCTOR_OUT:-$ROOT/sidecar/.agentk/doctor}"
+RELEASE_MANIFEST="${AGENTK_PACKAGE_RELEASE_MANIFEST:-}"
 "$DIR/agentk-package-check" --json >/dev/null
+if [ -n "$RELEASE_MANIFEST" ]; then
+  exec "$AGENTK_BIN" sidecar-package-doctor --root "$ROOT" --out "$DOCTOR_OUT" --release-manifest "$RELEASE_MANIFEST" "$@"
+fi
 exec "$AGENTK_BIN" sidecar-package-doctor --root "$ROOT" --out "$DOCTOR_OUT" "$@"
 "#
     .to_string()
@@ -24379,6 +24525,8 @@ can_deny = ["*"]
             .expect("sidecar doctor launcher should read");
         assert!(doctor.contains("sidecar-package-doctor"));
         assert!(doctor.contains("AGENTK_SIDECAR_DOCTOR_OUT"));
+        assert!(doctor.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
+        assert!(doctor.contains("--release-manifest"));
         assert!(doctor.contains("doctor"));
         assert!(doctor.contains("agentk-package-check"));
         assert!(doctor.contains("\"$@\""));
@@ -24547,6 +24695,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("sidecar-doctor.json"));
         assert!(package_readme.contains("sidecar-doctor.md"));
+        assert!(package_readme.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
+        assert!(package_readme.contains("release-manifest binding"));
         assert!(package_readme.contains("local/team sidecar alpha"));
         assert!(package_readme.contains("not hosted SaaS"));
         let package_manifest =
@@ -25155,6 +25305,7 @@ can_deny = ["*"]
         let out = temp_path("agentk-sidecar-doctor-out", "dir");
         let archive = temp_path("agentk-sidecar-doctor-archive", "tar");
         let install = temp_path("agentk-sidecar-doctor-install", "dir");
+        let release_manifest = temp_path("agentk-sidecar-doctor-release-manifest", "json");
         init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
         package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
         let archive_report =
@@ -25170,9 +25321,19 @@ can_deny = ["*"]
         let ops_output_dir = install.join("sidecar/.agentk/operator-handoff");
         write_sidecar_package_ops_handoff(&install, &ops_output_dir)
             .expect("ops handoff should write");
+        write_sidecar_package_release_manifest(
+            &install,
+            &archive,
+            Some(archive_report.checksum.clone()),
+            None,
+            &release_manifest,
+            false,
+        )
+        .expect("release manifest should write");
         let doctor_output_dir = install.join("sidecar/.agentk/doctor");
-        let report = write_sidecar_package_doctor(&install, &doctor_output_dir)
-            .expect("doctor should write");
+        let report =
+            write_sidecar_package_doctor(&install, &doctor_output_dir, Some(&release_manifest))
+                .expect("doctor should write");
 
         assert!(report.passed);
         assert_eq!(report.output_dir, doctor_output_dir);
@@ -25180,12 +25341,16 @@ can_deny = ["*"]
         assert!(report.markdown_path.exists());
         assert!(report.local_team_sidecar_alpha);
         assert!(!report.hosted_saas);
+        assert_eq!(report.release_manifest_path, Some(release_manifest.clone()));
         assert!(report.remediation_steps.is_empty());
         assert!(report.checks.iter().any(|check| {
             check.name == "operator handoff artifacts" && check.status == ReadinessStatus::Pass
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "audit evidence retention" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "release manifest binding" && check.status == ReadinessStatus::Pass
         }));
 
         let json = fs::read_to_string(&report.json_path).expect("doctor JSON should read");
@@ -25194,6 +25359,10 @@ can_deny = ["*"]
         assert_eq!(value["passed"], serde_json::json!(true));
         assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
         assert_eq!(value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(
+            value["release_manifest_path"],
+            serde_json::json!(release_manifest.clone())
+        );
         assert_eq!(value["remediation_steps"], serde_json::json!([]));
 
         let markdown =
@@ -25201,11 +25370,45 @@ can_deny = ["*"]
         assert!(markdown.contains("AgentK Sidecar Doctor"));
         assert!(markdown.contains("No remediation required"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
+        assert!(markdown.contains("Release manifest"));
+
+        let stale_release_manifest =
+            temp_path("agentk-sidecar-doctor-stale-release-manifest", "json");
+        let mut stale_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&release_manifest).expect("release manifest should read"),
+        )
+        .expect("release manifest should parse");
+        stale_manifest["package_lock_sha256"] = serde_json::json!("0".repeat(64));
+        fs::write(
+            &stale_release_manifest,
+            serde_json::to_string_pretty(&stale_manifest).expect("stale manifest should encode"),
+        )
+        .expect("stale manifest should write");
+        let stale_doctor_output_dir = install.join("sidecar/.agentk/doctor-stale");
+        let stale_report = write_sidecar_package_doctor(
+            &install,
+            &stale_doctor_output_dir,
+            Some(&stale_release_manifest),
+        )
+        .expect("stale doctor should write");
+        assert!(!stale_report.passed);
+        assert!(stale_report.checks.iter().any(|check| {
+            check.name == "release manifest binding" && check.status == ReadinessStatus::Fail
+        }));
+        assert!(
+            stale_report
+                .remediation_steps
+                .iter()
+                .any(|step| step.contains("sidecar-package-release-manifest"))
+        );
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
         fs::remove_file(&archive).ok();
         fs::remove_file(archive_report.checksum).ok();
+        fs::remove_file(release_manifest).ok();
+        fs::remove_file(stale_release_manifest).ok();
+        fs::remove_dir_all(stale_doctor_output_dir).ok();
         fs::remove_dir_all(install).ok();
     }
 
