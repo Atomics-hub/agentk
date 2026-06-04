@@ -103,6 +103,10 @@ cargo run --locked -- release-finalize \
   --notes docs/v0.2-alpha-release-notes.md \
   --out dist/release-finalization.json \
   --json
+cargo run --locked -- release-publication-check \
+  --finalization dist/release-finalization.json \
+  --notes docs/v0.2-alpha-release-notes.md \
+  --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
@@ -195,6 +199,7 @@ cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json --json
 cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --json
 cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md --out dist/release-finalization.json --json
+cargo run --locked -- release-publication-check --finalization dist/release-finalization.json --notes docs/v0.2-alpha-release-notes.md --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- release-homebrew-tap-handoff-check --formula dist/homebrew/agentk.rb --tap-root ../homebrew-agentk --tap-formula-path Formula/agentk.rb --source-archive dist/agentk-vX.Y.Z.tar.gz --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz --sha256 <source-tarball-sha256> --version X.Y.Z --homepage https://github.com/OWNER/REPO --tap OWNER/agentk --json
@@ -248,10 +253,17 @@ cargo run --locked -- release-finalize \
   --strict \
   --force \
   --json
+cargo run --locked -- release-publication-check \
+  --finalization dist/release-finalization.json \
+  --notes docs/v0.2-alpha-release-notes.md \
+  --json
 ```
 
-This command writes local JSON evidence only. It does not create a tag, push a
-tag, upload assets, or publish a GitHub release.
+These commands write and verify local JSON evidence only. They do not create a
+tag, push a tag, upload assets, or publish a GitHub release. The publication
+check also verifies the strict finalization report, package archive hash,
+signed-tag evidence, production-ready evidence signer, and final release-note
+evidence fields before a maintainer opens the GitHub release page.
 
 ## GitHub Release
 
@@ -261,6 +273,8 @@ tag, upload assets, or publish a GitHub release.
 - [ ] Known limitations from `SECURITY.md` are linked.
 - [ ] Package archive SHA-256 and package release-manifest path are recorded.
 - [ ] The signed tag verification result is recorded in the release notes.
+- [ ] `release-publication-check` passes against the finalization report and
+      exact release notes that will be pasted into GitHub.
 - [ ] Any public key rotation manifest is linked and verified.
 - [ ] `dist/release-finalization.json` is attached or linked as the final
       local handoff report.

@@ -95,10 +95,16 @@ Implemented today:
   Homebrew formula from a source release URL plus SHA-256, then verify a local
   tap checkout has the exact reviewed formula and no unrelated dirty files
   without publishing a tap.
+- `release-publication-check`, which verifies a strict finalization handoff,
+  production-ready evidence signer, signed tag evidence, package archive
+  SHA-256, release-manifest path, and final release-note evidence fields before
+  a maintainer creates the GitHub release page without tagging, pushing,
+  uploading, or publishing.
 
 Still missing for a team product:
 
-- final signed release publication on a protected public branch;
+- final signed release publication on a protected public branch and actual
+  GitHub release asset upload by a maintainer;
 - production secret/key storage integrations beyond local env/file adapters and
   provider-specific reference-shape checks;
 - live external identity verification, hosted/ticket notification

@@ -10665,10 +10665,11 @@ fn alpha_release_final_blockers(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         alpha_release_item(
             "signed tag and release publication",
             ReadinessStatus::Warn,
-            "final release still needs signed tag verification and GitHub release evidence",
+            "final release still needs signed tag verification, release-publication-check, and GitHub release evidence",
             vec![
                 "git tag -s vX.Y.Z".to_string(),
                 "git verify-tag vX.Y.Z".to_string(),
+                "cargo run --locked -- release-publication-check".to_string(),
             ],
         ),
     ]
@@ -10726,6 +10727,23 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
             ],
             &[
                 "cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "release publication preflight",
+            "release-publication-check validates strict finalization, signed tag evidence, package archive hash, and final release notes before GitHub publication",
+            &[
+                ("src/main.rs", "ReleasePublicationCheck"),
+                ("README.md", "release-publication-check"),
+                ("docs/release-checklist.md", "release-publication-check"),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "release-publication-check",
+                ),
+            ],
+            &[
+                "cargo run --locked -- release-publication-check --finalization dist/release-finalization.json --notes docs/v0.2-alpha-release-notes.md",
             ],
         ),
         alpha_release_source_surface(

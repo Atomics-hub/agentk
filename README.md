@@ -827,6 +827,12 @@ evidence, active evidence-signing public key, worktree state, and optional
 signed tag verification. `release-finalize` does not create tags, push, or
 publish a GitHub release; after a maintainer creates a signed tag, rerun it with
 `--tag vX.Y.Z --strict` before publication.
+Then run
+`cargo run --locked -- release-publication-check --finalization dist/release-finalization.json --notes docs/v0.2-alpha-release-notes.md`
+to verify the strict finalization report, signed-tag evidence, production-ready
+evidence signer, package archive hash, release-manifest path, and final release
+notes evidence fields before creating the GitHub release page. This check is
+still offline; it does not tag, push, upload assets, or publish a release.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 
@@ -1088,6 +1094,8 @@ Implemented today:
 - local key generation and signed key-rotation manifests,
 - local Homebrew formula generation, formula/archive verification, and tap
   checkout handoff checks for a reviewed source release URL and SHA-256,
+- offline release-publication preflight for final GitHub release notes, signed
+  tag evidence, package archive hash, and finalization handoff consistency,
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer summaries, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,

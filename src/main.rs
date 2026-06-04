@@ -1011,6 +1011,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify final handoff evidence and notes before publishing a GitHub release.
+    ReleasePublicationCheck {
+        /// Final release handoff report written by release-finalize.
+        #[arg(long, default_value = "dist/release-finalization.json")]
+        finalization: PathBuf,
+        /// Optional release notes path. Defaults to the path recorded in finalization.
+        #[arg(long)]
+        notes: Option<PathBuf>,
+        /// Emit the full publication check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a Homebrew formula for a reviewed AgentK source release tarball.
     ReleaseHomebrewFormula {
         /// HTTPS source release tarball URL for the formula.
@@ -1539,6 +1551,11 @@ fn run() -> Result<(), AgentKError> {
         } => release_finalize(
             release, evidence, root, notes, tag, out, strict, force, json,
         ),
+        Command::ReleasePublicationCheck {
+            finalization,
+            notes,
+            json,
+        } => release_publication_check(&finalization, notes.as_deref(), json),
         Command::ReleaseHomebrewFormula {
             source_url,
             sha256,
@@ -8976,7 +8993,7 @@ struct ReleaseCandidateSmokeArtifact {
     sha256: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseEvidenceCheckReport {
     evidence: PathBuf,
     reported_root: PathBuf,
@@ -8991,7 +9008,7 @@ struct ReleaseEvidenceCheckReport {
     checks: Vec<ReleaseEvidenceCheckItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseEvidenceCheckItem {
     name: String,
     status: ReadinessStatus,
@@ -9009,7 +9026,7 @@ const RELEASE_FINALIZE_DRAFT_MARKERS: &[&str] = &[
     "<signer identity>",
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseFinalizeReport {
     schema_version: u32,
     release: String,
@@ -9032,14 +9049,14 @@ struct ReleaseFinalizeReport {
     evidence_check: ReleaseEvidenceCheckReport,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseFinalizeArtifact {
     path: PathBuf,
     bytes: u64,
     sha256: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseFinalizeSigner {
     algorithm: String,
     source: String,
@@ -9048,15 +9065,36 @@ struct ReleaseFinalizeSigner {
     warning: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseFinalizeTag {
     tag: Option<String>,
     verified: bool,
     detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseFinalizeCheckItem {
+    name: String,
+    status: ReadinessStatus,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleasePublicationCheckReport {
+    finalization: PathBuf,
+    notes: PathBuf,
+    release: String,
+    tag: Option<String>,
+    package_archive: PathBuf,
+    package_archive_sha256: String,
+    package_release_manifest: PathBuf,
+    publish_state: String,
+    passed: bool,
+    checks: Vec<ReleasePublicationCheckItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleasePublicationCheckItem {
     name: String,
     status: ReadinessStatus,
     detail: String,
@@ -10055,6 +10093,44 @@ fn release_finalize(
     Ok(())
 }
 
+fn release_publication_check(
+    finalization: &Path,
+    notes: Option<&Path>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_release_publication_check(finalization, notes)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK release publication check");
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        println!("release   {}", report.release);
+        if let Some(tag) = &report.tag {
+            println!("tag       {tag}");
+        }
+        println!("finalize  {}", report.finalization.display());
+        println!("notes     {}", report.notes.display());
+        println!("archive   {}", report.package_archive.display());
+        println!("sha256    {}", report.package_archive_sha256);
+        println!();
+        for check in &report.checks {
+            println!("[{}] {:<30} {}", check.status, check.name, check.detail);
+        }
+    }
+
+    if !report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release publication check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 struct ReleaseFinalizeOptions {
     release: String,
     evidence: PathBuf,
@@ -10313,6 +10389,237 @@ where
     Ok(report)
 }
 
+fn run_release_publication_check(
+    finalization_path: &Path,
+    notes_override: Option<&Path>,
+) -> Result<ReleasePublicationCheckReport, AgentKError> {
+    let finalization_content = fs::read_to_string(finalization_path)?;
+    let finalization: ReleaseFinalizeReport = serde_json::from_str(&finalization_content)?;
+    let notes_path = notes_override
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            finalization
+                .release_notes
+                .as_ref()
+                .map(|artifact| artifact.path.clone())
+        })
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "release publication check requires release notes from finalization or --notes"
+                    .to_string(),
+            )
+        })?;
+    let notes_content = fs::read_to_string(&notes_path).ok();
+    let notes_values = notes_content
+        .as_deref()
+        .map(release_publication_final_evidence_values)
+        .unwrap_or_default();
+    let notes_draft_markers = notes_content
+        .as_deref()
+        .map(release_finalize_draft_markers)
+        .unwrap_or_default();
+    let package_archive_display = finalization.package_archive.display().to_string();
+    let package_release_manifest_display =
+        finalization.package_release_manifest.display().to_string();
+
+    let mut checks = Vec::new();
+    checks.push(release_publication_check_item(
+        "finalization schema",
+        if finalization.schema_version == RELEASE_FINALIZE_SCHEMA_VERSION {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        format!("schema_version {}", finalization.schema_version),
+    ));
+    checks.push(release_publication_check_item(
+        "finalization ready",
+        if finalization.ready {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if finalization.ready {
+            "release-finalize reported ready"
+        } else {
+            "release-finalize reported blocked"
+        },
+    ));
+    checks.push(release_publication_check_item(
+        "strict finalization",
+        if finalization.strict {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if finalization.strict {
+            "release-finalize was run with --strict"
+        } else {
+            "rerun release-finalize with --strict before publication"
+        },
+    ));
+    checks.push(release_publication_check_item(
+        "publish state",
+        if finalization.publish_state == "not-published" {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        format!("publish_state {}", finalization.publish_state),
+    ));
+    checks.push(release_publication_check_item(
+        "evidence check",
+        if finalization.evidence_check.passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        format!(
+            "{}/{} artifacts verified, {}/{} smoke steps passed",
+            finalization.evidence_check.artifacts_verified,
+            finalization.evidence_check.artifacts_total,
+            finalization.evidence_check.steps_passed,
+            finalization.evidence_check.steps_total
+        ),
+    ));
+    checks.push(release_publication_notes_artifact_check(
+        &notes_path,
+        finalization.release_notes.as_ref(),
+    ));
+    checks.push(release_publication_check_item(
+        "release notes placeholders",
+        if notes_draft_markers.is_empty() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if notes_draft_markers.is_empty() {
+            "release notes contain no final-evidence placeholders".to_string()
+        } else {
+            format!(
+                "release notes still contain draft markers: {}",
+                notes_draft_markers.join(", ")
+            )
+        },
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "Release commit",
+        finalization.commit.as_deref(),
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "Package archive",
+        Some(&package_archive_display),
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "Package archive SHA-256",
+        Some(&finalization.package_archive_sha256),
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "Package release manifest",
+        Some(&package_release_manifest_display),
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "AgentK evidence signing public key",
+        Some(&finalization.signer.public_key),
+    ));
+    checks.push(release_publication_note_match_check(
+        &notes_values,
+        "Signed tag",
+        finalization.tag.tag.as_deref(),
+    ));
+    checks.push(release_publication_required_note_check(
+        &notes_values,
+        "Strict release-audit result",
+        None,
+    ));
+    checks.push(release_publication_required_note_check(
+        &notes_values,
+        "Signed tag verification",
+        finalization.tag.tag.as_deref(),
+    ));
+    checks.push(release_publication_required_note_check(
+        &notes_values,
+        "Git tag signer",
+        None,
+    ));
+    checks.push(release_publication_package_archive_check(
+        &finalization.package_archive,
+        &finalization.package_archive_sha256,
+    ));
+    checks.push(release_publication_check_item(
+        "package release manifest",
+        if finalization.package_release_manifest.is_file() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if finalization.package_release_manifest.is_file() {
+            format!("{} exists", finalization.package_release_manifest.display())
+        } else {
+            format!(
+                "{} is missing or not a file",
+                finalization.package_release_manifest.display()
+            )
+        },
+    ));
+    checks.push(release_publication_check_item(
+        "signing key",
+        if finalization.signer.production_ready {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        finalization
+            .signer
+            .warning
+            .clone()
+            .unwrap_or_else(|| format!("{} signer active", finalization.signer.source)),
+    ));
+    checks.push(release_publication_check_item(
+        "signed tag",
+        if finalization.tag.tag.is_some() && finalization.tag.verified {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        finalization.tag.detail.clone(),
+    ));
+    checks.push(release_publication_check_item(
+        "git worktree",
+        if finalization.worktree_clean {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if finalization.worktree_clean {
+            "release-finalize recorded a clean worktree".to_string()
+        } else {
+            "release-finalize recorded a dirty worktree".to_string()
+        },
+    ));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+    Ok(ReleasePublicationCheckReport {
+        finalization: finalization_path.to_path_buf(),
+        notes: notes_path,
+        release: finalization.release,
+        tag: finalization.tag.tag,
+        package_archive: finalization.package_archive,
+        package_archive_sha256: finalization.package_archive_sha256,
+        package_release_manifest: finalization.package_release_manifest,
+        publish_state: finalization.publish_state,
+        passed,
+        checks,
+    })
+}
+
 fn release_finalize_git(args: &[&str]) -> Result<ReleaseFinalizeGitOutput, AgentKError> {
     let output = ProcessCommand::new("git").args(args).output()?;
     Ok(ReleaseFinalizeGitOutput {
@@ -10348,6 +10655,179 @@ fn release_finalize_draft_markers(content: &str) -> Vec<String> {
         .filter(|marker| content.contains(marker))
         .map(str::to_string)
         .collect()
+}
+
+fn release_publication_final_evidence_values(content: &str) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_section = trimmed == "## Final Release Evidence";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(entry) = trimmed.strip_prefix("- ") else {
+            continue;
+        };
+        let Some((label, raw_value)) = entry.split_once(':') else {
+            continue;
+        };
+        let value = raw_value.trim();
+        let value = value
+            .strip_prefix('`')
+            .and_then(|inner| inner.strip_suffix('`'))
+            .unwrap_or(value)
+            .trim()
+            .to_string();
+        values.insert(label.trim().to_string(), value);
+    }
+    values
+}
+
+fn release_publication_notes_artifact_check(
+    notes_path: &Path,
+    finalized: Option<&ReleaseFinalizeArtifact>,
+) -> ReleasePublicationCheckItem {
+    match (release_candidate_smoke_file_sha256(notes_path), finalized) {
+        (Ok(current_sha256), Some(finalized)) if current_sha256 == finalized.sha256 => {
+            release_publication_check_item(
+                "release notes artifact",
+                ReadinessStatus::Pass,
+                format!("{} matches finalization sha256", notes_path.display()),
+            )
+        }
+        (Ok(current_sha256), Some(finalized)) => release_publication_check_item(
+            "release notes artifact",
+            ReadinessStatus::Fail,
+            format!(
+                "{} sha256 {} does not match finalized {}",
+                notes_path.display(),
+                current_sha256,
+                finalized.sha256
+            ),
+        ),
+        (Ok(_), None) => release_publication_check_item(
+            "release notes artifact",
+            ReadinessStatus::Fail,
+            "finalization report did not record release notes".to_string(),
+        ),
+        (Err(error), _) => release_publication_check_item(
+            "release notes artifact",
+            ReadinessStatus::Fail,
+            format!("{} could not be hashed: {error}", notes_path.display()),
+        ),
+    }
+}
+
+fn release_publication_note_match_check(
+    notes_values: &BTreeMap<String, String>,
+    label: &str,
+    expected: Option<&str>,
+) -> ReleasePublicationCheckItem {
+    let Some(expected) = expected else {
+        return release_publication_check_item(
+            format!("notes {label}"),
+            ReadinessStatus::Fail,
+            format!("finalization report did not record {label}"),
+        );
+    };
+    match notes_values.get(label) {
+        Some(actual) if actual == expected => release_publication_check_item(
+            format!("notes {label}"),
+            ReadinessStatus::Pass,
+            "release notes match finalization evidence".to_string(),
+        ),
+        Some(actual) => release_publication_check_item(
+            format!("notes {label}"),
+            ReadinessStatus::Fail,
+            format!("expected `{expected}`, found `{actual}`"),
+        ),
+        None => release_publication_check_item(
+            format!("notes {label}"),
+            ReadinessStatus::Fail,
+            "missing from Final Release Evidence".to_string(),
+        ),
+    }
+}
+
+fn release_publication_required_note_check(
+    notes_values: &BTreeMap<String, String>,
+    label: &str,
+    must_contain: Option<&str>,
+) -> ReleasePublicationCheckItem {
+    let (status, detail) = match notes_values.get(label) {
+        Some(value)
+            if !value.is_empty()
+                && !RELEASE_FINALIZE_DRAFT_MARKERS
+                    .iter()
+                    .any(|marker| value.contains(marker))
+                && must_contain.is_none_or(|needle| value.contains(needle)) =>
+        {
+            (
+                ReadinessStatus::Pass,
+                "release notes contain reviewed final evidence".to_string(),
+            )
+        }
+        Some(value) if must_contain.is_some_and(|needle| !value.contains(needle)) => (
+            ReadinessStatus::Fail,
+            format!(
+                "release notes value `{value}` does not mention `{}`",
+                must_contain.unwrap_or_default()
+            ),
+        ),
+        Some(value) => (
+            ReadinessStatus::Fail,
+            format!("release notes value `{value}` is still a placeholder"),
+        ),
+        None => (
+            ReadinessStatus::Fail,
+            "missing from Final Release Evidence".to_string(),
+        ),
+    };
+    release_publication_check_item(format!("notes {label}"), status, detail)
+}
+
+fn release_publication_package_archive_check(
+    package_archive: &Path,
+    expected_sha256: &str,
+) -> ReleasePublicationCheckItem {
+    match release_candidate_smoke_file_sha256(package_archive) {
+        Ok(actual_sha256) if actual_sha256 == expected_sha256 => release_publication_check_item(
+            "package archive artifact",
+            ReadinessStatus::Pass,
+            format!("{} matches finalized SHA-256", package_archive.display()),
+        ),
+        Ok(actual_sha256) => release_publication_check_item(
+            "package archive artifact",
+            ReadinessStatus::Fail,
+            format!(
+                "{} sha256 {} does not match finalized {}",
+                package_archive.display(),
+                actual_sha256,
+                expected_sha256
+            ),
+        ),
+        Err(error) => release_publication_check_item(
+            "package archive artifact",
+            ReadinessStatus::Fail,
+            format!("{} could not be hashed: {error}", package_archive.display()),
+        ),
+    }
+}
+
+fn release_publication_check_item(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReleasePublicationCheckItem {
+    ReleasePublicationCheckItem {
+        name: name.into(),
+        status,
+        detail: detail.into(),
+    }
 }
 
 fn release_finalize_valid_commit(value: &str) -> bool {
@@ -15425,6 +15905,34 @@ done
         };
         assert!(json);
 
+        let release_publication_check = Cli::try_parse_from([
+            "agentk",
+            "release-publication-check",
+            "--finalization",
+            "dist/release-finalization.json",
+            "--notes",
+            "docs/v0.2-alpha-release-notes.md",
+            "--json",
+        ])
+        .expect("release publication check should parse");
+        let Some(Command::ReleasePublicationCheck {
+            finalization,
+            notes,
+            json,
+        }) = release_publication_check.command
+        else {
+            panic!("expected release-publication-check command");
+        };
+        assert_eq!(
+            finalization,
+            PathBuf::from("dist/release-finalization.json")
+        );
+        assert_eq!(
+            notes,
+            Some(PathBuf::from("docs/v0.2-alpha-release-notes.md"))
+        );
+        assert!(json);
+
         let release_homebrew_formula = Cli::try_parse_from([
             "agentk",
             "release-homebrew-formula",
@@ -16161,6 +16669,174 @@ done
         assert!(output.contains("\"publish_state\": \"not-published\""));
         assert!(output.contains("\"package_archive_sha256\""));
         assert!(!output.contains("private"));
+
+        fs::remove_dir_all(root).ok();
+        let _ = fs::remove_file(evidence);
+        let _ = fs::remove_file(notes);
+        let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn release_publication_check_accepts_matching_strict_finalization_and_notes() {
+        let root = test_temp_path("agentk-release-publication-root", "dir");
+        let evidence = test_temp_path("agentk-release-publication-evidence", "json");
+        let notes = test_temp_path("agentk-release-publication-notes", "md");
+        let out = test_temp_path("agentk-release-publication", "json");
+        let report = synthetic_release_smoke_report(&root, &evidence);
+        write_release_candidate_smoke_evidence(&report, &evidence, false)
+            .expect("evidence should write");
+        fs::write(
+            &notes,
+            format!(
+                "# AgentK v0.2 Alpha Release Notes\n\n## Final Release Evidence\n\n\
+                 - Release commit: `3333333333333333333333333333333333333333`\n\
+                 - Package archive: `{}`\n\
+                 - Package archive SHA-256: `{}`\n\
+                 - Package release manifest: `{}`\n\
+                 - Strict release-audit result: `AGENTK_REQUIRE_SIGNING_KEY=1 cargo run --locked -- release-audit --strict passed`\n\
+                 - AgentK evidence signing public key: `abababababababababababababababababababababababababababababababab`\n\
+                 - Signed tag: `v0.2.0-alpha.2`\n\
+                 - Signed tag verification: `git verify-tag v0.2.0-alpha.2 passed`\n\
+                 - Git tag signer: `AgentK Release Maintainer`\n",
+                report.package_archive.display(),
+                report.package_archive_sha256,
+                report.package_release_manifest.display()
+            ),
+        )
+        .expect("notes should write");
+
+        run_release_finalize_with(
+            ReleaseFinalizeOptions {
+                release: "v0.2-alpha".to_string(),
+                evidence: evidence.clone(),
+                root: None,
+                notes: notes.clone(),
+                tag: Some("v0.2.0-alpha.2".to_string()),
+                out: out.clone(),
+                strict: true,
+                force: false,
+            },
+            release_finalize_test_signer(agentk::SigningKeySource::File, true),
+            |args| match args {
+                ["rev-parse", "HEAD"] => Ok(release_finalize_test_git_output(
+                    true,
+                    "3333333333333333333333333333333333333333",
+                    "",
+                )),
+                ["status", "--short"] => Ok(release_finalize_test_git_output(true, "", "")),
+                ["verify-tag", "v0.2.0-alpha.2"] => Ok(release_finalize_test_git_output(
+                    true,
+                    "",
+                    "gpg: Good signature from AgentK Release Maintainer",
+                )),
+                _ => panic!("unexpected git args: {args:?}"),
+            },
+        )
+        .expect("finalization should run");
+
+        let publication =
+            run_release_publication_check(&out, None).expect("publication check should run");
+
+        assert!(publication.passed);
+        assert_eq!(publication.tag.as_deref(), Some("v0.2.0-alpha.2"));
+        assert!(
+            publication
+                .checks
+                .iter()
+                .all(|check| check.status == ReadinessStatus::Pass)
+        );
+
+        fs::remove_dir_all(root).ok();
+        let _ = fs::remove_file(evidence);
+        let _ = fs::remove_file(notes);
+        let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn release_publication_check_blocks_stale_release_notes_after_finalization() {
+        let root = test_temp_path("agentk-release-publication-stale-root", "dir");
+        let evidence = test_temp_path("agentk-release-publication-stale-evidence", "json");
+        let notes = test_temp_path("agentk-release-publication-stale-notes", "md");
+        let out = test_temp_path("agentk-release-publication-stale", "json");
+        let report = synthetic_release_smoke_report(&root, &evidence);
+        write_release_candidate_smoke_evidence(&report, &evidence, false)
+            .expect("evidence should write");
+        fs::write(
+            &notes,
+            format!(
+                "# AgentK v0.2 Alpha Release Notes\n\n## Final Release Evidence\n\n\
+                 - Release commit: `4444444444444444444444444444444444444444`\n\
+                 - Package archive: `{}`\n\
+                 - Package archive SHA-256: `{}`\n\
+                 - Package release manifest: `{}`\n\
+                 - Strict release-audit result: `passed`\n\
+                 - AgentK evidence signing public key: `abababababababababababababababababababababababababababababababab`\n\
+                 - Signed tag: `v0.2.0-alpha.3`\n\
+                 - Signed tag verification: `git verify-tag v0.2.0-alpha.3 passed`\n\
+                 - Git tag signer: `AgentK Release Maintainer`\n",
+                report.package_archive.display(),
+                report.package_archive_sha256,
+                report.package_release_manifest.display()
+            ),
+        )
+        .expect("notes should write");
+
+        run_release_finalize_with(
+            ReleaseFinalizeOptions {
+                release: "v0.2-alpha".to_string(),
+                evidence: evidence.clone(),
+                root: None,
+                notes: notes.clone(),
+                tag: Some("v0.2.0-alpha.3".to_string()),
+                out: out.clone(),
+                strict: true,
+                force: false,
+            },
+            release_finalize_test_signer(agentk::SigningKeySource::File, true),
+            |args| match args {
+                ["rev-parse", "HEAD"] => Ok(release_finalize_test_git_output(
+                    true,
+                    "4444444444444444444444444444444444444444",
+                    "",
+                )),
+                ["status", "--short"] => Ok(release_finalize_test_git_output(true, "", "")),
+                ["verify-tag", "v0.2.0-alpha.3"] => Ok(release_finalize_test_git_output(
+                    true,
+                    "",
+                    "gpg: Good signature from AgentK Release Maintainer",
+                )),
+                _ => panic!("unexpected git args: {args:?}"),
+            },
+        )
+        .expect("finalization should run");
+        fs::write(
+            &notes,
+            "# AgentK v0.2 Alpha Release Notes\n\n## Final Release Evidence\n\n\
+             - Release commit: `4444444444444444444444444444444444444444`\n\
+             - Package archive SHA-256: `stale`\n\
+             - Signed tag: `v0.2.0-alpha.3`\n\
+             - Signed tag verification: `<git verify-tag result>`\n",
+        )
+        .expect("notes should be tampered");
+
+        let publication =
+            run_release_publication_check(&out, None).expect("publication check should run");
+
+        assert!(!publication.passed);
+        for name in [
+            "release notes artifact",
+            "release notes placeholders",
+            "notes Package archive SHA-256",
+            "notes Signed tag verification",
+        ] {
+            assert!(
+                publication
+                    .checks
+                    .iter()
+                    .any(|check| check.name == name && check.status == ReadinessStatus::Fail),
+                "{name} should fail for stale notes"
+            );
+        }
 
         fs::remove_dir_all(root).ok();
         let _ = fs::remove_file(evidence);
