@@ -326,8 +326,9 @@ These commands write and verify local JSON evidence only. They do not create a
 tag, push a tag, upload assets, or publish a GitHub release. The publication
 check also verifies the strict finalization report, package archive hash,
 signed-tag evidence, production-ready evidence signer, final release-note
-evidence fields, and owner-scoped publication steps before a maintainer opens
-the GitHub release page.
+evidence fields, a hashed release asset manifest, and owner-scoped publication
+steps before a maintainer opens the GitHub release page.
+The owner-scoped publication steps must stay explicit in the publication preflight.
 
 ## GitHub Release
 
@@ -339,6 +340,9 @@ the GitHub release page.
 - [ ] The signed tag verification result is recorded in the release notes.
 - [ ] `release-publication-check` passes against the finalization report and
       exact release notes that will be pasted into GitHub.
+- [ ] The `release-publication-check` release asset manifest lists the sidecar
+      archive, package release manifest, finalization report, and exact release
+      notes with SHA-256 hashes.
 - [ ] Any public key rotation manifest is linked and verified.
 - [ ] `dist/release-finalization.json` is attached or linked as the final
       local handoff report.
