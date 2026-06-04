@@ -117,6 +117,8 @@ const SIDECAR_PACKAGE_DEPLOY_TEMPLATES: &[&str] = &[
     "deploy/launchd/com.agentk.dashboard.plist",
     "deploy/docker/Dockerfile",
     "deploy/docker/compose.yml",
+    "deploy/proxy/Caddyfile",
+    "deploy/proxy/nginx.conf",
     "deploy/README.md",
 ];
 const SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES: &[&str] = &[
@@ -18830,6 +18832,8 @@ pub fn package_sidecar_bundle(
         )?,
         write_packaged_sidecar_file(out, "deploy/docker/Dockerfile", &sidecar_dockerfile())?,
         write_packaged_sidecar_file(out, "deploy/docker/compose.yml", &sidecar_docker_compose())?,
+        write_packaged_sidecar_file(out, "deploy/proxy/Caddyfile", &sidecar_caddyfile())?,
+        write_packaged_sidecar_file(out, "deploy/proxy/nginx.conf", &sidecar_nginx_conf())?,
         write_packaged_sidecar_file(
             out,
             "deploy/env/sidecar-http.env.example",
@@ -21206,12 +21210,41 @@ fn check_sidecar_package_deploy_templates(root: &Path) -> ReadinessCheck {
             ][..],
         ),
         (
+            "deploy/proxy/Caddyfile",
+            &[
+                ("agentk.example.com", 1),
+                ("Strict-Transport-Security", 1),
+                ("reverse_proxy @mcp 127.0.0.1:9798", 1),
+                ("reverse_proxy @dashboard 127.0.0.1:8765", 1),
+                ("header_up X-Forwarded-For", 2),
+                ("header_up -Cookie", 2),
+                ("header_up -Proxy-Authorization", 2),
+                ("header_down -Set-Cookie", 2),
+            ][..],
+        ),
+        (
+            "deploy/proxy/nginx.conf",
+            &[
+                ("listen 443 ssl http2", 1),
+                ("server_name agentk.example.com", 2),
+                ("Strict-Transport-Security", 1),
+                ("client_max_body_size 64k", 1),
+                ("proxy_pass http://127.0.0.1:9798", 1),
+                ("proxy_pass http://127.0.0.1:8765", 2),
+                ("proxy_set_header X-Forwarded-For", 1),
+                ("proxy_set_header Cookie \"\"", 1),
+                ("proxy_hide_header Set-Cookie", 1),
+            ][..],
+        ),
+        (
             "deploy/README.md",
             &[
                 ("agentk-package-check --json", 1),
                 ("no-new-privileges", 1),
                 ("read-only container filesystem", 1),
                 ("loopback", 1),
+                ("deploy/proxy/Caddyfile", 1),
+                ("deploy/proxy/nginx.conf", 1),
             ][..],
         ),
     ];
@@ -25439,8 +25472,8 @@ install receipt still match the handoff.
   store, and notification outbox. This is not hosted SaaS.
 - `storage/postgres-schema.sql`: durable audit and approval store schema
   contract.
-- `deploy/`: systemd, launchd, and Docker Compose templates for running the
-  packaged MCP HTTP sidecar gateway, dashboard, and store workflow.
+- `deploy/`: systemd, launchd, Docker Compose, and reverse-proxy templates for
+  running the packaged MCP HTTP sidecar gateway, dashboard, and store workflow.
 
 ## Commands
 
@@ -25948,12 +25981,13 @@ lock, and install receipt hashes.
 
 ## 7. Deploy Locally
 
-Start from `deploy/README.md`, `deploy/systemd/`, `deploy/launchd/`, or
-`deploy/docker/`. Replace `CHANGE_ME` values in service-manager or CI secret
-storage, not in the packaged examples. Keep MCP HTTP and dashboard binds
-loopback-only unless a reviewed reverse proxy and explicit non-local bind
-settings are in place. Attach `sidecar/.agentk/deploy-handoff/` to deployment
-tickets so reviewers can compare hashed service and env-template artifacts.
+Start from `deploy/README.md`, `deploy/systemd/`, `deploy/launchd/`,
+`deploy/docker/`, or `deploy/proxy/`. Replace `CHANGE_ME` values in
+service-manager or CI secret storage, not in the packaged examples. Keep MCP
+HTTP and dashboard binds loopback-only unless a reviewed reverse proxy and
+explicit non-local bind settings are in place. Attach
+`sidecar/.agentk/deploy-handoff/` to deployment tickets so reviewers can
+compare hashed service, reverse-proxy, and env-template artifacts.
 "#
     )
 }
@@ -26893,6 +26927,98 @@ fn sidecar_docker_compose() -> String {
     .to_string()
 }
 
+fn sidecar_caddyfile() -> String {
+    r#"# Reviewed reverse proxy starting point for AgentK local/team sidecar alpha.
+# Replace agentk.example.com, email, and TLS issuer settings in deployment review.
+{
+  email agentk-admin@example.com
+}
+
+agentk.example.com {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    X-Frame-Options "DENY"
+  }
+
+  @mcp path /mcp
+  reverse_proxy @mcp 127.0.0.1:9798 {
+    header_up Host {host}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-For {remote_host}
+    header_up -Cookie
+    header_up -Proxy-Authorization
+    header_up -X-HTTP-Method-Override
+    header_down -Set-Cookie
+  }
+
+  @dashboard path / /api/* /healthz /readyz /metrics
+  reverse_proxy @dashboard 127.0.0.1:8765 {
+    header_up Host {host}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-For {remote_host}
+    header_up -Cookie
+    header_up -Proxy-Authorization
+    header_up -X-HTTP-Method-Override
+    header_down -Set-Cookie
+  }
+}
+"#
+    .to_string()
+}
+
+fn sidecar_nginx_conf() -> String {
+    r#"# Reviewed reverse proxy starting point for AgentK local/team sidecar alpha.
+# Replace server_name and TLS certificate paths in deployment review.
+server {
+    listen 443 ssl http2;
+    server_name agentk.example.com;
+
+    ssl_certificate /etc/ssl/agentk/fullchain.pem;
+    ssl_certificate_key /etc/ssl/agentk/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    client_max_body_size 64k;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Cookie "";
+    proxy_set_header Proxy-Authorization "";
+    proxy_set_header X-HTTP-Method-Override "";
+    proxy_hide_header Set-Cookie;
+
+    location = /mcp {
+        proxy_pass http://127.0.0.1:9798;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8765;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+    }
+}
+
+server {
+    listen 80;
+    server_name agentk.example.com;
+    return 308 https://$host$request_uri;
+}
+"#
+    .to_string()
+}
+
 fn sidecar_http_env_example() -> String {
     let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
     format!(
@@ -27002,6 +27128,13 @@ non-login `agentk` user that owns the copied package. The Docker Compose
 template drops Linux capabilities, sets no-new-privileges, keeps a read-only container filesystem,
 uses `/tmp` as tmpfs, and keeps writable AgentK state in the mounted
 `sidecar/.agentk` directory.
+`deploy/proxy/Caddyfile` and `deploy/proxy/nginx.conf` are reviewed
+reverse-proxy starting points for teams that need TLS, external auth, or
+network policy in front of the loopback AgentK HTTP sidecar and dashboard.
+They route `/mcp` to `127.0.0.1:9798`, route dashboard/API/probe paths to
+`127.0.0.1:8765`, set baseline security headers, strip ambient cookies and
+proxy auth headers, and pass clean forwarded metadata only from the reviewed
+proxy boundary.
 
 The sidecar HTTP service stays on `127.0.0.1:9798` by default. Set
 `AGENTK_MCP_HTTP_TOKEN` before enabling non-local binds, and keep TLS, external
@@ -27048,6 +27181,15 @@ before starting.
 ```sh
 docker compose -f deploy/docker/compose.yml up --build
 ```
+
+## Reverse Proxy
+
+Review `deploy/proxy/Caddyfile` or `deploy/proxy/nginx.conf`, replace
+`agentk.example.com`, configure TLS certificates or issuer settings, and keep
+AgentK services on loopback upstreams unless a separate network review approves
+non-local binds. When a proxy strips untrusted inbound forwarded headers before
+adding clean metadata, set `AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1` for the
+sidecar HTTP service.
 
 Use `bin/agentk-store-sync` to refresh the live local team store. Use
 `bin/agentk-store-slack`, `bin/agentk-store-slack-send --dry-run`,
@@ -28233,7 +28375,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 51);
+        assert_eq!(report.files.len(), 53);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -28290,6 +28432,8 @@ can_deny = ["*"]
         );
         assert!(out.join("deploy/docker/Dockerfile").exists());
         assert!(out.join("deploy/docker/compose.yml").exists());
+        assert!(out.join("deploy/proxy/Caddyfile").exists());
+        assert!(out.join("deploy/proxy/nginx.conf").exists());
         assert!(out.join("deploy/env/sidecar-http.env.example").exists());
         assert!(out.join("deploy/env/dashboard.env.example").exists());
         assert!(out.join("deploy/env/store-postgres.env.example").exists());
@@ -28708,6 +28852,20 @@ can_deny = ["*"]
                 .expect("deploy templates should be an array")
                 .iter()
                 .any(|template| template == "deploy/launchd/com.agentk.sidecar-http.plist")
+        );
+        assert!(
+            package_manifest_json["deploy_templates"]
+                .as_array()
+                .expect("deploy templates should be an array")
+                .iter()
+                .any(|template| template == "deploy/proxy/Caddyfile")
+        );
+        assert!(
+            package_manifest_json["deploy_templates"]
+                .as_array()
+                .expect("deploy templates should be an array")
+                .iter()
+                .any(|template| template == "deploy/proxy/nginx.conf")
         );
         assert!(
             package_manifest_json["deploy_env_examples"]
@@ -29169,6 +29327,24 @@ can_deny = ["*"]
         assert!(compose.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND"));
         assert!(compose.contains("AGENTK_DASHBOARD_ADMIN_TOKEN:?"));
         assert!(compose.contains("127.0.0.1:8765:8765"));
+        let caddyfile =
+            fs::read_to_string(out.join("deploy/proxy/Caddyfile")).expect("Caddyfile should read");
+        assert!(caddyfile.contains("agentk.example.com"));
+        assert!(caddyfile.contains("Strict-Transport-Security"));
+        assert!(caddyfile.contains("reverse_proxy @mcp 127.0.0.1:9798"));
+        assert!(caddyfile.contains("reverse_proxy @dashboard 127.0.0.1:8765"));
+        assert!(caddyfile.contains("header_up -Cookie"));
+        assert!(caddyfile.contains("header_up -Proxy-Authorization"));
+        assert!(caddyfile.contains("header_down -Set-Cookie"));
+        let nginx =
+            fs::read_to_string(out.join("deploy/proxy/nginx.conf")).expect("nginx should read");
+        assert!(nginx.contains("listen 443 ssl http2"));
+        assert!(nginx.contains("server_name agentk.example.com"));
+        assert!(nginx.contains("client_max_body_size 64k"));
+        assert!(nginx.contains("proxy_pass http://127.0.0.1:9798"));
+        assert!(nginx.contains("proxy_pass http://127.0.0.1:8765"));
+        assert!(nginx.contains("proxy_set_header Cookie \"\""));
+        assert!(nginx.contains("proxy_hide_header Set-Cookie"));
         let http_token_key = ["AGENTK_MCP_HTTP", "_TOKEN"].concat();
         let dashboard_admin_token_key = ["AGENTK_DASHBOARD_ADMIN", "_TOKEN"].concat();
         let sidecar_env = fs::read_to_string(out.join("deploy/env/sidecar-http.env.example"))
@@ -29203,6 +29379,10 @@ can_deny = ["*"]
         assert!(deploy_readme.contains("non-login `agentk` user"));
         assert!(deploy_readme.contains("read-only container filesystem"));
         assert!(deploy_readme.contains("Docker can route published ports"));
+        assert!(deploy_readme.contains("deploy/proxy/Caddyfile"));
+        assert!(deploy_readme.contains("deploy/proxy/nginx.conf"));
+        assert!(deploy_readme.contains("Reverse Proxy"));
+        assert!(deploy_readme.contains("AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1"));
         assert!(!out.join("sidecar/.agentk").exists());
         let package_check_report =
             check_sidecar_package(&out).expect("package check should run on generated package");

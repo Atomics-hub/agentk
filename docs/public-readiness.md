@@ -42,9 +42,9 @@ keep the same checks in CI and protect the default branch.
       archive, install receipt, verified release manifest, package-check JSON,
       HTTP/team handoff check JSON, onboarding guide, demo trace, dashboard,
       durable store, operator handoff, deploy handoff, notification payload,
-      systemd/launchd services, Dockerfile/Compose templates, deploy README,
-      dummy env examples, and a JSON evidence report with SHA-256/byte counts
-      for required handoff files.
+      systemd/launchd services, Dockerfile/Compose templates, Caddy/nginx
+      reverse-proxy templates, deploy README, dummy env examples, and a JSON
+      evidence report with SHA-256/byte counts for required handoff files.
 - [ ] `cargo run --locked -- release-evidence-check --evidence
       dist/release-candidate-smoke.json --root dist/release-candidate-smoke
       --json` passes before the evidence report is attached to a release or
