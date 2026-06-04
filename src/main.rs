@@ -23,7 +23,8 @@ use agentk::{
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
     write_sidecar_package_demo_handoff, write_sidecar_package_deploy_handoff,
     write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
-    write_sidecar_package_release_manifest, write_sidecar_package_support_bundle,
+    write_sidecar_package_quickstart, write_sidecar_package_release_manifest,
+    write_sidecar_package_support_bundle,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -819,6 +820,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the packaged first-run quickstart and write one onboarding report.
+    SidecarPackageQuickstart {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for quickstart.json and quickstart.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Optional release handoff manifest produced by sidecar-package-release-manifest.
+        #[arg(long)]
+        release_manifest: Option<PathBuf>,
+        /// Emit the quickstart report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1542,6 +1558,12 @@ fn run() -> Result<(), AgentKError> {
         Command::SidecarPackageDemoHandoff { root, out, json } => {
             sidecar_package_demo_handoff(root, out, json)
         }
+        Command::SidecarPackageQuickstart {
+            root,
+            out,
+            release_manifest,
+            json,
+        } => sidecar_package_quickstart(root, out, release_manifest, json),
         Command::SidecarPackageArchiveCheck {
             archive,
             checksum,
@@ -9035,6 +9057,56 @@ fn sidecar_package_demo_handoff(
     Ok(())
 }
 
+fn sidecar_package_quickstart(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    release_manifest: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir = out.unwrap_or_else(|| root.join("sidecar").join(".agentk").join("quickstart"));
+    let report = write_sidecar_package_quickstart(&root, &output_dir, release_manifest.as_deref())?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar quickstart");
+        println!("root      {}", report.root.display());
+        println!("out       {}", report.output_dir.display());
+        println!("json      {}", report.json_path.display());
+        println!("markdown  {}", report.markdown_path.display());
+        if let Some(release_manifest) = &report.release_manifest_path {
+            println!("release   {}", release_manifest.display());
+        }
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+        if !report.remediation_steps.is_empty() {
+            println!("remediation");
+            for step in &report.remediation_steps {
+                println!("- {step}");
+            }
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package quickstart failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -9501,6 +9573,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "deploy handoff markdown",
     "demo handoff json",
     "demo handoff markdown",
+    "quickstart json",
+    "quickstart markdown",
     "trace",
     "dashboard",
     "store readme",
@@ -10025,6 +10099,9 @@ fn run_release_candidate_smoke(
     let demo_handoff_root = installed_package.join("sidecar/.agentk/demo-handoff");
     let demo_handoff_json = demo_handoff_root.join("demo-handoff.json");
     let demo_handoff_markdown = demo_handoff_root.join("demo-handoff.md");
+    let quickstart_root = installed_package.join("sidecar/.agentk/quickstart");
+    let quickstart_json = quickstart_root.join("quickstart.json");
+    let quickstart_markdown = quickstart_root.join("quickstart.md");
     let release_evidence_root = installed_package.join("sidecar/.agentk/release");
     let package_check_json = release_evidence_root.join("package-check.json");
     let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
@@ -10060,6 +10137,7 @@ fn run_release_candidate_smoke(
     let support_bundle = support_bundle_root.display().to_string();
     let deploy_handoff = deploy_handoff_root.display().to_string();
     let demo_handoff = demo_handoff_root.display().to_string();
+    let quickstart = quickstart_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -10411,6 +10489,17 @@ fn run_release_candidate_smoke(
             ("AGENTK_DEMO_HANDOFF_OUT", demo_handoff.as_str()),
         ],
     )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "quickstart",
+        &bin.join("agentk-sidecar-quickstart"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_QUICKSTART_OUT", quickstart.as_str()),
+            ("AGENTK_PACKAGE_RELEASE_MANIFEST", release_manifest.as_str()),
+        ],
+    )?;
 
     let mut artifacts = Vec::new();
     release_candidate_smoke_artifact(
@@ -10505,6 +10594,8 @@ fn run_release_candidate_smoke(
         "demo handoff markdown",
         demo_handoff_markdown,
     )?;
+    release_candidate_smoke_artifact(&mut artifacts, "quickstart json", quickstart_json)?;
+    release_candidate_smoke_artifact(&mut artifacts, "quickstart markdown", quickstart_markdown)?;
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
     release_candidate_smoke_artifact(
@@ -16750,6 +16841,54 @@ done
             Some(PathBuf::from(
                 "dist/agentk-sidecar/sidecar/.agentk/demo-handoff"
             ))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_quickstart_accepts_root_out_and_release_manifest() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-quickstart-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_quickstart_accepts_root_out_and_release_manifest_inner)
+            .expect("sidecar-package-quickstart parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-quickstart parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_quickstart_accepts_root_out_and_release_manifest_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-quickstart",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/quickstart",
+            "--release-manifest",
+            "dist/agentk-sidecar-release-manifest.json",
+            "--json",
+        ])
+        .expect("sidecar-package-quickstart should parse");
+
+        let Some(Command::SidecarPackageQuickstart {
+            root,
+            out,
+            release_manifest,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-quickstart command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from(
+                "dist/agentk-sidecar/sidecar/.agentk/quickstart"
+            ))
+        );
+        assert_eq!(
+            release_manifest,
+            Some(PathBuf::from("dist/agentk-sidecar-release-manifest.json"))
         );
         assert!(json);
     }
