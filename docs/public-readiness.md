@@ -47,6 +47,11 @@ keep the same checks in CI and protect the default branch.
       dist/release-candidate-smoke.json --root dist/release-candidate-smoke
       --json` passes before the evidence report is attached to a release or
       deployment ticket.
+- [ ] `cargo run --locked -- release-finalize --release v0.2-alpha
+      --evidence dist/release-candidate-smoke.json --root
+      dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md
+      --out dist/release-finalization.json --json` writes the final local
+      release handoff report without tagging, pushing, or publishing.
 - [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
       dist/agentk-sidecar --json` passes and the reviewer handoff includes
       `clients/http-sse-handoff.md` with bounded local HTTP/SSE alpha language.
@@ -138,6 +143,7 @@ cargo clippy --all-targets --all-features
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json --json
 cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --json
+cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md --out dist/release-finalization.json --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
