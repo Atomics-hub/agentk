@@ -39,8 +39,8 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run --locked -- release-candidate-smoke --root
       dist/release-candidate-smoke --force --keep-root --evidence-out
       dist/release-candidate-smoke.json --json` passes and writes package,
-      archive, install receipt, verified release manifest, demo trace,
-      dashboard, durable store, operator handoff, notification payload,
+      archive, install receipt, verified release manifest, onboarding guide,
+      demo trace, dashboard, durable store, operator handoff, notification payload,
       deploy-template artifacts, and a JSON evidence report with SHA-256/byte
       counts for required handoff files.
 - [ ] `cargo run --locked -- release-evidence-check --evidence
