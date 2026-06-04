@@ -11466,6 +11466,12 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         strict,
         force: true,
     })?;
+    let dashboard_handoff_artifacts = ["dashboard handoff json", "dashboard handoff markdown"];
+    let dashboard_handoff_missing = dashboard_handoff_artifacts
+        .iter()
+        .filter(|name| !release_ticket_smoke_artifact_present(&smoke, name))
+        .copied()
+        .collect::<Vec<_>>();
 
     let checks = vec![
         release_ticket_check_item(
@@ -11501,6 +11507,23 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
                 "{}/{} artifacts verified",
                 evidence_check.artifacts_verified, evidence_check.artifacts_total
             ),
+        ),
+        release_ticket_check_item(
+            "dashboard handoff",
+            if dashboard_handoff_missing.is_empty() {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            if dashboard_handoff_missing.is_empty() {
+                "dashboard-handoff JSON/Markdown are present in release-ticket smoke evidence"
+                    .to_string()
+            } else {
+                format!(
+                    "missing dashboard handoff artifacts: {}",
+                    dashboard_handoff_missing.join(", ")
+                )
+            },
         ),
         release_ticket_check_item(
             "finalization",
@@ -11548,6 +11571,13 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_smoke_artifact_present(smoke: &ReleaseCandidateSmokeReport, name: &str) -> bool {
+    smoke
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.name == name && artifact.present)
 }
 
 fn release_ticket_check_item(

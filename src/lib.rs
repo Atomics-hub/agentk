@@ -13067,12 +13067,19 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "offline release ticket bundle",
-            "release-ticket writes status, smoke evidence, evidence check, and finalization reports into one reviewer handoff directory without publishing",
+            "release-ticket writes status, smoke evidence, dashboard handoff check, evidence check, and finalization reports into one reviewer handoff directory without publishing",
             &[
                 ("src/main.rs", "ReleaseTicket"),
+                ("src/main.rs", "\"dashboard handoff\""),
                 ("README.md", "release-ticket"),
+                ("README.md", "dashboard-handoff check"),
                 ("docs/release-checklist.md", "release-ticket"),
+                ("docs/release-checklist.md", "dashboard-handoff check"),
                 ("docs/v0.2-alpha-release-notes.md", "release-ticket"),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "dashboard-handoff summary check",
+                ),
             ],
             &["cargo run --locked -- release-ticket --out dist/release-ticket"],
         ),

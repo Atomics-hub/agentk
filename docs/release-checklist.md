@@ -133,9 +133,10 @@ cargo run --locked -- sidecar-package-dashboard-handoff --root installed/agentk-
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
 writes release status, smoke evidence, evidence-check results, finalization
-evidence, and a summary ticket JSON under `dist/release-ticket/`; it does not
-tag, push, upload, or publish. The remaining commands keep the individual gates
-visible for manual review and final publication.
+evidence, and a summary ticket JSON under `dist/release-ticket/`; the ticket
+summary includes an explicit dashboard-handoff check. It does not tag, push,
+upload, or publish. The remaining commands keep the individual gates visible
+for manual review and final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:
