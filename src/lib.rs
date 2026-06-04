@@ -13247,6 +13247,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "support evidence proves operator handoff refresh",
                 ),
+                (
+                    "src/main.rs",
+                    "served dashboard evidence proves launcher package preflight",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),
@@ -27960,6 +27964,9 @@ What that proves:
   append-only approval decisions;
 - the dashboard server binds to `http://127.0.0.1:8765` by default and requires
   explicit non-loopback opt-in plus an admin token for exposed review surfaces;
+- served review routes are `GET /api/review`, `POST /api/approve`, and
+  `POST /api/deny`; operational probes are `GET /healthz`, `GET /readyz`, and
+  `GET /metrics`, with readiness and metrics kept redacted;
 - reviewer-scoped reads and approve/deny writes are checked against the team
   permissions in `sidecar/team-permissions.toml` and optional reviewer tokens;
 - identity mappings from `sidecar/team-identity.toml` are summarized as

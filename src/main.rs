@@ -11476,6 +11476,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let objective_checks = release_ticket_objective_checks(&smoke);
     let install_package_check = release_ticket_install_package_provenance_check(&smoke);
     let store_notification_check = release_ticket_store_notification_handoff_check(&smoke);
+    let served_dashboard_runtime_check = release_ticket_served_dashboard_runtime_check(&smoke);
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
@@ -11574,6 +11575,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         ),
         install_package_check,
         store_notification_check,
+        served_dashboard_runtime_check,
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
@@ -11607,6 +11609,170 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_served_dashboard_runtime_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = [
+        "dashboard handoff json",
+        "dashboard handoff markdown",
+        "dashboard",
+        "team audit dashboard handoff",
+        "systemd dashboard service",
+        "launchd dashboard plist",
+        "dashboard env example",
+    ]
+    .iter()
+    .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+    .copied()
+    .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "served dashboard runtime",
+            ReadinessStatus::Fail,
+            format!(
+                "missing served dashboard artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_served_dashboard_runtime_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "served dashboard runtime",
+            ReadinessStatus::Pass,
+            "served dashboard evidence proves launcher package preflight, loopback/admin-token defaults, bounded request caps, supervisor hardening, redacted probes, and permission-checked review APIs",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("served dashboard runtime", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_served_dashboard_runtime_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let report = release_ticket_json_artifact(smoke, "dashboard handoff json")?;
+    release_ticket_require_bool(&report, "passed", true, "dashboard handoff json")?;
+    release_ticket_require_bool(
+        &report,
+        "local_team_sidecar_alpha",
+        true,
+        "dashboard handoff json",
+    )?;
+    release_ticket_require_bool(&report, "hosted_saas", false, "dashboard handoff json")?;
+    release_ticket_require_checks(
+        &report,
+        "dashboard handoff json",
+        &[
+            ("static dashboard artifact", "open approvals"),
+            ("durable team store", "notifications"),
+            ("package team handoff env", "loopback defaults"),
+            ("package team handoff env", "dummy admin token"),
+            ("package team handoff env", "bounded request caps"),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+    release_ticket_require_artifacts(
+        &report,
+        "dashboard handoff json",
+        &[
+            "dashboard server launcher",
+            "dashboard env example",
+            "team dashboard handoff doc",
+        ],
+    )?;
+
+    let launcher = release_ticket_report_artifact_text(
+        &report,
+        "dashboard handoff json",
+        "dashboard server launcher",
+    )?;
+    for fragment in [
+        "agentk-package-check\" --json",
+        "dashboard-serve",
+        "AGENTK_DASHBOARD_HOST:-127.0.0.1",
+        "AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND",
+        "--admin-token-env",
+        "--stream-timeout-ms",
+        "--max-body-bytes",
+        "--max-header-bytes",
+        "--store-root",
+    ] {
+        if !launcher.contains(fragment) {
+            return Err(format!(
+                "dashboard server launcher does not prove {fragment}"
+            ));
+        }
+    }
+
+    let env = release_ticket_text_artifact(smoke, "dashboard env example")?;
+    for fragment in [
+        "AGENTK_DASHBOARD_HOST=127.0.0.1",
+        "AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=0",
+        "AGENTK_DASHBOARD_ADMIN_TOKEN",
+        "CHANGE_ME",
+        "AGENTK_DASHBOARD_STREAM_TIMEOUT_MS=",
+        "AGENTK_DASHBOARD_MAX_BODY_BYTES=",
+        "AGENTK_DASHBOARD_MAX_HEADER_BYTES=",
+        "AGENTK_STORE_ROOT=",
+    ] {
+        if !env.contains(fragment) {
+            return Err(format!("dashboard env example does not prove {fragment}"));
+        }
+    }
+
+    let systemd = release_ticket_text_artifact(smoke, "systemd dashboard service")?;
+    for fragment in [
+        "AgentK team dashboard server",
+        "EnvironmentFile=-%h/.config/agentk/dashboard.env",
+        "agentk-dashboard-server",
+        "NoNewPrivileges=true",
+        "PrivateTmp=true",
+        "RestrictSUIDSGID=true",
+        "LockPersonality=true",
+        "UMask=0077",
+    ] {
+        if !systemd.contains(fragment) {
+            return Err(format!(
+                "systemd dashboard service does not prove {fragment}"
+            ));
+        }
+    }
+
+    let launchd = release_ticket_text_artifact(smoke, "launchd dashboard plist")?;
+    for fragment in [
+        "com.agentk.dashboard",
+        "agentk-dashboard-server",
+        "WorkingDirectory",
+        "dashboard-server.out.log",
+        "dashboard-server.err.log",
+    ] {
+        if !launchd.contains(fragment) {
+            return Err(format!("launchd dashboard plist does not prove {fragment}"));
+        }
+    }
+
+    let handoff = release_ticket_text_artifact(smoke, "team audit dashboard handoff")?;
+    for fragment in [
+        "/api/review",
+        "/api/approve",
+        "/api/deny",
+        "/healthz",
+        "/readyz",
+        "/metrics",
+        "admin token",
+        "not hosted SaaS",
+    ] {
+        if !handoff.contains(fragment) {
+            return Err(format!(
+                "team audit dashboard handoff does not document {fragment}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn release_ticket_store_notification_handoff_check(
@@ -12488,6 +12654,32 @@ fn release_ticket_text_artifact(
             artifact.path.display()
         )
     })
+}
+
+fn release_ticket_report_artifact_text(
+    report: &serde_json::Value,
+    report_label: &str,
+    artifact_name: &str,
+) -> Result<String, String> {
+    let artifacts = report
+        .get("artifacts")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{report_label} is missing artifacts"))?;
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.get("name").and_then(|value| value.as_str()) == Some(artifact_name)
+                && artifact.get("present").and_then(|value| value.as_bool()) == Some(true)
+        })
+        .ok_or_else(|| {
+            format!("{report_label} does not prove required artifact {artifact_name}")
+        })?;
+    let path = artifact
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("{artifact_name} is missing artifact path"))?;
+    fs::read_to_string(path)
+        .map_err(|err| format!("{artifact_name} could not be read as UTF-8 at {path}: {err}"))
 }
 
 fn release_ticket_require_bool(
