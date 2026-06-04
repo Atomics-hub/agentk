@@ -638,7 +638,9 @@ first-run team command. It validates package health, HTTP/team handoff checks,
 the demo handoff, deploy handoff, support bundle, permissions handoff,
 production preflight, client handoff, and dashboard handoff, then writes
 `sidecar/.agentk/quickstart/quickstart.json` and
-`sidecar/.agentk/quickstart/quickstart.md` as one onboarding report.
+`sidecar/.agentk/quickstart/quickstart.md` as one onboarding report with
+owner-specific next actions for client, dashboard, permissions, deployment,
+security, support, and demo reviewers.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-permissions-handoff --json` when
 the permissions owner wants the narrower authorization handoff without rerunning
 the full support bundle.
@@ -932,8 +934,8 @@ to create one offline reviewer handoff directory containing release status,
 release-candidate smoke evidence, evidence-check results, finalization evidence,
 and a summary ticket JSON with explicit product-objective coverage checks,
 install/package provenance checks, store/notification handoff checks,
-served dashboard runtime checks, quickstart handoff checks, support/doctor
-handoff checks, Homebrew handoff checks, top-level ticket artifact inventory
+served dashboard runtime checks, quickstart owner-action handoff checks,
+support/doctor handoff checks, Homebrew handoff checks, top-level ticket artifact inventory
 for the core package, smoke handoff, deploy, dashboard, client, support, demo,
 store, notification, and Homebrew files, accepted alpha limits, and
 deferred-scope checks, without tagging, pushing, uploading, or publishing.

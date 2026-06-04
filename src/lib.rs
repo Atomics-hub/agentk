@@ -6843,6 +6843,7 @@ pub struct SidecarPackageQuickstartReport {
     pub passed: bool,
     pub checks: Vec<ReadinessCheck>,
     pub remediation_steps: Vec<String>,
+    pub next_actions: Vec<SidecarPackageQuickstartNextAction>,
     pub artifacts: Vec<SidecarPackageQuickstartArtifact>,
     pub package_check: SidecarPackageCheckReport,
     pub http_handoff_check: SidecarPackageCheckReport,
@@ -6854,6 +6855,14 @@ pub struct SidecarPackageQuickstartReport {
     pub production_preflight: SidecarPackageProductionPreflightReport,
     pub client_handoff: SidecarPackageClientHandoffReport,
     pub dashboard_handoff: SidecarPackageDashboardHandoffReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageQuickstartNextAction {
+    pub owner: String,
+    pub action: String,
+    pub artifact: PathBuf,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9852,6 +9861,17 @@ pub fn write_sidecar_package_quickstart(
         &client_handoff,
         &dashboard_handoff,
     )?;
+    let next_actions =
+        sidecar_package_quickstart_next_actions(SidecarPackageQuickstartNextActionInputs {
+            root,
+            demo_handoff: &demo_handoff,
+            deploy_handoff: &deploy_handoff,
+            support_bundle: &support_bundle,
+            permissions_handoff: &permissions_handoff,
+            production_preflight: &production_preflight,
+            client_handoff: &client_handoff,
+            dashboard_handoff: &dashboard_handoff,
+        });
     let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
     let mut checks = vec![
         quickstart_report_check(
@@ -9968,6 +9988,7 @@ pub fn write_sidecar_package_quickstart(
         passed,
         checks,
         remediation_steps,
+        next_actions,
         artifacts,
         package_check,
         http_handoff_check,
@@ -10124,6 +10145,101 @@ fn sidecar_package_quickstart_artifacts(
     Ok(artifacts)
 }
 
+struct SidecarPackageQuickstartNextActionInputs<'a> {
+    root: &'a Path,
+    demo_handoff: &'a SidecarPackageDemoHandoffReport,
+    deploy_handoff: &'a SidecarPackageDeployHandoffReport,
+    support_bundle: &'a SidecarPackageSupportBundleReport,
+    permissions_handoff: &'a SidecarPackagePermissionsHandoffReport,
+    production_preflight: &'a SidecarPackageProductionPreflightReport,
+    client_handoff: &'a SidecarPackageClientHandoffReport,
+    dashboard_handoff: &'a SidecarPackageDashboardHandoffReport,
+}
+
+fn sidecar_package_quickstart_next_actions(
+    inputs: SidecarPackageQuickstartNextActionInputs<'_>,
+) -> Vec<SidecarPackageQuickstartNextAction> {
+    vec![
+        sidecar_package_quickstart_next_action(
+            "client owner",
+            "Install the Claude Desktop JSON or Codex/Cursor command snippet for the chosen MCP client.",
+            inputs.client_handoff.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-client-handoff --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "dashboard owner",
+            "Review the local approval/audit dashboard, reviewer-scoped store, and dashboard server handoff.",
+            inputs.dashboard_handoff.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-dashboard-handoff --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "permissions owner",
+            "Confirm reviewer roles, scopes, identity mappings, and reviewer token handoff before widening approvals.",
+            inputs.permissions_handoff.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-permissions-handoff --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "deployment owner",
+            "Review service templates, env placeholders, non-local bind choices, and secret-reference preflight before deployment.",
+            inputs.deploy_handoff.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-deploy-handoff --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "security owner",
+            "Inspect production-preflight secret-reference shapes and accepted non-hosted alpha limits without reading live secrets.",
+            inputs.production_preflight.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-production-preflight --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "support owner",
+            "Archive the support bundle for install provenance, doctor output, remediation state, and hashed evidence inventory.",
+            inputs.support_bundle.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-support-bundle --json",
+                inputs.root.display()
+            ),
+        ),
+        sidecar_package_quickstart_next_action(
+            "demo reviewer",
+            "Use the safe-agent demo handoff to explain blocked filesystem/GitHub/Postgres/Slack-shaped actions.",
+            inputs.demo_handoff.markdown_path.clone(),
+            format!(
+                "{}/bin/agentk-sidecar-demo-handoff --json",
+                inputs.root.display()
+            ),
+        ),
+    ]
+}
+
+fn sidecar_package_quickstart_next_action(
+    owner: &str,
+    action: &str,
+    artifact: PathBuf,
+    command: String,
+) -> SidecarPackageQuickstartNextAction {
+    SidecarPackageQuickstartNextAction {
+        owner: owner.to_string(),
+        action: action.to_string(),
+        artifact,
+        command,
+    }
+}
+
 fn sidecar_package_quickstart_artifact(
     artifacts: &mut Vec<SidecarPackageQuickstartArtifact>,
     name: &str,
@@ -10206,6 +10322,18 @@ fn sidecar_package_quickstart_markdown(report: &SidecarPackageQuickstartReport) 
             check.status.as_str(),
             markdown_cell(&check.name),
             markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Next Actions\n\n");
+    out.push_str("| Owner | Action | Artifact | Command |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
+    for action in &report.next_actions {
+        out.push_str(&format!(
+            "| {} | {} | `{}` | `{}` |\n",
+            markdown_cell(&action.owner),
+            markdown_cell(&action.action),
+            action.artifact.display(),
+            markdown_cell(&action.command)
         ));
     }
     out.push_str("\n## Artifacts\n\n");
@@ -30266,6 +30394,25 @@ can_deny = ["*"]
             check.name == "support bundle" && check.status == ReadinessStatus::Pass
         }));
         assert!(report.remediation_steps.is_empty());
+        assert_eq!(report.next_actions.len(), 7);
+        for owner in [
+            "client owner",
+            "dashboard owner",
+            "permissions owner",
+            "deployment owner",
+            "security owner",
+            "support owner",
+            "demo reviewer",
+        ] {
+            assert!(
+                report.next_actions.iter().any(|action| {
+                    action.owner == owner
+                        && action.artifact.is_file()
+                        && action.command.contains("bin/agentk-sidecar-")
+                }),
+                "missing next action for {owner}"
+            );
+        }
 
         let json = fs::read_to_string(&report.json_path).expect("quickstart JSON should read");
         let value: serde_json::Value =
@@ -30273,10 +30420,38 @@ can_deny = ["*"]
         assert_eq!(value["passed"], serde_json::json!(true));
         assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
         assert_eq!(value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(
+            value["next_actions"]
+                .as_array()
+                .expect("quickstart next actions should be an array")
+                .len(),
+            7
+        );
+        assert!(
+            value["next_actions"]
+                .as_array()
+                .expect("quickstart next actions should be an array")
+                .iter()
+                .any(
+                    |action| action["owner"] == serde_json::json!("client owner")
+                        && action["command"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("agentk-sidecar-client-handoff")
+                )
+        );
 
         let markdown =
             fs::read_to_string(&report.markdown_path).expect("quickstart markdown should read");
         assert!(markdown.contains("AgentK Sidecar Quickstart"));
+        assert!(markdown.contains("## Next Actions"));
+        assert!(markdown.contains("client owner"));
+        assert!(markdown.contains("dashboard owner"));
+        assert!(markdown.contains("permissions owner"));
+        assert!(markdown.contains("deployment owner"));
+        assert!(markdown.contains("security owner"));
+        assert!(markdown.contains("support owner"));
+        assert!(markdown.contains("demo reviewer"));
         assert!(markdown.contains("No remediation required"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("demo handoff json"));

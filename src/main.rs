@@ -12427,7 +12427,7 @@ fn release_ticket_quickstart_handoff_check(
         Ok(()) => release_ticket_check_item(
             "quickstart handoff",
             ReadinessStatus::Pass,
-            "quickstart evidence proves first-run package health, HTTP/team handoff, demo, deploy, support, permissions, preflight, client, dashboard, artifact inventory, and local non-hosted scope",
+            "quickstart evidence proves first-run package health, HTTP/team handoff, demo, deploy, support, permissions, preflight, client, dashboard, owner next actions, artifact inventory, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("quickstart handoff", ReadinessStatus::Fail, detail)
@@ -12449,6 +12449,19 @@ fn release_ticket_quickstart_handoff_evidence(
     )?;
     release_ticket_require_bool(&quickstart, "hosted_saas", false, "quickstart json")?;
     release_ticket_require_empty_array(&quickstart, "remediation_steps", "quickstart json")?;
+    release_ticket_require_next_actions(
+        &quickstart,
+        "quickstart json",
+        &[
+            ("client owner", "agentk-sidecar-client-handoff"),
+            ("dashboard owner", "agentk-sidecar-dashboard-handoff"),
+            ("permissions owner", "agentk-sidecar-permissions-handoff"),
+            ("deployment owner", "agentk-sidecar-deploy-handoff"),
+            ("security owner", "agentk-sidecar-production-preflight"),
+            ("support owner", "agentk-sidecar-support-bundle"),
+            ("demo reviewer", "agentk-sidecar-demo-handoff"),
+        ],
+    )?;
     release_ticket_require_checks(
         &quickstart,
         "quickstart json",
@@ -13099,6 +13112,40 @@ fn release_ticket_require_empty_array(
         )),
         None => Err(format!("{label} is missing array {field}")),
     }
+}
+
+fn release_ticket_require_next_actions(
+    report: &serde_json::Value,
+    label: &str,
+    required: &[(&str, &str)],
+) -> Result<(), String> {
+    let actions = report
+        .get("next_actions")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing next_actions"))?;
+    for (owner, command_fragment) in required {
+        let found = actions.iter().any(|action| {
+            action.get("owner").and_then(|value| value.as_str()) == Some(*owner)
+                && action
+                    .get("artifact")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|path| !path.is_empty())
+                && action
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| !text.is_empty())
+                && action
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|command| command.contains(command_fragment))
+        });
+        if !found {
+            return Err(format!(
+                "{label} does not prove next action for {owner} using {command_fragment}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_require_checks(
