@@ -408,8 +408,10 @@ The safest first productization slice is the local team sidecar path:
     shutdown, exposes token-gated redacted readiness and numeric gateway metrics
     for supervisors, tracks redacted cumulative request/rejection/session
     lifecycle counters plus CORS preflight and stream-framing rejection
-    counters, uses constant-time bearer-token checks, and writes trace/session
-    evidence. The HTTP parser rejects malformed or non-UTF-8
+    counters, reports current SSE retained-event buffer pressure, counts SSE
+    retained-event evictions without exposing event data, uses constant-time
+    bearer-token checks, and writes trace/session evidence. The HTTP parser
+    rejects malformed or non-UTF-8
     request/header lines, LF-only line endings, duplicate or non-decimal
     `Content-Length` headers, control characters in header values, and any
     transfer-encoding, content-encoding, expectation, or upgrade header with

@@ -119,9 +119,10 @@ session lookup runs. The adapter also serves local `GET`/`HEAD` probes at
 `/healthz`, `/readyz`, and `/metrics`;
 `/readyz` returns endpoint, supported protocol-version, active-session,
 active-session cap, idle timeout, request-concurrency, request body cap,
-configured allowed-origin count, and auth-required metadata without raw MCP
-payloads or raw origin values. `/metrics` exposes the same operational posture
-as redacted numeric gateway gauges plus cumulative request, rejection, and
+configured allowed-origin count, auth-required metadata, and current SSE
+retention pressure without raw MCP payloads, raw origin values, or buffered
+event data. `/metrics` exposes the same operational posture as redacted numeric
+gateway gauges plus cumulative request, rejection, SSE buffer eviction, and
 session lifecycle counters for service supervisors. All MCP HTTP `HEAD`
 responses omit bodies; `HEAD` on the MCP endpoint remains an unsupported method
 response with the normal `Allow` header. When HTTP auth is
@@ -224,8 +225,9 @@ trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
 rejections, CORS preflight validation rejections, SSE stream/resume totals,
-invalid JSON-RPC id rejections, invalid-framing/header-too-large/body-too-large
-stream rejections, downstream transport failures, AgentK internal gateway
+current SSE retained-event pressure, SSE retained-event evictions, invalid
+JSON-RPC id rejections, invalid-framing/header-too-large/body-too-large stream
+rejections, downstream transport failures, AgentK internal gateway
 failures, and session
 create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control

@@ -6228,6 +6228,7 @@ struct McpHttpGatewayMetrics {
     sse_invalid_resume_requests: usize,
     sse_evicted_resume_requests: usize,
     sse_events_returned: usize,
+    sse_event_buffer_evictions: usize,
     invalid_json_rpc_id_requests: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
@@ -6239,6 +6240,14 @@ struct McpHttpGatewayMetrics {
     sessions_deleted: usize,
     sessions_expired: usize,
     session_not_found: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct McpHttpSseBufferSnapshot {
+    active_sessions: usize,
+    sessions_with_buffered_events: usize,
+    buffered_events: usize,
+    buffer_capacity: usize,
 }
 
 #[derive(Serialize)]
@@ -6274,6 +6283,11 @@ struct McpHttpReadinessBody<'a> {
     sse_invalid_resume_requests: usize,
     sse_evicted_resume_requests: usize,
     sse_events_returned: usize,
+    sse_retained_events_per_session: usize,
+    sse_sessions_with_buffered_events: usize,
+    sse_buffered_events: usize,
+    sse_buffer_capacity: usize,
+    sse_event_buffer_evictions: usize,
     invalid_json_rpc_id_requests: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
@@ -6909,6 +6923,34 @@ fn mcp_http_metrics_snapshot(
     })?)
 }
 
+fn mcp_http_sse_buffer_snapshot(
+    state: &Arc<McpHttpGatewayState>,
+) -> Result<McpHttpSseBufferSnapshot, AgentKError> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut snapshot = McpHttpSseBufferSnapshot {
+        active_sessions: sessions.len(),
+        buffer_capacity: sessions
+            .len()
+            .saturating_mul(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION),
+        ..McpHttpSseBufferSnapshot::default()
+    };
+    for session in sessions {
+        let session = mcp_http_lock_session(&session)?;
+        let buffered_events = session.sse_events.len();
+        snapshot.buffered_events = snapshot.buffered_events.saturating_add(buffered_events);
+        if buffered_events > 0 {
+            snapshot.sessions_with_buffered_events += 1;
+        }
+    }
+    Ok(snapshot)
+}
+
 fn mcp_http_preflight_error(request: &DashboardHttpRequest) -> Option<DashboardHttpResponse> {
     let Some(requested_method) = request.header("access-control-request-method") else {
         return Some(dashboard_http_text(
@@ -6991,19 +7033,14 @@ fn mcp_http_operational_response(
     }
     let expired_sessions = mcp_http_prune_expired_sessions(state)?;
 
-    let active_sessions = state
-        .sessions
-        .lock()
-        .map_err(|_| AgentKError::InvalidMcpRequest("MCP HTTP session lock poisoned".to_string()))?
-        .len();
+    let sse_buffer = mcp_http_sse_buffer_snapshot(state)?;
     let metrics = mcp_http_metrics_snapshot(state)?;
     if path == "/metrics" {
         return Ok(DashboardHttpResponse {
             status: "200 OK",
             content_type: "text/plain; version=0.0.4; charset=utf-8",
             headers: Vec::new(),
-            body: mcp_http_metrics_body(state, active_sessions, expired_sessions, metrics)
-                .into_bytes(),
+            body: mcp_http_metrics_body(state, sse_buffer, expired_sessions, metrics).into_bytes(),
         });
     }
     Ok(DashboardHttpResponse {
@@ -7014,7 +7051,7 @@ fn mcp_http_operational_response(
             ready: true,
             endpoint: state.endpoint.as_str(),
             protocol_version: MCP_PROTOCOL_VERSION,
-            active_sessions,
+            active_sessions: sse_buffer.active_sessions,
             max_active_sessions: state.max_active_sessions,
             session_idle_timeout_ms: state.session_idle_timeout.as_millis(),
             expired_sessions_reaped: expired_sessions,
@@ -7042,6 +7079,11 @@ fn mcp_http_operational_response(
             sse_invalid_resume_requests: metrics.sse_invalid_resume_requests,
             sse_evicted_resume_requests: metrics.sse_evicted_resume_requests,
             sse_events_returned: metrics.sse_events_returned,
+            sse_retained_events_per_session: MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION,
+            sse_sessions_with_buffered_events: sse_buffer.sessions_with_buffered_events,
+            sse_buffered_events: sse_buffer.buffered_events,
+            sse_buffer_capacity: sse_buffer.buffer_capacity,
+            sse_event_buffer_evictions: metrics.sse_event_buffer_evictions,
             invalid_json_rpc_id_requests: metrics.invalid_json_rpc_id_requests,
             invalid_framing_responses: metrics.invalid_framing_responses,
             header_too_large_responses: metrics.header_too_large_responses,
@@ -7059,7 +7101,7 @@ fn mcp_http_operational_response(
 
 fn mcp_http_metrics_body(
     state: &McpHttpGatewayState,
-    active_sessions: usize,
+    sse_buffer: McpHttpSseBufferSnapshot,
     expired_sessions_reaped: usize,
     metrics: McpHttpGatewayMetrics,
 ) -> String {
@@ -7151,6 +7193,21 @@ agentk_mcp_http_sse_evicted_resume_requests_total {sse_evicted_resume_requests}\
 # HELP agentk_mcp_http_sse_events_returned_total Buffered MCP SSE events returned to clients.\n\
 # TYPE agentk_mcp_http_sse_events_returned_total counter\n\
 agentk_mcp_http_sse_events_returned_total {sse_events_returned}\n\
+# HELP agentk_mcp_http_sse_retained_events_per_session Configured retained MCP SSE events per active session.\n\
+# TYPE agentk_mcp_http_sse_retained_events_per_session gauge\n\
+agentk_mcp_http_sse_retained_events_per_session {sse_retained_events_per_session}\n\
+# HELP agentk_mcp_http_sse_sessions_with_buffered_events Active MCP HTTP sessions with retained SSE events.\n\
+# TYPE agentk_mcp_http_sse_sessions_with_buffered_events gauge\n\
+agentk_mcp_http_sse_sessions_with_buffered_events {sse_sessions_with_buffered_events}\n\
+# HELP agentk_mcp_http_sse_buffered_events Retained MCP SSE events currently buffered across active sessions.\n\
+# TYPE agentk_mcp_http_sse_buffered_events gauge\n\
+agentk_mcp_http_sse_buffered_events {sse_buffered_events}\n\
+# HELP agentk_mcp_http_sse_buffer_capacity Retained MCP SSE event slots across active sessions.\n\
+# TYPE agentk_mcp_http_sse_buffer_capacity gauge\n\
+agentk_mcp_http_sse_buffer_capacity {sse_buffer_capacity}\n\
+# HELP agentk_mcp_http_sse_event_buffer_evictions_total MCP SSE events dropped because a session buffer reached its retention cap.\n\
+# TYPE agentk_mcp_http_sse_event_buffer_evictions_total counter\n\
+agentk_mcp_http_sse_event_buffer_evictions_total {sse_event_buffer_evictions}\n\
 # HELP agentk_mcp_http_invalid_json_rpc_id_requests_total MCP HTTP POST requests rejected before downstream forwarding because JSON-RPC id was malformed.\n\
 # TYPE agentk_mcp_http_invalid_json_rpc_id_requests_total counter\n\
 agentk_mcp_http_invalid_json_rpc_id_requests_total {invalid_json_rpc_id_requests}\n\
@@ -7184,6 +7241,7 @@ agentk_mcp_http_sessions_expired_total {sessions_expired}\n\
 # HELP agentk_mcp_http_session_not_found_total MCP endpoint requests that referenced a missing session.\n\
 # TYPE agentk_mcp_http_session_not_found_total counter\n\
 agentk_mcp_http_session_not_found_total {session_not_found}\n",
+        active_sessions = sse_buffer.active_sessions,
         max_active_sessions = state.max_active_sessions,
         max_concurrent_requests = state.max_concurrent_requests,
         max_body_bytes = state.max_body_bytes,
@@ -7210,6 +7268,11 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         sse_invalid_resume_requests = metrics.sse_invalid_resume_requests,
         sse_evicted_resume_requests = metrics.sse_evicted_resume_requests,
         sse_events_returned = metrics.sse_events_returned,
+        sse_retained_events_per_session = MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION,
+        sse_sessions_with_buffered_events = sse_buffer.sessions_with_buffered_events,
+        sse_buffered_events = sse_buffer.buffered_events,
+        sse_buffer_capacity = sse_buffer.buffer_capacity,
+        sse_event_buffer_evictions = metrics.sse_event_buffer_evictions,
         invalid_json_rpc_id_requests = metrics.invalid_json_rpc_id_requests,
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
@@ -7574,16 +7637,19 @@ fn mcp_http_push_sse_event(
     events: &mut VecDeque<McpHttpSseEvent>,
     next_event_id: &mut u64,
     data: &[u8],
-) {
+) -> usize {
     let id = *next_event_id;
     *next_event_id = (*next_event_id).saturating_add(1);
     events.push_back(McpHttpSseEvent {
         id,
         data: data.to_vec(),
     });
+    let mut evictions = 0usize;
     while events.len() > MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION {
         events.pop_front();
+        evictions += 1;
     }
+    evictions
 }
 
 fn mcp_http_post_response(
@@ -7691,7 +7757,11 @@ fn mcp_http_post_response(
                         next_sse_event_id,
                         ..
                     } = &mut session;
-                    mcp_http_push_sse_event(sse_events, next_sse_event_id, &body);
+                    let sse_event_buffer_evictions =
+                        mcp_http_push_sse_event(sse_events, next_sse_event_id, &body);
+                    mcp_http_update_metrics(state, |metrics| {
+                        metrics.sse_event_buffer_evictions += sse_event_buffer_evictions;
+                    })?;
                 }
                 sessions.insert(session_id, Arc::new(Mutex::new(session)));
                 mcp_http_update_metrics(state, |metrics| {
@@ -7742,16 +7812,22 @@ fn mcp_http_post_response(
     session.last_seen = Instant::now();
     let response = session.proxy.handle_json_rpc_line(&request.body, false)?;
     let response_body = response.as_ref().map(serde_json::to_vec).transpose()?;
+    let mut sse_event_buffer_evictions = 0usize;
     if let Some(body) = response_body.as_deref() {
         let McpHttpSession {
             sse_events,
             next_sse_event_id,
             ..
         } = &mut *session;
-        mcp_http_push_sse_event(sse_events, next_sse_event_id, body);
+        sse_event_buffer_evictions = mcp_http_push_sse_event(sse_events, next_sse_event_id, body);
     }
     mcp_http_write_session_outputs(&session_id, &session.proxy, state)?;
     drop(session);
+    if sse_event_buffer_evictions > 0 {
+        mcp_http_update_metrics(state, |metrics| {
+            metrics.sse_event_buffer_evictions += sse_event_buffer_evictions;
+        })?;
+    }
 
     if let Some(body) = response_body {
         Ok(DashboardHttpResponse {
@@ -12274,6 +12350,176 @@ done
 
     #[cfg(unix)]
     #[test]
+    fn mcp_http_response_reports_sse_buffer_pressure_and_evictions() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-buffer-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trust_proxy_headers: false,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+
+        let initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let initialize_response =
+            mcp_http_response(&initialize, &state).expect("initialize should produce response");
+        assert_eq!(initialize_response.status, "200 OK");
+        let session_id = response_header(&initialize_response, "Mcp-Session-Id")
+            .expect("initialize should return session id")
+            .to_string();
+
+        {
+            let session = Arc::clone(
+                state
+                    .sessions
+                    .lock()
+                    .expect("sessions should lock")
+                    .get(&session_id)
+                    .expect("session should exist"),
+            );
+            let mut session = session.lock().expect("session should lock");
+            while session.sse_events.len() < MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION {
+                let McpHttpSession {
+                    sse_events,
+                    next_sse_event_id,
+                    ..
+                } = &mut *session;
+                assert_eq!(
+                    mcp_http_push_sse_event(sse_events, next_sse_event_id, b"{}"),
+                    0
+                );
+            }
+            assert_eq!(
+                session.sse_events.len(),
+                MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+            );
+            assert_eq!(session.sse_events.front().map(|event| event.id), Some(1));
+            assert_eq!(
+                session.sse_events.back().map(|event| event.id),
+                Some(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION as u64)
+            );
+        }
+
+        let tools = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("MCP-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        );
+        let tools_response =
+            mcp_http_response(&tools, &state).expect("tools/list should produce response");
+        assert_eq!(tools_response.status, "200 OK");
+
+        let snapshot = mcp_http_sse_buffer_snapshot(&state).expect("snapshot should be available");
+        assert_eq!(snapshot.active_sessions, 1);
+        assert_eq!(snapshot.sessions_with_buffered_events, 1);
+        assert_eq!(
+            snapshot.buffered_events,
+            MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+        );
+        assert_eq!(
+            snapshot.buffer_capacity,
+            MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+        );
+        assert_eq!(
+            mcp_http_metrics_snapshot(&state)
+                .expect("metrics should snapshot")
+                .sse_event_buffer_evictions,
+            1
+        );
+
+        let ready = mcp_http_response(
+            &dashboard_test_request("GET", "/readyz", Vec::new()),
+            &state,
+        )
+        .expect("readyz should respond");
+        assert_eq!(ready.status, "200 OK");
+        let ready_json: serde_json::Value =
+            serde_json::from_slice(&ready.body).expect("readyz should be JSON");
+        assert_eq!(ready_json["active_sessions"], serde_json::json!(1));
+        assert_eq!(
+            ready_json["sse_sessions_with_buffered_events"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            ready_json["sse_buffered_events"],
+            serde_json::json!(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION)
+        );
+        assert_eq!(
+            ready_json["sse_buffer_capacity"],
+            serde_json::json!(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION)
+        );
+        assert_eq!(
+            ready_json["sse_event_buffer_evictions"],
+            serde_json::json!(1)
+        );
+
+        let metrics = mcp_http_response(
+            &dashboard_test_request("GET", "/metrics", Vec::new()),
+            &state,
+        )
+        .expect("metrics should respond");
+        assert_eq!(metrics.status, "200 OK");
+        let metrics_body = String::from_utf8(metrics.body).expect("metrics should be utf8");
+        assert!(metrics_body.contains("agentk_mcp_http_active_sessions 1\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_sessions_with_buffered_events 1\n"));
+        assert!(metrics_body.contains(&format!(
+            "agentk_mcp_http_sse_buffered_events {}\n",
+            MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+        )));
+        assert!(metrics_body.contains(&format!(
+            "agentk_mcp_http_sse_buffer_capacity {}\n",
+            MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+        )));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_event_buffer_evictions_total 1\n"));
+
+        let evicted_resume = dashboard_test_request_with_headers(
+            "GET",
+            "/mcp",
+            [
+                ("Accept", "text/event-stream"),
+                ("Mcp-Session-Id", session_id.as_str()),
+                ("Last-Event-ID", "0"),
+            ],
+            Vec::new(),
+        );
+        let evicted_resume_response =
+            mcp_http_response(&evicted_resume, &state).expect("evicted resume should fail closed");
+        assert_eq!(evicted_resume_response.status, "410 Gone");
+        assert_eq!(
+            mcp_http_metrics_snapshot(&state)
+                .expect("metrics should snapshot")
+                .sse_evicted_resume_requests,
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn mcp_http_response_sanitizes_downstream_spawn_failures() {
         let missing_command = "agentk-missing-downstream-command-9f8d7c6b";
         let state = Arc::new(McpHttpGatewayState {
@@ -14413,6 +14659,20 @@ done
         );
         assert_eq!(ready_json["sse_events_returned"], serde_json::json!(0));
         assert_eq!(
+            ready_json["sse_retained_events_per_session"],
+            serde_json::json!(MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION)
+        );
+        assert_eq!(
+            ready_json["sse_sessions_with_buffered_events"],
+            serde_json::json!(0)
+        );
+        assert_eq!(ready_json["sse_buffered_events"], serde_json::json!(0));
+        assert_eq!(ready_json["sse_buffer_capacity"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["sse_event_buffer_evictions"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
             ready_json["invalid_json_rpc_id_requests"],
             serde_json::json!(0)
         );
@@ -14487,6 +14747,14 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_sse_invalid_resume_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_evicted_resume_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_events_returned_total 0\n"));
+        assert!(metrics_body.contains(&format!(
+            "agentk_mcp_http_sse_retained_events_per_session {}\n",
+            MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION
+        )));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_sessions_with_buffered_events 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_buffered_events 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_buffer_capacity 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_sse_event_buffer_evictions_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_json_rpc_id_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
