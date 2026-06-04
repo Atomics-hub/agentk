@@ -837,9 +837,17 @@ agentk release-homebrew-formula \
   --version X.Y.Z \
   --homepage https://github.com/OWNER/REPO \
   --out dist/homebrew/agentk.rb
+agentk release-homebrew-formula-check \
+  --formula dist/homebrew/agentk.rb \
+  --source-archive dist/agentk-vX.Y.Z.tar.gz \
+  --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz \
+  --sha256 <source-tarball-sha256> \
+  --version X.Y.Z \
+  --homepage https://github.com/OWNER/REPO
 ```
 
-The command writes a local formula only; it does not publish a tap.
+The commands write and verify a local formula only; AgentK does not publish a
+tap.
 
 `dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
 templates for running the packaged MCP HTTP sidecar gateway, dashboard, and
@@ -1067,8 +1075,8 @@ Implemented today:
 - a one-command `mcp-shim-eval` scorecard for showing why the shim matters,
 - a minimal MCP JSON-RPC stdio server,
 - local key generation and signed key-rotation manifests,
-- local Homebrew formula generation for a reviewed source release URL and
-  SHA-256,
+- local Homebrew formula generation and formula/archive verification for a
+  reviewed source release URL and SHA-256,
 - a local release audit that runs formatting, tests, clippy, readiness, replay,
   signature, signer summaries, signer-pinning, trusted-signer manifest, secret-handle,
   secret-reference validation, secret-store availability, MCP taint-flow,

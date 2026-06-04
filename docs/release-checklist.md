@@ -162,10 +162,17 @@ cargo run --locked -- release-homebrew-formula \
   --version X.Y.Z \
   --homepage https://github.com/OWNER/REPO \
   --out dist/homebrew/agentk.rb
+cargo run --locked -- release-homebrew-formula-check \
+  --formula dist/homebrew/agentk.rb \
+  --source-archive dist/agentk-vX.Y.Z.tar.gz \
+  --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz \
+  --sha256 <source-tarball-sha256> \
+  --version X.Y.Z \
+  --homepage https://github.com/OWNER/REPO
 ```
 
-Review the generated Ruby formula before committing it to any tap. This command
-does not publish a tap.
+Review the generated Ruby formula before committing it to any tap. These
+commands do not publish a tap.
 
 Then run the explicit command set used by reviewers:
 

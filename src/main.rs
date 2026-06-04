@@ -3,10 +3,10 @@ use agentk::{
     MCP_PROTOCOL_VERSION, McpSubprocessProxy, McpSubprocessProxyConfig, Policy, ReadinessStatus,
     TeamPermissionsReport, Verdict, alpha_release_status_report, approval_review_jsonl,
     archive_sidecar_package, audit_inbox_jsonl, check_audit_store, check_audit_store_export,
-    check_sidecar_bundle, check_sidecar_package, check_sidecar_package_archive,
-    check_sidecar_package_http_handoff, check_sidecar_package_release_manifest,
-    check_sidecar_package_team_handoff, default_log_path, export_audit_store,
-    export_email_notification_payloads, export_github_notification_payloads,
+    check_homebrew_formula, check_sidecar_bundle, check_sidecar_package,
+    check_sidecar_package_archive, check_sidecar_package_http_handoff,
+    check_sidecar_package_release_manifest, check_sidecar_package_team_handoff, default_log_path,
+    export_audit_store, export_email_notification_payloads, export_github_notification_payloads,
     export_slack_notification_payloads, fork_replay_behavior_jsonl, fork_replay_jsonl,
     generate_signing_key_file, init_sidecar_bundle, inspect_jsonl, install_sidecar_package_archive,
     mcp_proxy_from_path, mcp_server_json_stream, mcp_subprocess_proxy_json_stream,
@@ -1041,6 +1041,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate a reviewed local Homebrew formula before tap handoff.
+    ReleaseHomebrewFormulaCheck {
+        /// Local Ruby formula path.
+        #[arg(long, default_value = "dist/homebrew/agentk.rb")]
+        formula: PathBuf,
+        /// Optional local source tarball to verify against the formula SHA-256.
+        #[arg(long)]
+        source_archive: Option<PathBuf>,
+        /// Optional expected HTTPS source release tarball URL.
+        #[arg(long)]
+        source_url: Option<String>,
+        /// Optional expected SHA-256 for the source release tarball.
+        #[arg(long)]
+        sha256: Option<String>,
+        /// Optional expected formula version.
+        #[arg(long)]
+        version: Option<String>,
+        /// Optional expected formula homepage HTTPS URL.
+        #[arg(long)]
+        homepage: Option<String>,
+        /// Optional expected Ruby formula class name.
+        #[arg(long)]
+        class_name: Option<String>,
+        /// Emit the formula check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -1495,6 +1522,25 @@ fn run() -> Result<(), AgentKError> {
             homepage,
             class_name,
             force,
+            json,
+        ),
+        Command::ReleaseHomebrewFormulaCheck {
+            formula,
+            source_archive,
+            source_url,
+            sha256,
+            version,
+            homepage,
+            class_name,
+            json,
+        } => release_homebrew_formula_check(
+            formula,
+            source_archive,
+            source_url,
+            sha256,
+            version,
+            homepage,
+            class_name,
             json,
         ),
     }
@@ -9076,6 +9122,71 @@ fn release_homebrew_formula(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn release_homebrew_formula_check(
+    formula: PathBuf,
+    source_archive: Option<PathBuf>,
+    source_url: Option<String>,
+    sha256: Option<String>,
+    version: Option<String>,
+    homepage: Option<String>,
+    class_name: Option<String>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = check_homebrew_formula(
+        &formula,
+        source_archive.as_deref(),
+        source_url.as_deref(),
+        sha256.as_deref(),
+        version.as_deref(),
+        homepage.as_deref(),
+        class_name.as_deref(),
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK Homebrew formula check");
+        println!("formula   {}", report.formula.display());
+        if let Some(source_archive) = &report.source_archive {
+            println!("archive   {}", source_archive.display());
+        }
+        if let Some(class_name) = &report.class_name {
+            println!("class     {class_name}");
+        }
+        if let Some(version) = &report.version {
+            println!("version   {version}");
+        }
+        if let Some(source_url) = &report.source_url {
+            println!("source-url {source_url}");
+        }
+        if let Some(sha256) = &report.sha256 {
+            println!("sha256    {sha256}");
+        }
+        println!(
+            "verdict   {}",
+            if report.passed { "verified" } else { "blocked" }
+        );
+        println!("note      formula was checked locally; AgentK did not publish a tap");
+        for check in &report.checks {
+            println!(
+                "[{}] {:<36} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if !report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew formula check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn run_release_candidate_smoke(
     root: Option<PathBuf>,
     force: bool,
@@ -15232,6 +15343,60 @@ done
         assert_eq!(homepage, "https://github.com/agentk/agentk");
         assert_eq!(class_name, "Agentk");
         assert!(force);
+        assert!(json);
+
+        let release_homebrew_formula_check = Cli::try_parse_from([
+            "agentk",
+            "release-homebrew-formula-check",
+            "--formula",
+            "dist/homebrew/agentk.rb",
+            "--source-archive",
+            "dist/agentk-v0.1.0.tar.gz",
+            "--source-url",
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            "--sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--version",
+            "0.1.0",
+            "--homepage",
+            "https://github.com/agentk/agentk",
+            "--class-name",
+            "Agentk",
+            "--json",
+        ])
+        .expect("release homebrew formula check should parse");
+        let Some(Command::ReleaseHomebrewFormulaCheck {
+            formula,
+            source_archive,
+            source_url,
+            sha256,
+            version,
+            homepage,
+            class_name,
+            json,
+        }) = release_homebrew_formula_check.command
+        else {
+            panic!("expected release-homebrew-formula-check command");
+        };
+        assert_eq!(formula, PathBuf::from("dist/homebrew/agentk.rb"));
+        assert_eq!(
+            source_archive,
+            Some(PathBuf::from("dist/agentk-v0.1.0.tar.gz"))
+        );
+        assert_eq!(
+            source_url,
+            Some("https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz".to_string())
+        );
+        assert_eq!(
+            sha256,
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
+        );
+        assert_eq!(version, Some("0.1.0".to_string()));
+        assert_eq!(
+            homepage,
+            Some("https://github.com/agentk/agentk".to_string())
+        );
+        assert_eq!(class_name, Some("Agentk".to_string()));
         assert!(json);
     }
 
