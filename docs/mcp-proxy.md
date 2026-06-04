@@ -317,8 +317,11 @@ authorized approval recording, and unknown reviewer rejection without
 contacting an IdP or claiming hosted SaaS.
 Run `<package>/bin/agentk-sidecar-production-preflight --json` when deployment
 review should focus on env and secret-reference readiness. It validates deploy
-env templates, `sidecar/secrets.toml`, placeholder coverage, and non-local bind
-defaults without reading live secrets or claiming hosted SaaS.
+env templates, `sidecar/secrets.toml`, `sidecar/secret-refs-production.toml`,
+placeholder coverage, and non-local bind defaults. The JSON/Markdown includes a
+provider inventory for production-shaped AWS Secrets Manager, GCP Secret
+Manager, Azure Key Vault, Vault, and 1Password refs without reading live
+secrets, printing raw references, or claiming hosted SaaS.
 Run `<package>/bin/agentk-sidecar-client-handoff --json` when client onboarding
 should focus on Claude Desktop, Codex, Cursor, stdio, TCP, and Streamable HTTP
 setup readiness. It writes client-handoff JSON/Markdown with hashes for the

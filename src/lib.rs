@@ -574,6 +574,16 @@ pub struct SecretReferenceManifestReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SecretReferenceProviderInventory {
+    pub manifest: String,
+    pub provider: String,
+    pub secret_count: usize,
+    pub production_provider: bool,
+    pub shape_checked: bool,
+    pub live_lookup_performed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SecretReferenceStoreReport {
     pub version: u64,
     pub secret_count: usize,
@@ -594,6 +604,17 @@ pub fn secret_reference_manifest_report_from_path(
 ) -> Result<SecretReferenceManifestReport, AgentKError> {
     let manifest = SecretReferenceManifest::from_path(path)?;
     Ok(secret_reference_manifest_report(&manifest))
+}
+
+fn secret_reference_provider_inventory_from_path(
+    path: impl AsRef<Path>,
+    manifest_name: &str,
+) -> Result<Vec<SecretReferenceProviderInventory>, AgentKError> {
+    let manifest = SecretReferenceManifest::from_path(path)?;
+    Ok(secret_reference_provider_inventory(
+        &manifest,
+        manifest_name,
+    ))
 }
 
 fn secret_reference_manifest_report(
@@ -619,6 +640,29 @@ fn secret_reference_manifest_report(
             .filter(|secret| has_provider_specific_secret_reference_shape(secret.provider()))
             .count(),
     }
+}
+
+fn secret_reference_provider_inventory(
+    manifest: &SecretReferenceManifest,
+    manifest_name: &str,
+) -> Vec<SecretReferenceProviderInventory> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for secret in manifest.secrets() {
+        *counts.entry(secret.provider().to_string()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(
+            |(provider, secret_count)| SecretReferenceProviderInventory {
+                manifest: manifest_name.to_string(),
+                production_provider: is_known_production_secret_provider(&provider),
+                shape_checked: has_provider_specific_secret_reference_shape(&provider),
+                live_lookup_performed: false,
+                provider,
+                secret_count,
+            },
+        )
+        .collect()
 }
 
 pub fn secret_reference_store_report(
@@ -6932,6 +6976,7 @@ pub struct SidecarPackageProductionPreflightReport {
     pub json_path: PathBuf,
     pub markdown_path: PathBuf,
     pub secrets_path: PathBuf,
+    pub production_secrets_path: PathBuf,
     pub local_team_sidecar_alpha: bool,
     pub hosted_saas: bool,
     pub live_secret_retrieval: bool,
@@ -6940,6 +6985,8 @@ pub struct SidecarPackageProductionPreflightReport {
     pub artifacts: Vec<SidecarPackageProductionPreflightArtifact>,
     pub package_check: SidecarPackageCheckReport,
     pub secret_refs: SecretReferenceManifestReport,
+    pub production_secret_refs: SecretReferenceManifestReport,
+    pub secret_reference_providers: Vec<SecretReferenceProviderInventory>,
     pub env_templates: usize,
     pub env_assignments: usize,
     pub placeholder_assignments: usize,
@@ -8952,9 +8999,18 @@ pub fn write_sidecar_package_production_preflight(
     let json_path = output_dir.join("production-preflight.json");
     let markdown_path = output_dir.join("production-preflight.md");
     let secrets_path = root.join("sidecar/secrets.toml");
+    let production_secrets_path = root.join("sidecar/secret-refs-production.toml");
 
     let package_check = check_sidecar_package(root)?;
     let secret_refs = secret_reference_manifest_report_from_path(&secrets_path)?;
+    let production_secret_refs =
+        secret_reference_manifest_report_from_path(&production_secrets_path)?;
+    let mut secret_reference_providers =
+        secret_reference_provider_inventory_from_path(&secrets_path, "sidecar/secrets.toml")?;
+    secret_reference_providers.extend(secret_reference_provider_inventory_from_path(
+        &production_secrets_path,
+        "sidecar/secret-refs-production.toml",
+    )?);
     let env_summary = sidecar_package_env_template_summary(root)?;
     let non_local_bind_defaults_disabled = sidecar_package_non_local_bind_defaults_disabled(root)?;
     let artifacts = sidecar_package_production_preflight_artifacts(root)?;
@@ -8971,6 +9027,19 @@ pub fn write_sidecar_package_production_preflight(
             format!(
                 "{} refs across {} providers; values are references, not secrets",
                 secret_refs.secret_count, secret_refs.provider_count
+            ),
+        ),
+        production_preflight_report_check(
+            "production secret reference shapes",
+            production_secret_refs.secret_count > 0
+                && production_secret_refs.production_provider_ref_count
+                    == production_secret_refs.secret_count
+                && production_secret_refs.shape_checked_ref_count
+                    == production_secret_refs.secret_count,
+            format!(
+                "{} production-shaped refs across {} providers; provider shapes checked without live lookup",
+                production_secret_refs.production_provider_ref_count,
+                production_secret_refs.provider_count
             ),
         ),
         check_sidecar_package_deploy_env_examples(root),
@@ -9018,6 +9087,7 @@ pub fn write_sidecar_package_production_preflight(
         json_path: json_path.clone(),
         markdown_path: markdown_path.clone(),
         secrets_path,
+        production_secrets_path,
         local_team_sidecar_alpha: true,
         hosted_saas: false,
         live_secret_retrieval: false,
@@ -9026,6 +9096,8 @@ pub fn write_sidecar_package_production_preflight(
         artifacts,
         package_check,
         secret_refs,
+        production_secret_refs,
+        secret_reference_providers,
         env_templates: env_summary.templates,
         env_assignments: env_summary.assignments,
         placeholder_assignments: env_summary.placeholder_assignments,
@@ -9104,6 +9176,11 @@ fn sidecar_package_production_preflight_artifacts(
         "secret reference manifest",
         root.join("sidecar/secrets.toml"),
     )?;
+    sidecar_package_production_preflight_artifact(
+        &mut artifacts,
+        "production secret reference manifest",
+        root.join("sidecar/secret-refs-production.toml"),
+    )?;
     for relative in SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES {
         sidecar_package_production_preflight_artifact(
             &mut artifacts,
@@ -9154,6 +9231,10 @@ fn sidecar_package_production_preflight_markdown(
         report.secrets_path.display()
     ));
     out.push_str(&format!(
+        "- Production-shaped refs: `{}`\n",
+        report.production_secrets_path.display()
+    ));
+    out.push_str(&format!(
         "- Env templates: `{}` templates, `{}` assignments, `{}` placeholders\n",
         report.env_templates, report.env_assignments, report.placeholder_assignments
     ));
@@ -9168,6 +9249,22 @@ fn sidecar_package_production_preflight_markdown(
             check.status.as_str(),
             markdown_cell(&check.name),
             markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Secret Reference Providers\n\n");
+    out.push_str(
+        "| Manifest | Provider | Refs | Production Provider | Shape Checked | Live Lookup |\n",
+    );
+    out.push_str("| --- | --- | ---: | --- | --- | --- |\n");
+    for provider in &report.secret_reference_providers {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | `{}` | `{}` | `{}` |\n",
+            markdown_cell(&provider.manifest),
+            markdown_cell(&provider.provider),
+            provider.secret_count,
+            provider.production_provider,
+            provider.shape_checked,
+            provider.live_lookup_performed
         ));
     }
     out.push_str("\n## Artifacts\n\n");
@@ -19504,6 +19601,10 @@ pub fn init_sidecar_bundle(
         ),
         ("secrets.toml", sidecar_secret_refs().to_string()),
         (
+            "secret-refs-production.toml",
+            sidecar_production_secret_refs().to_string(),
+        ),
+        (
             "clients/claude-desktop.mcp.json",
             sidecar_claude_desktop_config().to_string(),
         ),
@@ -26035,6 +26136,40 @@ reference = "DATABASE_URL"
 "#
 }
 
+fn sidecar_production_secret_refs() -> &'static str {
+    r#"# Production-shaped secret references for deployment review.
+# Values are provider references, not secret values. AgentK validates the
+# provider-specific reference shape without contacting providers.
+
+version = 1
+
+[[secrets]]
+target = "secret://github-api"
+provider = "aws-secrets-manager"
+reference = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/prod/github-api-AbCd"
+
+[[secrets]]
+target = "secret://postgres-url"
+provider = "gcp-secret-manager"
+reference = "projects/agentk-prod/secrets/postgres_url/versions/latest"
+
+[[secrets]]
+target = "secret://slack-bot"
+provider = "azure-key-vault"
+reference = "https://agentkvault.vault.azure.net/secrets/slack-bot"
+
+[[secrets]]
+target = "secret://filesystem-key"
+provider = "vault"
+reference = "kv/team/filesystem-key#value"
+
+[[secrets]]
+target = "secret://reviewer-key"
+provider = "onepassword"
+reference = "op://Platform/AgentK/reviewer-key"
+"#
+}
+
 fn sidecar_team_permissions() -> &'static str {
     r#"# Team permissions for local AgentK approval review.
 # Replace the sample user ids with your team's stable identities.
@@ -26155,6 +26290,8 @@ and gives the team a policy file they can review before agents touch real tools.
 - `team-identity.toml`: external IdP groups mapped to local reviewers.
 - `policies/team-sidecar.toml`: default-deny AgentK policy starter.
 - `secrets.toml`: environment-backed secret references, never secret values.
+- `secret-refs-production.toml`: production-shaped provider references for
+  deployment review, never secret values.
 - `clients/claude-desktop.mcp.json`: MCP client snippet for Claude Desktop.
 - `clients/codex-cursor-mcp-command.txt`: generic command/args snippet for MCP clients.
 - `demos/safe-agent-demo.md`: packaged GitHub/Postgres/Slack/filesystem demo plan.
@@ -26336,8 +26473,8 @@ install receipt still match the handoff.
   permissions and identity mapping handoff, including reviewer-scoped reads,
   authorized decisions, and fail-closed unknown reviewer rejection.
 - `bin/agentk-sidecar-production-preflight`: validates deploy env templates,
-  secret-reference manifests, placeholder coverage, and non-local bind defaults
-  before deployment review.
+  active and production-shaped secret-reference manifests, placeholder coverage,
+  and non-local bind defaults before deployment review.
 - `bin/agentk-sidecar-client-handoff`: validates Claude Desktop, Codex, Cursor,
   stdio, TCP, and Streamable HTTP setup artifacts, then writes one
   JSON/Markdown client onboarding handoff.
@@ -26496,8 +26633,10 @@ rejection without contacting an IdP or claiming hosted SaaS. Set
 `bin/agentk-sidecar-production-preflight` writes
 `sidecar/.agentk/production-preflight/production-preflight.json` and
 `sidecar/.agentk/production-preflight/production-preflight.md` by default. It
-checks deploy env templates, `sidecar/secrets.toml`, placeholder coverage, and
-non-local bind defaults without reading live secrets or claiming hosted SaaS.
+checks deploy env templates, `sidecar/secrets.toml`,
+`sidecar/secret-refs-production.toml`, placeholder coverage, and non-local bind
+defaults without reading live secrets, printing raw provider references, or
+claiming hosted SaaS.
 Set `AGENTK_PRODUCTION_PREFLIGHT_OUT` to choose another output directory.
 
 `bin/agentk-sidecar-client-handoff` writes
@@ -29008,13 +29147,14 @@ mod tests {
         let report = init_sidecar_bundle(&root, false).expect("sidecar bundle should be generated");
 
         assert_eq!(report.root, root);
-        assert_eq!(report.files.len(), 9);
+        assert_eq!(report.files.len(), 10);
         assert!(root.join("README.md").exists());
         assert!(root.join("agentk-sidecar.toml").exists());
         assert!(root.join("team-permissions.toml").exists());
         assert!(root.join("team-identity.toml").exists());
         assert!(root.join("policies/team-sidecar.toml").exists());
         assert!(root.join("secrets.toml").exists());
+        assert!(root.join("secret-refs-production.toml").exists());
         assert!(root.join("clients/claude-desktop.mcp.json").exists());
         assert!(root.join("clients/codex-cursor-mcp-command.txt").exists());
         assert!(root.join("demos/safe-agent-demo.md").exists());
@@ -29040,6 +29180,12 @@ mod tests {
         let secrets = secret_reference_manifest_report_from_path(root.join("secrets.toml"))
             .expect("generated secret refs should parse without secret values");
         assert_eq!(secrets.secret_count, 3);
+        let production_secrets =
+            secret_reference_manifest_report_from_path(root.join("secret-refs-production.toml"))
+                .expect("generated production secret refs should parse without secret values");
+        assert_eq!(production_secrets.secret_count, 5);
+        assert_eq!(production_secrets.production_provider_ref_count, 5);
+        assert_eq!(production_secrets.shape_checked_ref_count, 5);
         let permissions_path = root.join("team-permissions.toml");
         let identity = team_identity_report_from_path(
             root.join("team-identity.toml"),
@@ -29664,6 +29810,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-quickstart"));
         assert!(package_readme.contains("bin/agentk-sidecar-permissions-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-production-preflight"));
+        assert!(package_readme.contains("sidecar/secret-refs-production.toml"));
         assert!(package_readme.contains("bin/agentk-sidecar-client-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-dashboard-handoff"));
         assert!(package_readme.contains("operator-handoff.json"));
@@ -30795,6 +30942,33 @@ can_deny = ["*"]
         assert!(report.json_path.is_file());
         assert!(report.markdown_path.is_file());
         assert_eq!(report.secret_refs.secret_count, 3);
+        assert_eq!(report.production_secret_refs.secret_count, 5);
+        assert_eq!(
+            report.production_secret_refs.production_provider_ref_count,
+            5
+        );
+        assert_eq!(report.production_secret_refs.shape_checked_ref_count, 5);
+        assert_eq!(report.secret_reference_providers.len(), 6);
+        for provider in [
+            "aws-secrets-manager",
+            "gcp-secret-manager",
+            "azure-key-vault",
+            "vault",
+            "onepassword",
+        ] {
+            let entry = report
+                .secret_reference_providers
+                .iter()
+                .find(|entry| {
+                    entry.manifest == "sidecar/secret-refs-production.toml"
+                        && entry.provider == provider
+                })
+                .expect("production provider inventory entry should exist");
+            assert_eq!(entry.secret_count, 1);
+            assert!(entry.production_provider);
+            assert!(entry.shape_checked);
+            assert!(!entry.live_lookup_performed);
+        }
         assert_eq!(
             report.env_templates,
             SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES.len()
@@ -30819,6 +30993,27 @@ can_deny = ["*"]
         assert_eq!(value["passed"], serde_json::json!(true));
         assert_eq!(value["hosted_saas"], serde_json::json!(false));
         assert_eq!(value["live_secret_retrieval"], serde_json::json!(false));
+        assert_eq!(
+            value["production_secret_refs"]["production_provider_ref_count"],
+            serde_json::json!(5)
+        );
+        let provider_inventory = value["secret_reference_providers"]
+            .as_array()
+            .expect("provider inventory should serialize");
+        assert!(provider_inventory.iter().any(|entry| {
+            entry["provider"] == serde_json::json!("aws-secrets-manager")
+                && entry["shape_checked"] == serde_json::json!(true)
+                && entry["live_lookup_performed"] == serde_json::json!(false)
+        }));
+        for raw_ref in [
+            "arn:aws:secretsmanager",
+            "projects/agentk-prod",
+            "agentkvault.vault.azure.net",
+            "kv/team/filesystem-key",
+            "op://Platform",
+        ] {
+            assert!(!json.contains(raw_ref));
+        }
 
         let markdown = fs::read_to_string(&report.markdown_path)
             .expect("production preflight markdown should read");
@@ -30826,6 +31021,10 @@ can_deny = ["*"]
         assert!(markdown.contains("Live secret retrieval: `false`"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("secret reference manifest"));
+        assert!(markdown.contains("Secret Reference Providers"));
+        assert!(markdown.contains("aws-secrets-manager"));
+        assert!(markdown.contains("sidecar/secret-refs-production.toml"));
+        assert!(!markdown.contains("arn:aws:secretsmanager"));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();

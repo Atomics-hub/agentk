@@ -256,7 +256,8 @@ artifact inventory coverage. It also
 checks support/doctor handoff evidence for operator refresh, no-remediation
 doctor output, release-manifest binding, and hashed support inventory. It also
 checks deploy/preflight handoff evidence for templates, placeholders,
-secret-reference manifests, and non-local bind defaults. It also checks the
+secret-reference manifests, provider-shaped production refs, and non-local bind
+defaults. It also checks the
 publication handoff evidence for strict finalization, signed tag evidence,
 package archive hash, final release notes, owner-scoped publication steps, and
 `release-publication-check` coverage, and records the publication preflight JSON
@@ -612,7 +613,10 @@ rejection, then writes
 an IdP or claiming hosted SaaS.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-production-preflight --json` before
 deployment review to validate supervisor env templates, `sidecar/secrets.toml`,
-placeholder coverage, and non-local bind defaults. It writes
+`sidecar/secret-refs-production.toml`, placeholder coverage, and non-local bind
+defaults. It writes a provider inventory for AWS Secrets Manager, GCP Secret
+Manager, Azure Key Vault, Vault, and 1Password without printing raw references
+or performing live lookups, plus
 `sidecar/.agentk/production-preflight/production-preflight.json` and
 `sidecar/.agentk/production-preflight/production-preflight.md` without reading
 live secrets, configuring TLS, contacting an IdP, or claiming hosted SaaS.
