@@ -37517,7 +37517,7 @@ reviewer = "tom"
         .expect("release checklist fixture should be writable");
         fs::write(
             root.join("docs/public-readiness.md"),
-            "release-candidate-smoke sidecar-package-release-manifest sidecar-package-release-manifest-check",
+            "release-candidate-smoke sidecar-package-release-manifest sidecar-package-release-manifest-check release-ticket top-level artifact inventory",
         )
         .expect("public readiness fixture should be writable");
         fs::write(root.join("docs/productization-plan.md"), "v0.2 alpha")
@@ -37539,6 +37539,10 @@ reviewer = "tom"
                 .any(|item| item.name == "v0.2 alpha release notes draft"
                     && item.status == ReadinessStatus::Fail)
         );
+        assert!(report.verification_gates.iter().any(|item| {
+            item.name == "public readiness covers alpha package smoke"
+                && item.status == ReadinessStatus::Pass
+        }));
 
         fs::remove_dir_all(root).expect("fixture dir should be removable");
     }
