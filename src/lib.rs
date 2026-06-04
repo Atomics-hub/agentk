@@ -13237,6 +13237,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ),
                 (
                     "src/main.rs",
+                    "store/notification evidence proves durable approvals",
+                ),
+                (
+                    "src/main.rs",
                     "quickstart evidence proves first-run package health",
                 ),
                 (

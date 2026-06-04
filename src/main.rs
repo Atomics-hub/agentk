@@ -11475,6 +11475,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
     let install_package_check = release_ticket_install_package_provenance_check(&smoke);
+    let store_notification_check = release_ticket_store_notification_handoff_check(&smoke);
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
@@ -11572,6 +11573,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
             },
         ),
         install_package_check,
+        store_notification_check,
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
@@ -11605,6 +11607,199 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_store_notification_handoff_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = [
+        "store readme",
+        "postgres load",
+        "team approvals",
+        "slack payloads",
+        "github payloads",
+        "email payloads",
+        "store postgres env example",
+        "notifications env example",
+    ]
+    .iter()
+    .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+    .copied()
+    .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "store/notification handoff",
+            ReadinessStatus::Fail,
+            format!(
+                "missing store/notification artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_store_notification_handoff_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "store/notification handoff",
+            ReadinessStatus::Pass,
+            "store/notification evidence proves durable approvals, Postgres load coverage, Slack/GitHub/email redacted payloads, and local env-held bridge configuration",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("store/notification handoff", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_store_notification_handoff_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let approvals = release_ticket_json_artifact(smoke, "team approvals")?;
+    release_ticket_require_bool(&approvals, "signatures_ok", true, "team approvals")?;
+    if approvals
+        .get("events_checked")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        < 10
+    {
+        return Err("team approvals does not prove trace event coverage".to_string());
+    }
+    if approvals
+        .get("open_approvals")
+        .and_then(|value| value.as_array())
+        .map(|values| values.len())
+        .unwrap_or_default()
+        < 5
+    {
+        return Err("team approvals does not prove open approval inventory".to_string());
+    }
+    let blocked_rules = approvals
+        .get("blocked_rules")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| "team approvals is missing blocked_rules".to_string())?;
+    for rule in [
+        "tool-invoke-capability-missing",
+        "tool-sensitive-input",
+        "tool-tainted-input",
+        "taint-sensitive-egress",
+    ] {
+        if blocked_rules
+            .get(rule)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            == 0
+        {
+            return Err(format!("team approvals does not prove blocked rule {rule}"));
+        }
+    }
+
+    let store_readme = release_ticket_text_artifact(smoke, "store readme")?;
+    for fragment in [
+        "Postgres",
+        "redacted evidence and hashes",
+        "raw tool payloads",
+        "secret values",
+    ] {
+        if !store_readme.contains(fragment) {
+            return Err(format!("store readme does not document {fragment}"));
+        }
+    }
+    let postgres_load = release_ticket_text_artifact(smoke, "postgres load")?;
+    for table in [
+        "agentk_traces",
+        "agentk_audit_events",
+        "agentk_approval_decisions",
+        "agentk_blocked_rules",
+        "agentk_syscall_summary",
+        "agentk_evidence_summary",
+        "agentk_team_users",
+        "agentk_team_roles",
+        "agentk_team_user_roles",
+        "agentk_team_role_scopes",
+        "agentk_team_identity_mappings",
+    ] {
+        if !postgres_load.contains(table) {
+            return Err(format!("postgres load does not cover {table}"));
+        }
+    }
+    for name in ["store postgres env example", "notifications env example"] {
+        let env = release_ticket_text_artifact(smoke, name)?;
+        if !env.contains("CHANGE_ME") && !env.contains("OWNER/REPO") {
+            return Err(format!(
+                "{name} does not prove placeholder-only bridge config"
+            ));
+        }
+    }
+
+    let slack = release_ticket_jsonl_artifact(smoke, "slack payloads")?;
+    release_ticket_require_jsonl_len_at_least(&slack, "slack payloads", 5)?;
+    for payload in &slack {
+        release_ticket_require_nested_string(
+            payload,
+            &["metadata", "event_type"],
+            "agentk_approval_requested",
+            "slack payloads",
+        )?;
+        release_ticket_require_nested_string(
+            payload,
+            &["metadata", "event_payload", "status"],
+            "pending",
+            "slack payloads",
+        )?;
+    }
+
+    let github = release_ticket_jsonl_artifact(smoke, "github payloads")?;
+    release_ticket_require_jsonl_len_at_least(&github, "github payloads", 5)?;
+    for payload in &github {
+        release_ticket_require_string(payload, "operation", "upsert_issue", "github payloads")?;
+        release_ticket_require_string(
+            payload,
+            "repository",
+            "agentk/safe-agent-demo",
+            "github payloads",
+        )?;
+        release_ticket_require_nested_string(
+            payload,
+            &["metadata", "status"],
+            "pending",
+            "github payloads",
+        )?;
+        let body = payload
+            .get("issue")
+            .and_then(|issue| issue.get("body"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if !body.contains("no raw tool payloads or secret values") {
+            return Err("github payloads do not prove redacted payload disclaimer".to_string());
+        }
+    }
+
+    let email = release_ticket_jsonl_artifact(smoke, "email payloads")?;
+    release_ticket_require_jsonl_len_at_least(&email, "email payloads", 5)?;
+    for payload in &email {
+        release_ticket_require_nested_string(
+            payload,
+            &["metadata", "status"],
+            "pending",
+            "email payloads",
+        )?;
+        let recipients = payload
+            .get("to")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| "email payloads are missing to recipients".to_string())?;
+        if !recipients
+            .iter()
+            .any(|value| value.as_str() == Some("agentk-alerts@example.com"))
+        {
+            return Err("email payloads do not prove dummy recipient handoff".to_string());
+        }
+        let body = payload
+            .get("body")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if !body.contains("no raw tool payloads or secret values") {
+            return Err("email payloads do not prove redacted payload disclaimer".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_install_package_provenance_check(
@@ -12253,6 +12448,34 @@ fn release_ticket_json_artifact(
     })
 }
 
+fn release_ticket_jsonl_artifact(
+    smoke: &ReleaseCandidateSmokeReport,
+    name: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let artifact = release_ticket_smoke_artifact(smoke, name)
+        .ok_or_else(|| format!("{name} artifact is missing"))?;
+    let content = fs::read_to_string(&artifact.path).map_err(|err| {
+        format!(
+            "{name} could not be read as UTF-8 at {}: {err}",
+            artifact.path.display()
+        )
+    })?;
+    content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<serde_json::Value>(line).map_err(|err| {
+                format!(
+                    "{name} line {} could not be parsed at {}: {err}",
+                    index + 1,
+                    artifact.path.display()
+                )
+            })
+        })
+        .collect()
+}
+
 fn release_ticket_text_artifact(
     smoke: &ReleaseCandidateSmokeReport,
     name: &str,
@@ -12293,6 +12516,35 @@ fn release_ticket_require_string(
     }
 }
 
+fn release_ticket_require_nested_string(
+    report: &serde_json::Value,
+    path: &[&str],
+    expected: &str,
+    label: &str,
+) -> Result<(), String> {
+    let mut value = report;
+    for field in path {
+        value = if let Ok(index) = field.parse::<usize>() {
+            value
+                .as_array()
+                .and_then(|values| values.get(index))
+                .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?
+        } else {
+            value
+                .get(*field)
+                .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?
+        };
+    }
+    if value.as_str() == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} does not prove {} == {expected}",
+            path.join(".")
+        ))
+    }
+}
+
 fn release_ticket_require_u64(
     report: &serde_json::Value,
     field: &str,
@@ -12319,6 +12571,21 @@ fn release_ticket_require_array_len_at_least(
             values.len()
         )),
         None => Err(format!("{label} is missing array {field}")),
+    }
+}
+
+fn release_ticket_require_jsonl_len_at_least(
+    values: &[serde_json::Value],
+    label: &str,
+    min_len: usize,
+) -> Result<(), String> {
+    if values.len() >= min_len {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} reports {} JSONL entries, expected at least {min_len}",
+            values.len()
+        ))
     }
 }
 
