@@ -11474,6 +11474,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .copied()
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
+    let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
     let accepted_limit_checks = release_ticket_accepted_limit_checks(&status);
     let accepted_limits_ready = !accepted_limit_checks.is_empty()
@@ -11568,6 +11569,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
                     .to_string()
             },
         ),
+        support_handoff_check,
         deploy_preflight_check,
     ];
     checks.extend(objective_checks);
@@ -11599,6 +11601,157 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_support_doctor_handoff_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = [
+        "operator handoff json",
+        "operator handoff markdown",
+        "sidecar doctor json",
+        "sidecar doctor markdown",
+        "support bundle json",
+        "support bundle markdown",
+    ]
+    .iter()
+    .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+    .copied()
+    .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "support/doctor handoff",
+            ReadinessStatus::Fail,
+            format!(
+                "missing support/doctor artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_support_doctor_handoff_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "support/doctor handoff",
+            ReadinessStatus::Pass,
+            "support evidence proves operator handoff refresh, sidecar doctor remediation, release-manifest binding, hashed support inventory, and local non-hosted scope",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("support/doctor handoff", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_support_doctor_handoff_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let operator = release_ticket_json_artifact(smoke, "operator handoff json")?;
+    let doctor = release_ticket_json_artifact(smoke, "sidecar doctor json")?;
+    let support = release_ticket_json_artifact(smoke, "support bundle json")?;
+
+    release_ticket_require_bool(&operator, "passed", true, "operator handoff json")?;
+    release_ticket_require_bool(
+        &operator,
+        "local_team_sidecar_alpha",
+        true,
+        "operator handoff json",
+    )?;
+    release_ticket_require_bool(&operator, "hosted_saas", false, "operator handoff json")?;
+    release_ticket_require_checks(
+        &operator,
+        "operator handoff json",
+        &[
+            ("safe-agent demo", "checks improved"),
+            ("dashboard artifact", "open approvals"),
+            ("team permissions", "reviewers"),
+            ("team identity", "mappings"),
+            ("durable team store", "notifications"),
+            ("notification payload exports", "payloads"),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+
+    release_ticket_require_bool(&doctor, "passed", true, "sidecar doctor json")?;
+    release_ticket_require_bool(
+        &doctor,
+        "local_team_sidecar_alpha",
+        true,
+        "sidecar doctor json",
+    )?;
+    release_ticket_require_bool(&doctor, "hosted_saas", false, "sidecar doctor json")?;
+    release_ticket_require_empty_array(&doctor, "remediation_steps", "sidecar doctor json")?;
+    release_ticket_require_checks(
+        &doctor,
+        "sidecar doctor json",
+        &[
+            ("package self-check", "package readiness checks"),
+            ("install receipt", "installed files"),
+            ("env template sanity", "no detected secrets"),
+            ("MCP gateway handoff readiness", "HTTP/SSE checks"),
+            ("team dashboard/store readiness", "team handoff checks"),
+            (
+                "operator handoff artifacts",
+                "operator handoff JSON/Markdown",
+            ),
+            ("audit evidence retention", "notification rows"),
+            ("release manifest binding", "binds archive sha256"),
+            ("filesystem/demo package integrity", "trace evidence"),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+
+    release_ticket_require_bool(&support, "passed", true, "support bundle json")?;
+    release_ticket_require_bool(
+        &support,
+        "local_team_sidecar_alpha",
+        true,
+        "support bundle json",
+    )?;
+    release_ticket_require_bool(&support, "hosted_saas", false, "support bundle json")?;
+    release_ticket_require_empty_array(&support, "remediation_steps", "support bundle json")?;
+    release_ticket_require_checks(
+        &support,
+        "support bundle json",
+        &[
+            ("package preflight", "package readiness checks"),
+            ("operator handoff refresh", "handoff checks"),
+            ("sidecar doctor", "0 remediation steps"),
+            ("support artifact inventory", "support artifacts inspected"),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+    release_ticket_require_artifacts(
+        &support,
+        "support bundle json",
+        &[
+            "package manifest",
+            "package lock",
+            "release manifest",
+            "operator handoff json",
+            "operator handoff markdown",
+            "sidecar doctor json",
+            "sidecar doctor markdown",
+            "safe-agent trace",
+            "dashboard html",
+            "store export audit",
+            "durable approvals",
+            "slack payloads",
+            "github payloads",
+            "email payloads",
+        ],
+    )?;
+    release_ticket_require_nested_bool(
+        &support,
+        &["operator_handoff", "passed"],
+        true,
+        "support bundle json",
+    )?;
+    release_ticket_require_nested_bool(
+        &support,
+        &["doctor", "passed"],
+        true,
+        "support bundle json",
+    )?;
+    Ok(())
 }
 
 fn release_ticket_deploy_preflight_check(
@@ -11814,6 +11967,43 @@ fn release_ticket_require_bool(
         Ok(())
     } else {
         Err(format!("{label} does not prove {field} == {expected}"))
+    }
+}
+
+fn release_ticket_require_nested_bool(
+    report: &serde_json::Value,
+    path: &[&str],
+    expected: bool,
+    label: &str,
+) -> Result<(), String> {
+    let mut value = report;
+    for field in path {
+        value = value
+            .get(*field)
+            .ok_or_else(|| format!("{label} is missing {}", path.join(".")))?;
+    }
+    if value.as_bool() == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} does not prove {} == {expected}",
+            path.join(".")
+        ))
+    }
+}
+
+fn release_ticket_require_empty_array(
+    report: &serde_json::Value,
+    field: &str,
+    label: &str,
+) -> Result<(), String> {
+    match report.get(field).and_then(|value| value.as_array()) {
+        Some(values) if values.is_empty() => Ok(()),
+        Some(values) => Err(format!(
+            "{label} reports {} non-empty entries in {field}",
+            values.len()
+        )),
+        None => Err(format!("{label} is missing array {field}")),
     }
 }
 

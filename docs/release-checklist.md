@@ -140,9 +140,11 @@ reviewer-scoped team-store evidence, multi-user permissions proof for reviewer
 roles, identity coverage, reviewer-scoped reads, and unauthorized rejection,
 Claude/Codex/Cursor sidecar onboarding proof for packaged client snippets and
 stdio/TCP/HTTP launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo
-including blocked filesystem patch proof, plus accepted-limit checks that keep
-hosted SaaS, live IdP, production secret retrieval, public internet gateway,
-and similar deferred-scope claims out of the alpha handoff. The same ticket
+including blocked filesystem patch proof. It also checks support/doctor handoff
+evidence for operator refresh, no-remediation doctor output, release-manifest
+binding, and hashed support inventory, plus accepted-limit checks that keep
+hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
+similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,
 secret-reference manifests, non-local bind defaults, and no live secret
 retrieval. It does not tag, push, upload, or publish. The remaining commands

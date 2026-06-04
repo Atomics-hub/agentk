@@ -13231,6 +13231,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "deploy/preflight evidence proves deploy templates",
                 ),
+                (
+                    "src/main.rs",
+                    "support evidence proves operator handoff refresh",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),

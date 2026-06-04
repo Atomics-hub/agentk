@@ -244,8 +244,10 @@ sidecar onboarding proof for packaged client snippets and stdio/TCP/HTTP
 launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo evidence
 including blocked filesystem patch proof, so reviewers can see product coverage
 without opening the full smoke report. The product coverage summary also
+checks support/doctor handoff evidence for operator refresh, no-remediation
+doctor output, release-manifest binding, and hashed support inventory. It also
 checks deploy/preflight handoff evidence for templates, placeholders,
-secret-reference manifests, and non-local bind defaults. It also includes accepted alpha
+secret-reference manifests, and non-local bind defaults. It includes accepted alpha
 limits as explicit deferred-scope checks, so the same handoff distinguishes
 local/team sidecar readiness from hosted SaaS, live IdP, production secret
 retrieval, and public internet gateway claims.
@@ -921,8 +923,8 @@ gates. Run `cargo run --locked -- release-ticket --out dist/release-ticket --for
 to create one offline reviewer handoff directory containing release status,
 release-candidate smoke evidence, evidence-check results, finalization evidence,
 and a summary ticket JSON with explicit product-objective coverage checks,
-accepted alpha limits, and deferred-scope checks, without tagging, pushing,
-uploading, or publishing.
+support/doctor handoff checks, accepted alpha limits, and deferred-scope checks,
+without tagging, pushing, uploading, or publishing.
 The individual steps remain available: run
 `cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json`
 to recreate the package, archive, checksum, and release manifest in a
