@@ -154,9 +154,11 @@ Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
-gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata such
-as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
-explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
+gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata is
+rejected by default; `--trust-proxy-headers` accepts only clean `Forwarded`,
+`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP`
+values from a reviewed reverse proxy, rejects duplicates or malformed values,
+and reports only redacted readiness/metrics counts. Ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
 tokens instead. Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by

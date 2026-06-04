@@ -582,6 +582,9 @@ enum Command {
         /// Allow binding the HTTP gateway to a non-loopback host.
         #[arg(long)]
         allow_non_local_bind: bool,
+        /// Accept clean forwarded/proxy metadata from a trusted reverse proxy.
+        #[arg(long)]
+        trust_proxy_headers: bool,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -696,6 +699,9 @@ enum Command {
         /// Allow binding the HTTP gateway to a non-loopback host.
         #[arg(long)]
         allow_non_local_bind: bool,
+        /// Accept clean forwarded/proxy metadata from a trusted reverse proxy.
+        #[arg(long)]
+        trust_proxy_headers: bool,
         /// Optional env var containing a bearer token for HTTP MCP requests.
         #[arg(long, default_value = "AGENTK_MCP_HTTP_TOKEN")]
         auth_token_env: String,
@@ -1281,6 +1287,7 @@ fn run() -> Result<(), AgentKError> {
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
             command,
             args,
@@ -1305,6 +1312,7 @@ fn run() -> Result<(), AgentKError> {
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
             command,
             args,
@@ -1339,6 +1347,7 @@ fn run() -> Result<(), AgentKError> {
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
         } => sidecar_serve_http(
             root,
@@ -1355,6 +1364,7 @@ fn run() -> Result<(), AgentKError> {
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
         ),
         Command::SidecarPackage {
@@ -2127,6 +2137,7 @@ fn handle_dashboard_http_stream(
         stream,
         context.max_body_bytes,
         context.max_header_bytes,
+        false,
     ) {
         Ok(Some(request)) => request,
         Ok(None) => return Ok(()),
@@ -2201,6 +2212,7 @@ fn read_dashboard_http_request_with_limits(
     stream: &mut TcpStream,
     max_body_bytes: usize,
     max_header_bytes: usize,
+    allow_forwarded_headers: bool,
 ) -> Result<Option<DashboardHttpRequest>, AgentKError> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -2300,7 +2312,18 @@ fn read_dashboard_http_request_with_limits(
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP proxy authentication headers are not supported".to_string(),
             ));
-        } else if is_untrusted_forwarded_http_header(&name) {
+        } else if is_forwarded_http_header(&name) {
+            if !allow_forwarded_headers || !is_supported_trusted_forwarded_http_header(&name) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP forwarded headers are not supported".to_string(),
+                ));
+            }
+            if !is_clean_trusted_forwarded_header_value(&name, &value) {
+                return Err(AgentKError::InvalidMcpRequest(
+                    "HTTP forwarded header is invalid".to_string(),
+                ));
+            }
+        } else if name.starts_with("x-forwarded-") {
             return Err(AgentKError::InvalidMcpRequest(
                 "HTTP forwarded headers are not supported".to_string(),
             ));
@@ -2475,8 +2498,77 @@ fn is_supported_http_connection_header(value: &str) -> bool {
         .all(|part| part.eq_ignore_ascii_case("close"))
 }
 
-fn is_untrusted_forwarded_http_header(name: &str) -> bool {
+fn is_forwarded_http_header(name: &str) -> bool {
     name == "forwarded" || name.starts_with("x-forwarded-") || name == "x-real-ip"
+}
+
+fn is_supported_trusted_forwarded_http_header(name: &str) -> bool {
+    matches!(
+        name,
+        "forwarded" | "x-forwarded-for" | "x-forwarded-host" | "x-forwarded-proto" | "x-real-ip"
+    )
+}
+
+fn is_clean_trusted_forwarded_header_value(name: &str, value: &str) -> bool {
+    match name {
+        "forwarded" => is_clean_forwarded_header_value(value),
+        "x-forwarded-for" | "x-real-ip" => is_single_ip_address(value),
+        "x-forwarded-host" => is_valid_http_host_header(value),
+        "x-forwarded-proto" => {
+            value.eq_ignore_ascii_case("http") || value.eq_ignore_ascii_case("https")
+        }
+        _ => false,
+    }
+}
+
+fn is_clean_forwarded_header_value(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\\')
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut fields = 0usize;
+    for part in value.split(';') {
+        let Some((name, value)) = part.split_once('=') else {
+            return false;
+        };
+        if name.is_empty() || value.is_empty() || !seen.insert(name) {
+            return false;
+        }
+        match name {
+            "for" => {
+                let value = value
+                    .strip_prefix('[')
+                    .and_then(|inner| inner.strip_suffix(']'))
+                    .unwrap_or(value);
+                if !is_single_ip_address(value) {
+                    return false;
+                }
+            }
+            "host" => {
+                if !is_valid_http_host_header(value) {
+                    return false;
+                }
+            }
+            "proto" => {
+                if !(value.eq_ignore_ascii_case("http") || value.eq_ignore_ascii_case("https")) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        fields += 1;
+    }
+    fields > 0
+}
+
+fn is_single_ip_address(value: &str) -> bool {
+    !value.is_empty() && !value.contains(',') && value.parse::<IpAddr>().is_ok()
 }
 
 fn is_unsupported_proxy_http_method(method: &str) -> bool {
@@ -5904,6 +5996,7 @@ fn mcp_proxy_http(
     allow_origins: Vec<String>,
     allow_origin_env: String,
     allow_non_local_bind: bool,
+    trust_proxy_headers: bool,
     auth_token_env: String,
     command: String,
     args: Vec<String>,
@@ -5946,6 +6039,7 @@ fn mcp_proxy_http(
         allow_origins,
         auth_token,
         allow_non_local_bind,
+        trust_proxy_headers,
         trace_out,
         session_report_out,
     })
@@ -5967,6 +6061,7 @@ struct McpHttpGatewayConfig {
     allow_origins: Vec<String>,
     auth_token: Option<String>,
     allow_non_local_bind: bool,
+    trust_proxy_headers: bool,
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
 }
@@ -5982,6 +6077,7 @@ struct McpHttpGatewayState {
     stream_timeout: Duration,
     allow_origins: Vec<String>,
     auth_token: Option<String>,
+    trust_proxy_headers: bool,
     trace_out: Option<PathBuf>,
     session_report_out: Option<PathBuf>,
     metrics: Mutex<McpHttpGatewayMetrics>,
@@ -6010,6 +6106,7 @@ struct McpHttpGatewayMetrics {
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
     body_too_large_responses: usize,
+    trusted_proxy_header_requests: usize,
     sessions_created: usize,
     sessions_deleted: usize,
     sessions_expired: usize,
@@ -6087,6 +6184,14 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
     println!("header bytes {}", config.max_header_bytes);
     println!("stream ms   {}", config.stream_timeout.as_millis());
     println!(
+        "trusted proxy headers {}",
+        if config.trust_proxy_headers {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
         "auth        {}",
         if config.auth_token.is_some() {
             "configured"
@@ -6106,6 +6211,7 @@ fn mcp_proxy_http_with_config(config: McpHttpGatewayConfig) -> Result<(), AgentK
         stream_timeout: config.stream_timeout,
         allow_origins: config.allow_origins,
         auth_token: config.auth_token,
+        trust_proxy_headers: config.trust_proxy_headers,
         trace_out: config.trace_out,
         session_report_out: config.session_report_out,
         metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -6299,6 +6405,7 @@ fn handle_mcp_http_stream(
         stream,
         state.max_body_bytes,
         state.max_header_bytes,
+        state.trust_proxy_headers,
     ) {
         Ok(Some(request)) => request,
         Ok(None) => return Ok(()),
@@ -6459,6 +6566,10 @@ fn mcp_http_response_inner(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
+    if let Some(response) = mcp_http_trusted_proxy_header_error(request, state.trust_proxy_headers)
+    {
+        return Ok(response);
+    }
     let (path, has_query) = match request.target.split_once('?') {
         Some((path, _)) => (path, true),
         None => (request.target.as_str(), false),
@@ -6576,7 +6687,17 @@ fn mcp_http_record_response_metrics(
         if mcp_http_is_preflight_rejection(request, response, state) {
             metrics.preflight_rejections += 1;
         }
+        if state.trust_proxy_headers && mcp_http_has_forwarded_header(request) {
+            metrics.trusted_proxy_header_requests += 1;
+        }
     })
+}
+
+fn mcp_http_has_forwarded_header(request: &DashboardHttpRequest) -> bool {
+    request
+        .headers
+        .iter()
+        .any(|(name, _)| is_forwarded_http_header(name))
 }
 
 fn mcp_http_is_preflight_rejection(
@@ -6724,6 +6845,7 @@ fn mcp_http_operational_response(
             "stream_timeout_ms": state.stream_timeout.as_millis(),
             "configured_allowed_origins": state.allow_origins.len(),
             "auth_required": state.auth_token.is_some(),
+            "trusted_proxy_headers": state.trust_proxy_headers,
             "requests_total": metrics.requests_total,
             "post_requests": metrics.post_requests,
             "get_requests": metrics.get_requests,
@@ -6744,6 +6866,7 @@ fn mcp_http_operational_response(
             "invalid_framing_responses": metrics.invalid_framing_responses,
             "header_too_large_responses": metrics.header_too_large_responses,
             "body_too_large_responses": metrics.body_too_large_responses,
+            "trusted_proxy_header_requests": metrics.trusted_proxy_header_requests,
             "sessions_created": metrics.sessions_created,
             "sessions_deleted": metrics.sessions_deleted,
             "sessions_expired": metrics.sessions_expired,
@@ -6792,6 +6915,9 @@ agentk_mcp_http_configured_allowed_origins {configured_allowed_origins}\n\
 # HELP agentk_mcp_http_auth_required Whether this MCP HTTP gateway requires bearer auth.\n\
 # TYPE agentk_mcp_http_auth_required gauge\n\
 agentk_mcp_http_auth_required {auth_required}\n\
+# HELP agentk_mcp_http_trusted_proxy_headers Whether clean forwarded proxy metadata is accepted.\n\
+# TYPE agentk_mcp_http_trusted_proxy_headers gauge\n\
+agentk_mcp_http_trusted_proxy_headers {trusted_proxy_headers}\n\
 # HELP agentk_mcp_http_requests_total Parsed HTTP requests handled by this gateway.\n\
 # TYPE agentk_mcp_http_requests_total counter\n\
 agentk_mcp_http_requests_total {requests_total}\n\
@@ -6852,6 +6978,9 @@ agentk_mcp_http_header_too_large_responses_total {header_too_large_responses}\n\
 # HELP agentk_mcp_http_body_too_large_responses_total Requests rejected before parsing because the declared body exceeded the configured cap.\n\
 # TYPE agentk_mcp_http_body_too_large_responses_total counter\n\
 agentk_mcp_http_body_too_large_responses_total {body_too_large_responses}\n\
+# HELP agentk_mcp_http_trusted_proxy_header_requests_total Requests carrying clean trusted proxy metadata.\n\
+# TYPE agentk_mcp_http_trusted_proxy_header_requests_total counter\n\
+agentk_mcp_http_trusted_proxy_header_requests_total {trusted_proxy_header_requests}\n\
 # HELP agentk_mcp_http_sessions_created_total Initialized MCP HTTP sessions created by this gateway.\n\
 # TYPE agentk_mcp_http_sessions_created_total counter\n\
 agentk_mcp_http_sessions_created_total {sessions_created}\n\
@@ -6872,6 +7001,7 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         stream_timeout_ms = state.stream_timeout.as_millis(),
         configured_allowed_origins = state.allow_origins.len(),
         auth_required = usize::from(state.auth_token.is_some()),
+        trusted_proxy_headers = usize::from(state.trust_proxy_headers),
         requests_total = metrics.requests_total,
         post_requests = metrics.post_requests,
         get_requests = metrics.get_requests,
@@ -6892,6 +7022,7 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
         body_too_large_responses = metrics.body_too_large_responses,
+        trusted_proxy_header_requests = metrics.trusted_proxy_header_requests,
         sessions_created = metrics.sessions_created,
         sessions_deleted = metrics.sessions_deleted,
         sessions_expired = metrics.sessions_expired,
@@ -6966,6 +7097,30 @@ fn mcp_http_control_header_error(request: &DashboardHttpRequest) -> Option<Dashb
         ));
     }
 
+    None
+}
+
+fn mcp_http_trusted_proxy_header_error(
+    request: &DashboardHttpRequest,
+    trust_proxy_headers: bool,
+) -> Option<DashboardHttpResponse> {
+    for (name, value) in &request.headers {
+        if !is_forwarded_http_header(name) {
+            continue;
+        }
+        if !trust_proxy_headers || !is_supported_trusted_forwarded_http_header(name) {
+            return Some(dashboard_http_text(
+                "400 Bad Request",
+                "MCP HTTP forwarded headers require trusted proxy mode\n",
+            ));
+        }
+        if request.header_count(name) > 1 || !is_clean_trusted_forwarded_header_value(name, value) {
+            return Some(dashboard_http_text(
+                "400 Bad Request",
+                "MCP HTTP forwarded header is invalid\n",
+            ));
+        }
+    }
     None
 }
 
@@ -7855,6 +8010,7 @@ fn sidecar_serve_http(
     allow_origins: Vec<String>,
     allow_origin_env: String,
     allow_non_local_bind: bool,
+    trust_proxy_headers: bool,
     auth_token_env: String,
 ) -> Result<(), AgentKError> {
     if !is_safe_env_name(&auth_token_env) {
@@ -7883,6 +8039,7 @@ fn sidecar_serve_http(
         allow_origins,
         auth_token,
         allow_non_local_bind,
+        trust_proxy_headers,
         trace_out: Some(config.trace_out),
         session_report_out: Some(session_report_out),
     })
@@ -10712,6 +10869,7 @@ done
             "--allow-origin-env",
             "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
             "--allow-non-local-bind",
+            "--trust-proxy-headers",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
             "--command",
@@ -10741,6 +10899,7 @@ done
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
             args,
             trace_out,
@@ -10763,6 +10922,7 @@ done
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert!(allow_non_local_bind);
+        assert!(trust_proxy_headers);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
         assert_eq!(args, vec!["-c".to_string(), "printf ok".to_string()]);
         assert_eq!(trace_out, Some(PathBuf::from(".agentk/runs/http.jsonl")));
@@ -10824,6 +10984,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11148,6 +11309,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec!["https://console.example".to_string()],
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11451,6 +11613,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11490,6 +11653,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec!["null".to_string()],
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11517,6 +11681,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: vec!["https://console.example".to_string()],
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11614,6 +11779,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11825,6 +11991,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -11973,6 +12140,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12012,6 +12180,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12085,6 +12254,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12214,6 +12384,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12288,6 +12459,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12375,6 +12547,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12487,6 +12660,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12534,6 +12708,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12613,6 +12788,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12682,6 +12858,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12754,6 +12931,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: Some(trace_path.clone()),
             session_report_out: Some(session_report_path.clone()),
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -12841,6 +13019,7 @@ done
                 "vscode-webview://agentk".to_string(),
             ],
             auth_token: Some("secret".to_string()),
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -13340,6 +13519,7 @@ done
             "--allow-origin-env",
             "AGENTK_TEST_HTTP_ALLOW_ORIGINS",
             "--allow-non-local-bind",
+            "--trust-proxy-headers",
             "--auth-token-env",
             "AGENTK_TEST_HTTP_TOKEN",
         ])
@@ -13360,6 +13540,7 @@ done
             allow_origins,
             allow_origin_env,
             allow_non_local_bind,
+            trust_proxy_headers,
             auth_token_env,
         }) = cli.command
         else {
@@ -13379,6 +13560,7 @@ done
         assert_eq!(allow_origins, vec!["http://localhost:3000".to_string()]);
         assert_eq!(allow_origin_env, "AGENTK_TEST_HTTP_ALLOW_ORIGINS");
         assert!(allow_non_local_bind);
+        assert!(trust_proxy_headers);
         assert_eq!(auth_token_env, "AGENTK_TEST_HTTP_TOKEN");
     }
 
@@ -13653,6 +13835,7 @@ done
                 stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
                 allow_origins: Vec::new(),
                 auth_token: None,
+                trust_proxy_headers: false,
                 trace_out: None,
                 session_report_out: None,
                 metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -13715,6 +13898,7 @@ done
             stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
             allow_origins: Vec::new(),
             auth_token: None,
+            trust_proxy_headers: false,
             trace_out: None,
             session_report_out: None,
             metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -13764,6 +13948,7 @@ done
                 stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
                 allow_origins: Vec::new(),
                 auth_token: None,
+                trust_proxy_headers: false,
                 trace_out: None,
                 session_report_out: None,
                 metrics: Mutex::new(McpHttpGatewayMetrics::default()),
@@ -13922,6 +14107,89 @@ done
         assert!(http10_response.ends_with("{\"ok\":true}"));
         assert_eq!(http10_metrics.client_error_responses, 0);
         assert_eq!(http10_metrics.invalid_framing_responses, 0);
+    }
+
+    #[test]
+    fn mcp_http_stream_accepts_clean_forwarded_headers_only_when_trusted() {
+        fn response_for(
+            raw_request: &[u8],
+            trust_proxy_headers: bool,
+        ) -> (String, McpHttpGatewayMetrics) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+            let addr = listener
+                .local_addr()
+                .expect("test listener should have addr");
+            let state = Arc::new(McpHttpGatewayState {
+                proxy: McpSubprocessProxyConfig::new("agent://test", "http-probe", "sh"),
+                endpoint: "/mcp".to_string(),
+                max_concurrent_requests: 8,
+                max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+                session_idle_timeout: Duration::from_millis(
+                    MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS,
+                ),
+                max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+                max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+                stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+                allow_origins: Vec::new(),
+                auth_token: None,
+                trust_proxy_headers,
+                trace_out: None,
+                session_report_out: None,
+                metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+                sessions: Mutex::new(BTreeMap::new()),
+            });
+            let server_state = Arc::clone(&state);
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("test client should connect");
+                handle_mcp_http_stream(&mut stream, &server_state)
+                    .expect("trusted proxy response should write");
+            });
+            let mut client = TcpStream::connect(addr).expect("test client should connect");
+            client
+                .write_all(raw_request)
+                .expect("test request should write");
+            client
+                .shutdown(std::net::Shutdown::Write)
+                .expect("test request should close write side");
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .expect("test response should read");
+            server.join().expect("server thread should finish");
+            let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+            (response, metrics)
+        }
+
+        let clean_forwarded = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nForwarded: for=127.0.0.1;host=localhost;proto=https\r\nX-Forwarded-For: 127.0.0.1\r\nX-Forwarded-Host: localhost\r\nX-Forwarded-Proto: https\r\nX-Real-IP: 127.0.0.1\r\n\r\n";
+        let (rejected_response, rejected_metrics) = response_for(clean_forwarded, false);
+        assert!(rejected_response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(rejected_response.contains("invalid MCP HTTP request"));
+        assert_eq!(rejected_metrics.invalid_framing_responses, 1);
+
+        let (trusted_response, trusted_metrics) = response_for(clean_forwarded, true);
+        assert!(trusted_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(trusted_response.ends_with("{\"ok\":true}"));
+        assert!(!trusted_response.contains("127.0.0.1"));
+        assert_eq!(trusted_metrics.invalid_framing_responses, 0);
+        assert_eq!(trusted_metrics.trusted_proxy_header_requests, 1);
+
+        for dirty_forwarded in [
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 127.0.0.1, 10.0.0.1\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Server: SPOOFED_PROXY\r\n\r\n".as_slice(),
+            b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nForwarded: for=SPOOFED_FOR;host=SPOOFED_HOST\r\n\r\n".as_slice(),
+        ] {
+            let (response, metrics) = response_for(dirty_forwarded, true);
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            assert!(response.contains("invalid MCP HTTP request"));
+            assert!(!response.contains("SPOOFED"));
+            assert_eq!(metrics.invalid_framing_responses, 1);
+        }
+
+        let duplicate_forwarded = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Real-IP: 127.0.0.1\r\nX-Real-IP: 127.0.0.1\r\n\r\n";
+        let (duplicate_response, duplicate_metrics) = response_for(duplicate_forwarded, true);
+        assert!(duplicate_response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(duplicate_response.contains("MCP HTTP forwarded header is invalid"));
+        assert_eq!(duplicate_metrics.invalid_framing_responses, 0);
     }
 
     #[test]

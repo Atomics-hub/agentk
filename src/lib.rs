@@ -10485,12 +10485,15 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             &[
                 ("src/main.rs", "sidecar-serve-tcp"),
                 ("src/main.rs", "sidecar-serve-http"),
+                ("src/main.rs", "trust-proxy-headers"),
                 ("src/lib.rs", "bin/agentk-sidecar-http"),
+                ("src/lib.rs", "AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS"),
             ],
             &[
                 "bin/agentk-sidecar",
                 "bin/agentk-sidecar-tcp",
                 "bin/agentk-sidecar-http",
+                "agentk sidecar-serve-http --trust-proxy-headers",
             ],
         ),
         alpha_release_source_surface(
@@ -18513,7 +18516,9 @@ fn check_sidecar_package_http_launcher(root: &Path) -> ReadinessCheck {
         "AGENTK_MCP_HTTP_MAX_BODY_BYTES",
         "AGENTK_MCP_HTTP_MAX_HEADER_BYTES",
         "AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND",
+        "AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS",
         "--allow-non-local-bind",
+        "--trust-proxy-headers",
         "\"$@\"",
     ];
     for requirement in requirements {
@@ -18549,6 +18554,7 @@ fn check_sidecar_package_http_env(root: &Path) -> ReadinessCheck {
         "AGENTK_MCP_HTTP_PORT=9798".to_string(),
         "AGENTK_MCP_HTTP_ENDPOINT=/mcp".to_string(),
         "AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0".to_string(),
+        "AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=0".to_string(),
         format!("{http_token_key}=CHANGE_ME"),
         "AGENTK_MCP_HTTP_ALLOW_ORIGINS=".to_string(),
         "AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS=16".to_string(),
@@ -18600,6 +18606,8 @@ fn check_sidecar_package_http_client_handoff(root: &Path) -> ReadinessCheck {
         "not a hosted production MCP control plane",
         "GET /readyz",
         "GET /metrics",
+        "AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1",
+        "X-Forwarded-For",
     ];
     for requirement in requirements {
         if !content.contains(requirement) {
@@ -22455,9 +22463,11 @@ Only `Connection: close` is accepted; other `Connection` values plus
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected as
 unsupported hop-by-hop negotiation. Proxy auth headers such as
 `Proxy-Authorization` and `Proxy-Authenticate` are also rejected because the
-gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata such
-as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
-explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
+gateway is not an HTTP proxy credential boundary. Forwarded proxy metadata is
+rejected by default; `--trust-proxy-headers` accepts only clean `Forwarded`,
+`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP`
+values from a reviewed reverse proxy, rejects duplicates or malformed values,
+and reports only redacted readiness/metrics counts. Ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
 tokens instead. Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
@@ -22497,7 +22507,8 @@ request/session counters. The readiness summary includes the supported MCP
 protocol version, active-session cap, idle timeout, request body cap, request
 header cap, configured stream-timeout, parsed request totals, rejection totals,
 CORS preflight validation rejection totals, stream-framing rejection totals,
-session lifecycle totals, and allowed-origin counts without raw origin values.
+session lifecycle totals, trusted-proxy mode and request counts, and
+allowed-origin counts without raw origin or forwarded proxy values.
 Initialized HTTP sessions use per-session runtime locks, so one busy downstream
 session does not block unrelated sessions from initializing or progressing.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
@@ -22945,9 +22956,15 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 ALLOW_NON_LOCAL_BIND_FLAG=""
+TRUST_PROXY_HEADERS_FLAG=""
 case "${AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND:-}" in
   1|true|TRUE|yes|YES)
     ALLOW_NON_LOCAL_BIND_FLAG="--allow-non-local-bind"
+    ;;
+esac
+case "${AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS:-}" in
+  1|true|TRUE|yes|YES)
+    TRUST_PROXY_HEADERS_FLAG="--trust-proxy-headers"
     ;;
 esac
 "$DIR/agentk-package-check" --json >/dev/null
@@ -22962,6 +22979,7 @@ exec "$AGENTK_BIN" sidecar-serve-http --root "$ROOT/sidecar" \
   --stream-timeout-ms "${AGENTK_MCP_HTTP_STREAM_TIMEOUT_MS:-30000}" \
   --max-concurrent-requests "${AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS:-16}" \
   ${ALLOW_NON_LOCAL_BIND_FLAG} \
+  ${TRUST_PROXY_HEADERS_FLAG} \
   "$@"
 "#
     .to_string()
@@ -23487,6 +23505,7 @@ AGENTK_MCP_HTTP_HOST=127.0.0.1
 AGENTK_MCP_HTTP_PORT=9798
 AGENTK_MCP_HTTP_ENDPOINT=/mcp
 AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0
+AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=0
 {http_token_key}=CHANGE_ME_MCP_HTTP_BEARER_TOKEN
 AGENTK_MCP_HTTP_ALLOW_ORIGINS=http://127.0.0.1:3000
 AGENTK_MCP_HTTP_MAX_CONCURRENT_REQUESTS=16
@@ -23588,7 +23607,11 @@ uses `/tmp` as tmpfs, and keeps writable AgentK state in the mounted
 
 The sidecar HTTP service stays on `127.0.0.1:9798` by default. Set
 `AGENTK_MCP_HTTP_TOKEN` before enabling non-local binds, and keep TLS, external
-identity, and network policy in the deployment layer.
+identity, and network policy in the deployment layer. Set
+`AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1` only when a reviewed reverse proxy
+strips untrusted inbound forwarded headers before adding its own clean
+`Forwarded` or `X-Forwarded-*` metadata; AgentK readiness and metrics expose
+only trusted-proxy mode and request counts, not forwarded client or host values.
 
 ## systemd user service
 
@@ -23782,6 +23805,11 @@ HTTP/SSE alpha contract:
 - Operational probes are `GET /healthz`, `GET /readyz`, and `GET /metrics`;
   readiness and metrics are redacted and do not echo bearer tokens, origins, or
   rejected raw values.
+- `AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1` lets a reviewed reverse proxy pass
+  clean `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`,
+  `X-Forwarded-Proto`, and `X-Real-IP` metadata. Invalid, duplicate, or
+  unsupported forwarded headers fail closed, and readiness/metrics expose only
+  counts and booleans, not client IPs or forwarded host values.
 
 Minimal Streamable HTTP client shape:
 
@@ -24989,7 +25017,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("reviewer-scoped reads"));
         assert!(package_readme.contains("AGENTK_MCP_HTTP_ALLOW_ORIGINS"));
         assert!(package_readme.contains("allowed-origin"));
-        assert!(package_readme.contains("counts without raw origin values"));
+        assert!(package_readme.contains("without raw origin or forwarded proxy values"));
         assert!(package_readme.contains("exact `scheme://authority`"));
         assert!(package_readme.contains("invalid ports"));
         assert!(package_readme.contains("invalid DNS labels"));
@@ -25049,7 +25077,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("without whitespace"));
         assert!(package_readme.contains("before `:`"));
         assert!(package_readme.contains("Forwarded"));
-        assert!(package_readme.contains("X-Forwarded-*"));
+        assert!(package_readme.contains("X-Forwarded-For"));
         assert!(package_readme.contains("trusted-proxy mode"));
         assert!(package_readme.contains("Ambient cookie headers"));
         assert!(package_readme.contains("explicit bearer/reviewer"));
@@ -25559,6 +25587,7 @@ can_deny = ["*"]
             .expect("sidecar env example should read");
         assert!(sidecar_env.contains(&format!("{http_token_key}=CHANGE_ME")));
         assert!(sidecar_env.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0"));
+        assert!(sidecar_env.contains("AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=0"));
         let dashboard_env = fs::read_to_string(out.join("deploy/env/dashboard.env.example"))
             .expect("dashboard env example should read");
         assert!(dashboard_env.contains(&format!("{dashboard_admin_token_key}=CHANGE_ME")));
