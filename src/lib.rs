@@ -6834,6 +6834,10 @@ pub struct SidecarPackageQuickstartReport {
     pub demo_handoff_dir: PathBuf,
     pub deploy_handoff_dir: PathBuf,
     pub support_bundle_dir: PathBuf,
+    pub permissions_handoff_dir: PathBuf,
+    pub production_preflight_dir: PathBuf,
+    pub client_handoff_dir: PathBuf,
+    pub dashboard_handoff_dir: PathBuf,
     pub local_team_sidecar_alpha: bool,
     pub hosted_saas: bool,
     pub passed: bool,
@@ -6846,6 +6850,10 @@ pub struct SidecarPackageQuickstartReport {
     pub demo_handoff: SidecarPackageDemoHandoffReport,
     pub deploy_handoff: SidecarPackageDeployHandoffReport,
     pub support_bundle: SidecarPackageSupportBundleReport,
+    pub permissions_handoff: SidecarPackagePermissionsHandoffReport,
+    pub production_preflight: SidecarPackageProductionPreflightReport,
+    pub client_handoff: SidecarPackageClientHandoffReport,
+    pub dashboard_handoff: SidecarPackageDashboardHandoffReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9817,6 +9825,10 @@ pub fn write_sidecar_package_quickstart(
     let demo_handoff_dir = root.join("sidecar/.agentk/demo-handoff");
     let deploy_handoff_dir = root.join("sidecar/.agentk/deploy-handoff");
     let support_bundle_dir = root.join("sidecar/.agentk/support-bundle");
+    let permissions_handoff_dir = root.join("sidecar/.agentk/permissions-handoff");
+    let production_preflight_dir = root.join("sidecar/.agentk/production-preflight");
+    let client_handoff_dir = root.join("sidecar/.agentk/client-handoff");
+    let dashboard_handoff_dir = root.join("sidecar/.agentk/dashboard-handoff");
 
     let package_check = check_sidecar_package(root)?;
     let http_handoff_check = check_sidecar_package_http_handoff(root)?;
@@ -9825,8 +9837,21 @@ pub fn write_sidecar_package_quickstart(
     let deploy_handoff = write_sidecar_package_deploy_handoff(root, &deploy_handoff_dir)?;
     let support_bundle =
         write_sidecar_package_support_bundle(root, &support_bundle_dir, release_manifest)?;
-    let artifacts =
-        sidecar_package_quickstart_artifacts(&demo_handoff, &deploy_handoff, &support_bundle)?;
+    let permissions_handoff =
+        write_sidecar_package_permissions_handoff(root, &permissions_handoff_dir)?;
+    let production_preflight =
+        write_sidecar_package_production_preflight(root, &production_preflight_dir)?;
+    let client_handoff = write_sidecar_package_client_handoff(root, &client_handoff_dir)?;
+    let dashboard_handoff = write_sidecar_package_dashboard_handoff(root, &dashboard_handoff_dir)?;
+    let artifacts = sidecar_package_quickstart_artifacts(
+        &demo_handoff,
+        &deploy_handoff,
+        &support_bundle,
+        &permissions_handoff,
+        &production_preflight,
+        &client_handoff,
+        &dashboard_handoff,
+    )?;
     let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
     let mut checks = vec![
         quickstart_report_check(
@@ -9864,6 +9889,35 @@ pub fn write_sidecar_package_quickstart(
             "support bundle",
             support_bundle.passed,
             format!("{} support artifacts", support_bundle.artifacts.len()),
+        ),
+        quickstart_report_check(
+            "permissions handoff",
+            permissions_handoff.passed,
+            format!(
+                "{} permission artifacts",
+                permissions_handoff.artifacts.len()
+            ),
+        ),
+        quickstart_report_check(
+            "production preflight",
+            production_preflight.passed,
+            format!(
+                "{} production-preflight artifacts",
+                production_preflight.artifacts.len()
+            ),
+        ),
+        quickstart_report_check(
+            "client handoff",
+            client_handoff.passed,
+            format!("{} client artifacts", client_handoff.artifacts.len()),
+        ),
+        quickstart_report_check(
+            "dashboard handoff",
+            dashboard_handoff.passed,
+            format!(
+                "{} dashboard handoff artifacts",
+                dashboard_handoff.artifacts.len()
+            ),
         ),
         quickstart_report_check(
             "quickstart artifact inventory",
@@ -9905,6 +9959,10 @@ pub fn write_sidecar_package_quickstart(
         demo_handoff_dir,
         deploy_handoff_dir,
         support_bundle_dir,
+        permissions_handoff_dir,
+        production_preflight_dir,
+        client_handoff_dir,
+        dashboard_handoff_dir,
         local_team_sidecar_alpha: true,
         hosted_saas: false,
         passed,
@@ -9917,6 +9975,10 @@ pub fn write_sidecar_package_quickstart(
         demo_handoff,
         deploy_handoff,
         support_bundle,
+        permissions_handoff,
+        production_preflight,
+        client_handoff,
+        dashboard_handoff,
     };
     fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
     fs::write(&markdown_path, sidecar_package_quickstart_markdown(&report))?;
@@ -9943,6 +10005,10 @@ fn sidecar_package_quickstart_artifacts(
     demo_handoff: &SidecarPackageDemoHandoffReport,
     deploy_handoff: &SidecarPackageDeployHandoffReport,
     support_bundle: &SidecarPackageSupportBundleReport,
+    permissions_handoff: &SidecarPackagePermissionsHandoffReport,
+    production_preflight: &SidecarPackageProductionPreflightReport,
+    client_handoff: &SidecarPackageClientHandoffReport,
+    dashboard_handoff: &SidecarPackageDashboardHandoffReport,
 ) -> Result<Vec<SidecarPackageQuickstartArtifact>, AgentKError> {
     let mut artifacts = Vec::new();
     sidecar_package_quickstart_artifact(
@@ -9974,6 +10040,46 @@ fn sidecar_package_quickstart_artifacts(
         &mut artifacts,
         "support bundle markdown",
         support_bundle.markdown_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "permissions handoff json",
+        permissions_handoff.json_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "permissions handoff markdown",
+        permissions_handoff.markdown_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "production preflight json",
+        production_preflight.json_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "production preflight markdown",
+        production_preflight.markdown_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "client handoff json",
+        client_handoff.json_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "client handoff markdown",
+        client_handoff.markdown_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "dashboard handoff json",
+        dashboard_handoff.json_path.clone(),
+    )?;
+    sidecar_package_quickstart_artifact(
+        &mut artifacts,
+        "dashboard handoff markdown",
+        dashboard_handoff.markdown_path.clone(),
     )?;
     sidecar_package_quickstart_artifact(
         &mut artifacts,
@@ -10048,7 +10154,7 @@ fn sidecar_package_quickstart_markdown(report: &SidecarPackageQuickstartReport) 
     let verdict = if report.passed { "ready" } else { "blocked" };
     let mut out = String::new();
     out.push_str("# AgentK Sidecar Quickstart\n\n");
-    out.push_str("This quickstart is the single first-run handoff for a packaged local/team sidecar. It validates package health, HTTP gateway handoff, team dashboard/store handoff, safe-agent demo evidence, deployment templates, and support evidence. It is not hosted SaaS and does not send notifications or read delivery credentials.\n\n");
+    out.push_str("This quickstart is the single first-run handoff for a packaged local/team sidecar. It validates package health, HTTP gateway handoff, team dashboard/store handoff, safe-agent demo evidence, deployment templates, support evidence, client onboarding, reviewer permissions, production preflight placeholders, and dashboard readiness. It is not hosted SaaS and does not send notifications or read delivery credentials.\n\n");
     out.push_str(&format!("- Verdict: `{verdict}`\n"));
     out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
     out.push_str(&format!(
@@ -10066,6 +10172,22 @@ fn sidecar_package_quickstart_markdown(report: &SidecarPackageQuickstartReport) 
     out.push_str(&format!(
         "- Support bundle: `{}`\n",
         report.support_bundle_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Permissions handoff: `{}`\n",
+        report.permissions_handoff_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Production preflight: `{}`\n",
+        report.production_preflight_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Client handoff: `{}`\n",
+        report.client_handoff_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Dashboard handoff: `{}`\n",
+        report.dashboard_handoff_dir.display()
     ));
     if let Some(release_manifest) = &report.release_manifest_path {
         out.push_str(&format!(
@@ -10104,7 +10226,7 @@ fn sidecar_package_quickstart_markdown(report: &SidecarPackageQuickstartReport) 
             out.push_str(&format!("- {}\n", markdown_cell(step)));
         }
     }
-    out.push_str("\nArchive this quickstart directory together with the referenced demo, deploy, and support handoff directories for first-run team review.\n");
+    out.push_str("\nArchive this quickstart directory together with the referenced demo, deploy, support, permissions, production-preflight, client, and dashboard handoff directories for first-run team review.\n");
     out
 }
 
@@ -10125,6 +10247,8 @@ pub fn write_sidecar_package_permissions_handoff(
     let permissions = team_permissions_report_from_path(&permissions_path)?;
     let identity = team_identity_report_from_path(&identity_path, Some(&permissions_path))?;
     fs::create_dir_all(output_dir)?;
+    let _ = fs::remove_file(&trace_path);
+    let _ = fs::remove_file(&decisions_path);
     let mut kernel = AgentKernel::new("agent://team/permissions-handoff");
     kernel.syscall(Syscall {
         kind: SyscallKind::ToolInvoke,
@@ -12753,6 +12877,22 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 ("src/lib.rs", "bin/agentk-sidecar-production-preflight"),
                 ("src/lib.rs", "bin/agentk-sidecar-client-handoff"),
                 ("src/lib.rs", "bin/agentk-sidecar-dashboard-handoff"),
+                (
+                    "src/lib.rs",
+                    "permissions_handoff: SidecarPackagePermissionsHandoffReport",
+                ),
+                (
+                    "src/lib.rs",
+                    "production_preflight: SidecarPackageProductionPreflightReport",
+                ),
+                (
+                    "src/lib.rs",
+                    "client_handoff: SidecarPackageClientHandoffReport",
+                ),
+                (
+                    "src/lib.rs",
+                    "dashboard_handoff: SidecarPackageDashboardHandoffReport",
+                ),
                 ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
@@ -25771,8 +25911,9 @@ install receipt still match the handoff.
   GitHub/Postgres/Slack/filesystem demo evidence, then writes one archiveable
   demo-handoff JSON/Markdown report with hashes for onboarding review.
 - `bin/agentk-sidecar-quickstart`: runs the package, HTTP/team handoff, demo,
-  deploy, and support checks, then writes one first-run quickstart
-  JSON/Markdown report for operator onboarding.
+  deploy, support, permissions, production preflight, client, and dashboard
+  checks, then writes one first-run quickstart JSON/Markdown report for
+  operator onboarding.
 - `bin/agentk-sidecar-permissions-handoff`: validates the packaged team
   permissions and identity mapping handoff, including reviewer-scoped reads,
   authorized decisions, and fail-closed unknown reviewer rejection.
@@ -30017,6 +30158,10 @@ can_deny = ["*"]
         assert!(report.demo_handoff.json_path.is_file());
         assert!(report.deploy_handoff.json_path.is_file());
         assert!(report.support_bundle.json_path.is_file());
+        assert!(report.permissions_handoff.json_path.is_file());
+        assert!(report.production_preflight.json_path.is_file());
+        assert!(report.client_handoff.json_path.is_file());
+        assert!(report.dashboard_handoff.json_path.is_file());
         assert!(report.artifacts.iter().all(|artifact| {
             artifact.present && artifact.bytes.unwrap_or_default() > 0 && artifact.sha256.is_some()
         }));
@@ -30028,6 +30173,18 @@ can_deny = ["*"]
         }));
         assert!(report.checks.iter().any(|check| {
             check.name == "support bundle" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "permissions handoff" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "production preflight" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "client handoff" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "dashboard handoff" && check.status == ReadinessStatus::Pass
         }));
         assert_eq!(report.release_manifest_path, Some(release_manifest.clone()));
         assert!(report.checks.iter().any(|check| {
@@ -30048,6 +30205,10 @@ can_deny = ["*"]
         assert!(markdown.contains("No remediation required"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("demo handoff json"));
+        assert!(markdown.contains("permissions handoff"));
+        assert!(markdown.contains("production preflight"));
+        assert!(markdown.contains("client handoff"));
+        assert!(markdown.contains("dashboard handoff"));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
