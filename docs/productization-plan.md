@@ -220,7 +220,11 @@ The safest first productization slice is the local team sidecar path:
    `AGENTK_BIN`, and embedded sidecar bundle after copy/deploy/image-build
    steps. Packaged runtime launchers run that check before launching, serving,
    checking identity mappings, writing demo traces, rendering dashboards, or
-   updating store artifacts.
+   updating store artifacts. The package also includes
+   `agentk-sidecar-team-handoff-check` and
+   `clients/team-audit-dashboard-handoff.md` to validate the local/team approval
+   dashboard, safe-agent demo, durable team store, and notification outbox
+   handoff without claiming hosted SaaS.
    `--archive-out` writes a
    deterministic uncompressed tar only after that package self-check passes,
    writes a neighboring `.sha256` file, and reports the archive SHA-256 plus

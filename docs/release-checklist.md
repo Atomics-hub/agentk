@@ -87,6 +87,7 @@ and Postgres dry-run push:
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 ```
 
 For manual reviewer handoff, also keep the explicit package commands available

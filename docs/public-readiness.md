@@ -42,6 +42,10 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
       dist/agentk-sidecar --json` passes and the reviewer handoff includes
       `clients/http-sse-handoff.md` with bounded local HTTP/SSE alpha language.
+- [ ] `cargo run --locked -- sidecar-package-team-handoff-check --root
+      dist/agentk-sidecar --json` passes and the reviewer handoff includes
+      `clients/team-audit-dashboard-handoff.md` with local/team approval,
+      dashboard, durable store, and not-hosted-SaaS alpha language.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] Errors do not leak sensitive syscall payloads by default.
