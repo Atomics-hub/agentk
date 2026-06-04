@@ -128,6 +128,7 @@ cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar
 cargo run --locked -- sidecar-package-permissions-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-production-preflight --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-client-handoff --root installed/agentk-sidecar --json
+cargo run --locked -- sidecar-package-dashboard-handoff --root installed/agentk-sidecar --json
 ```
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
@@ -230,6 +231,7 @@ cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-side
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-demo-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
+cargo run --locked -- sidecar-package-dashboard-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- release-homebrew-tap-handoff-check --formula dist/homebrew/agentk.rb --tap-root ../homebrew-agentk --tap-formula-path Formula/agentk.rb --source-archive dist/agentk-vX.Y.Z.tar.gz --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz --sha256 <source-tarball-sha256> --version X.Y.Z --homepage https://github.com/OWNER/REPO --tap OWNER/agentk --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>

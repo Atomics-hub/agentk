@@ -592,6 +592,12 @@ Streamable HTTP setup artifacts. It writes
 `sidecar/.agentk/client-handoff/client-handoff.json` and
 `sidecar/.agentk/client-handoff/client-handoff.md` as one hashed onboarding
 report.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-dashboard-handoff --json` before
+dashboard review to refresh the safe-agent demo trace, render the static
+approval/audit dashboard, sync the durable team store, and validate dashboard
+env handoff evidence. It writes
+`sidecar/.agentk/dashboard-handoff/dashboard-handoff.json` and
+`sidecar/.agentk/dashboard-handoff/dashboard-handoff.md`.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json` before a
 service-manager, Docker, or reverse-proxy deployment review. It validates the
 packaged service templates and supervisor env examples, then writes
@@ -618,6 +624,9 @@ rerunning the full support bundle.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-client-handoff --json` when the
 client owner wants the narrower Claude/Codex/Cursor setup handoff without
 rerunning the full support bundle.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-dashboard-handoff --json` when the
+dashboard owner wants the narrower approval/audit UI and durable team-store
+handoff without rerunning the full support bundle.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -875,6 +884,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
 installed/agentk-sidecar/bin/agentk-sidecar-permissions-handoff --json
 installed/agentk-sidecar/bin/agentk-sidecar-production-preflight --json
 installed/agentk-sidecar/bin/agentk-sidecar-client-handoff --json
+installed/agentk-sidecar/bin/agentk-sidecar-dashboard-handoff --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json

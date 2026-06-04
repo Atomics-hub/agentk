@@ -56,6 +56,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-permissions-handoff",
     "bin/agentk-sidecar-production-preflight",
     "bin/agentk-sidecar-client-handoff",
+    "bin/agentk-sidecar-dashboard-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -87,6 +88,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-permissions-handoff",
     "bin/agentk-sidecar-production-preflight",
     "bin/agentk-sidecar-client-handoff",
+    "bin/agentk-sidecar-dashboard-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6945,6 +6947,40 @@ pub struct SidecarPackageClientHandoffArtifact {
     pub sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageDashboardHandoffReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: PathBuf,
+    pub identity_path: PathBuf,
+    pub dashboard_path: PathBuf,
+    pub team_store_root: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub artifacts: Vec<SidecarPackageDashboardHandoffArtifact>,
+    pub package_check: SidecarPackageCheckReport,
+    pub team_handoff_check: SidecarPackageCheckReport,
+    pub safe_agent_demo: SafeAgentDemoReport,
+    pub dashboard: ApprovalDashboardReport,
+    pub store_sync: DurableAuditStoreSyncReport,
+    pub team_store_check: AuditStoreCheckReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageDashboardHandoffArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub present: bool,
+    pub bytes: Option<u64>,
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -9230,6 +9266,272 @@ fn sidecar_package_client_handoff_markdown(report: &SidecarPackageClientHandoffR
         }
     }
     out.push_str("\nAttach this report to a client onboarding ticket after the team chooses stdio or a bounded local HTTP adapter. Keep public exposure behind reviewed deployment controls.\n");
+    out
+}
+
+pub fn write_sidecar_package_dashboard_handoff(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<SidecarPackageDashboardHandoffReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let trace_path = root.join("sidecar/.agentk/runs/safe-agent-demo.jsonl");
+    let decisions_path = root.join("sidecar/.agentk/approvals.jsonl");
+    let permissions_path = root.join("sidecar/team-permissions.toml");
+    let identity_path = root.join("sidecar/team-identity.toml");
+    let dashboard_path = root.join("sidecar/.agentk/dashboard.html");
+    let team_store_root = root.join("sidecar/.agentk/team-store");
+    let json_path = output_dir.join("dashboard-handoff.json");
+    let markdown_path = output_dir.join("dashboard-handoff.md");
+
+    let package_check = check_sidecar_package(root)?;
+    let team_handoff_check = check_sidecar_package_team_handoff(root)?;
+    let safe_agent_demo = run_safe_agent_demo(&trace_path)?;
+    let dashboard = write_approval_dashboard_html(
+        &trace_path,
+        &decisions_path,
+        Some(&permissions_path),
+        &dashboard_path,
+    )?;
+    let store_sync = sync_durable_audit_store(
+        &trace_path,
+        &decisions_path,
+        Some(&permissions_path),
+        Some(&identity_path),
+        &team_store_root,
+    )?;
+    let team_store_check = check_audit_store(&team_store_root)?;
+    let artifacts = sidecar_package_dashboard_handoff_artifacts(
+        root,
+        &trace_path,
+        &dashboard_path,
+        &team_store_root,
+    )?;
+    let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
+    let checks = vec![
+        dashboard_handoff_report_check(
+            "package self-check",
+            package_check.passed,
+            format!("{} package readiness checks", package_check.checks.len()),
+        ),
+        dashboard_handoff_report_check(
+            "team dashboard/store readiness",
+            team_handoff_check.passed,
+            format!("{} team handoff checks", team_handoff_check.checks.len()),
+        ),
+        dashboard_handoff_report_check(
+            "safe-agent demo trace",
+            safe_agent_demo.improved_checks == safe_agent_demo.total_checks,
+            format!(
+                "{} trace events, {}/{} checks improved",
+                safe_agent_demo.agentk.trace_events,
+                safe_agent_demo.improved_checks,
+                safe_agent_demo.total_checks
+            ),
+        ),
+        dashboard_handoff_report_check(
+            "static dashboard artifact",
+            dashboard_path.is_file() && dashboard.signatures_ok,
+            format!(
+                "{} open approvals, {} evidence refs, {} reviewers",
+                dashboard.open, dashboard.evidence_refs, dashboard.reviewers
+            ),
+        ),
+        dashboard_handoff_report_check(
+            "durable team store",
+            team_store_check.passed && !store_sync.files.is_empty(),
+            format!(
+                "{} synced files, {} open approvals, {} notifications",
+                store_sync.files.len(),
+                store_sync.open,
+                store_sync.notifications
+            ),
+        ),
+        check_sidecar_package_team_handoff_env(root),
+        dashboard_handoff_report_check(
+            "artifact inventory",
+            required_artifacts_present,
+            format!("{} dashboard handoff artifacts inspected", artifacts.len()),
+        ),
+        dashboard_handoff_report_check(
+            "alpha scope",
+            true,
+            "local/team dashboard alpha; hosted SaaS is false",
+        ),
+    ];
+    let passed = required_artifacts_present
+        && checks
+            .iter()
+            .all(|check| check.status != ReadinessStatus::Fail);
+
+    fs::create_dir_all(output_dir)?;
+    let report = SidecarPackageDashboardHandoffReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        dashboard_path,
+        team_store_root,
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        passed,
+        checks,
+        artifacts,
+        package_check,
+        team_handoff_check,
+        safe_agent_demo,
+        dashboard,
+        store_sync,
+        team_store_check,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(
+        &markdown_path,
+        sidecar_package_dashboard_handoff_markdown(&report),
+    )?;
+    Ok(report)
+}
+
+fn dashboard_handoff_report_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+fn sidecar_package_dashboard_handoff_artifacts(
+    root: &Path,
+    trace_path: &Path,
+    dashboard_path: &Path,
+    team_store_root: &Path,
+) -> Result<Vec<SidecarPackageDashboardHandoffArtifact>, AgentKError> {
+    let mut artifacts = Vec::new();
+    for (name, path) in [
+        ("safe-agent demo trace", trace_path.to_path_buf()),
+        ("static dashboard", dashboard_path.to_path_buf()),
+        (
+            "team store approvals",
+            team_store_root.join("current/approvals.json"),
+        ),
+        (
+            "team store notifications",
+            team_store_root.join("current/notifications.json"),
+        ),
+        (
+            "team store schema",
+            team_store_root.join("store-schema.json"),
+        ),
+        (
+            "team permissions",
+            root.join("sidecar/team-permissions.toml"),
+        ),
+        ("team identity", root.join("sidecar/team-identity.toml")),
+        (
+            "dashboard env example",
+            root.join("deploy/env/dashboard.env.example"),
+        ),
+        (
+            "team dashboard handoff doc",
+            root.join("clients/team-audit-dashboard-handoff.md"),
+        ),
+        (
+            "dashboard server launcher",
+            root.join("bin/agentk-dashboard-server"),
+        ),
+    ] {
+        sidecar_package_dashboard_handoff_artifact(&mut artifacts, name, path)?;
+    }
+    Ok(artifacts)
+}
+
+fn sidecar_package_dashboard_handoff_artifact(
+    artifacts: &mut Vec<SidecarPackageDashboardHandoffArtifact>,
+    name: &str,
+    path: PathBuf,
+) -> Result<(), AgentKError> {
+    let metadata = fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let (present, bytes, sha256) = match metadata {
+        Some(metadata) => (
+            true,
+            Some(metadata.len()),
+            Some(sidecar_package_file_sha256(&path)?),
+        ),
+        None => (false, None, None),
+    };
+    artifacts.push(SidecarPackageDashboardHandoffArtifact {
+        name: name.to_string(),
+        path,
+        present,
+        bytes,
+        sha256,
+    });
+    Ok(())
+}
+
+fn sidecar_package_dashboard_handoff_markdown(
+    report: &SidecarPackageDashboardHandoffReport,
+) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Dashboard Handoff\n\n");
+    out.push_str("This handoff proves the packaged local/team approval and audit dashboard path: safe-agent demo trace, static dashboard, dashboard server launcher contract, reviewer-scoped permissions, identity mapping metadata, and durable team store. It is not hosted SaaS and does not expose a managed control plane.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!(
+        "- Dashboard HTML: `{}`\n",
+        report.dashboard_path.display()
+    ));
+    out.push_str(&format!(
+        "- Team store: `{}`\n",
+        report.team_store_root.display()
+    ));
+    out.push_str(&format!(
+        "- Local/team sidecar alpha: `{}`\n",
+        report.local_team_sidecar_alpha
+    ));
+    out.push_str(&format!("- Hosted SaaS: `{}`\n", report.hosted_saas));
+    out.push_str(&format!("- Open approvals: `{}`\n", report.dashboard.open));
+    out.push_str(&format!(
+        "- Evidence refs: `{}`\n\n",
+        report.dashboard.evidence_refs
+    ));
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Artifacts\n\n");
+    for artifact in &report.artifacts {
+        match (artifact.bytes, artifact.sha256.as_deref()) {
+            (Some(bytes), Some(sha256)) => out.push_str(&format!(
+                "- `{}`: {} bytes, sha256 `{}`\n",
+                artifact.name, bytes, sha256
+            )),
+            _ => out.push_str(&format!("- `{}`: missing\n", artifact.name)),
+        }
+    }
+    out.push_str("\nAttach this report to dashboard onboarding or security review before exposing the served dashboard. Keep dashboard binds loopback-only unless a reviewed reverse proxy and explicit admin token are configured.\n");
     out
 }
 
@@ -12450,6 +12752,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 ("src/lib.rs", "bin/agentk-sidecar-permissions-handoff"),
                 ("src/lib.rs", "bin/agentk-sidecar-production-preflight"),
                 ("src/lib.rs", "bin/agentk-sidecar-client-handoff"),
+                ("src/lib.rs", "bin/agentk-sidecar-dashboard-handoff"),
                 ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
@@ -12462,6 +12765,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 "bin/agentk-sidecar-permissions-handoff --json",
                 "bin/agentk-sidecar-production-preflight --json",
                 "bin/agentk-sidecar-client-handoff --json",
+                "bin/agentk-sidecar-dashboard-handoff --json",
             ],
         ),
         alpha_release_source_surface(
@@ -12559,12 +12863,17 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             "packaged checker validates safe-agent demo, dashboard review, durable store, and notification handoff",
             &[
                 ("src/main.rs", "SidecarPackageTeamHandoffCheck"),
+                ("src/main.rs", "SidecarPackageDashboardHandoff"),
                 ("src/lib.rs", "check_sidecar_package_team_handoff"),
+                ("src/lib.rs", "write_sidecar_package_dashboard_handoff"),
                 ("src/lib.rs", "team-audit-dashboard-handoff.md"),
+                ("src/lib.rs", "bin/agentk-sidecar-dashboard-handoff"),
             ],
             &[
                 "agentk sidecar-package-team-handoff-check --json",
                 "bin/agentk-sidecar-team-handoff-check --json",
+                "agentk sidecar-package-dashboard-handoff --json",
+                "bin/agentk-sidecar-dashboard-handoff --json",
             ],
         ),
         alpha_release_source_surface(
@@ -18738,6 +19047,11 @@ pub fn package_sidecar_bundle(
             "bin/agentk-sidecar-client-handoff",
             &sidecar_client_handoff_script(),
         )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-dashboard-handoff",
+            &sidecar_dashboard_handoff_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
         write_packaged_sidecar_file(
@@ -20991,6 +21305,10 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
             .and_then(|value| value.as_str())
             == Some("bin/agentk-sidecar-client-handoff")
         && handoff
+            .and_then(|value| value.get("dashboard_handoff"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-sidecar-dashboard-handoff")
+        && handoff
             .and_then(|value| value.get("doc"))
             .and_then(|value| value.as_str())
             == Some("clients/team-audit-dashboard-handoff.md")
@@ -21028,7 +21346,7 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
         sidecar_check(
             "package manifest team handoff",
             ReadinessStatus::Fail,
-            "team_handoff must list checker, ops handoff, doctor, support bundle, client handoff, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
+            "team_handoff must list checker, ops handoff, doctor, support bundle, client handoff, dashboard handoff, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
         )
     }
 }
@@ -25436,6 +25754,9 @@ install receipt still match the handoff.
 - `bin/agentk-sidecar-client-handoff`: validates Claude Desktop, Codex, Cursor,
   stdio, TCP, and Streamable HTTP setup artifacts, then writes one
   JSON/Markdown client onboarding handoff.
+- `bin/agentk-sidecar-dashboard-handoff`: refreshes the demo trace, renders the
+  approval/audit dashboard, syncs the durable team store, and writes one
+  JSON/Markdown dashboard readiness handoff.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -25495,6 +25816,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/ag
 ./bin/agentk-sidecar-permissions-handoff --json
 ./bin/agentk-sidecar-production-preflight --json
 ./bin/agentk-sidecar-client-handoff --json
+./bin/agentk-sidecar-dashboard-handoff --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -25597,6 +25919,14 @@ Set `AGENTK_PRODUCTION_PREFLIGHT_OUT` to choose another output directory.
 the packaged Claude Desktop, Codex, Cursor, stdio, TCP, and Streamable HTTP
 client onboarding artifacts without claiming hosted SaaS. Set
 `AGENTK_CLIENT_HANDOFF_OUT` to choose another output directory.
+
+`bin/agentk-sidecar-dashboard-handoff` writes
+`sidecar/.agentk/dashboard-handoff/dashboard-handoff.json` and
+`sidecar/.agentk/dashboard-handoff/dashboard-handoff.md` by default. It
+refreshes the safe-agent demo trace, renders the static approval/audit
+dashboard, syncs the durable team store, validates dashboard env and team
+handoff readiness, and hashes the dashboard/store/permissions artifacts for
+review. Set `AGENTK_DASHBOARD_HANDOFF_OUT` to choose another output directory.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -25858,6 +26188,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             "permissions_handoff": "bin/agentk-sidecar-permissions-handoff",
             "production_preflight": "bin/agentk-sidecar-production-preflight",
             "client_handoff": "bin/agentk-sidecar-client-handoff",
+            "dashboard_handoff": "bin/agentk-sidecar-dashboard-handoff",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -25968,6 +26299,7 @@ local relay configuration and keep payload exports package-local.
 {package}/bin/agentk-sidecar-permissions-handoff --json
 {package}/bin/agentk-sidecar-production-preflight --json
 {package}/bin/agentk-sidecar-client-handoff --json
+{package}/bin/agentk-sidecar-dashboard-handoff --json
 {package}/bin/agentk-sidecar-deploy-handoff --json
 {package}/bin/agentk-sidecar-ops-handoff --json
 {package}/bin/agentk-sidecar-doctor --json
@@ -26467,6 +26799,19 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 CLIENT_HANDOFF_OUT="${AGENTK_CLIENT_HANDOFF_OUT:-$ROOT/sidecar/.agentk/client-handoff}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-package-client-handoff --root "$ROOT" --out "$CLIENT_HANDOFF_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_dashboard_handoff_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+DASHBOARD_HANDOFF_OUT="${AGENTK_DASHBOARD_HANDOFF_OUT:-$ROOT/sidecar/.agentk/dashboard-handoff}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-dashboard-handoff --root "$ROOT" --out "$DASHBOARD_HANDOFF_OUT" "$@"
 "#
     .to_string()
 }
@@ -28375,7 +28720,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 53);
+        assert_eq!(report.files.len(), 54);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -28398,6 +28743,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-permissions-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-production-preflight").exists());
         assert!(out.join("bin/agentk-sidecar-client-handoff").exists());
+        assert!(out.join("bin/agentk-sidecar-dashboard-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -28550,6 +28896,14 @@ can_deny = ["*"]
         assert!(client_handoff.contains("client-handoff"));
         assert!(client_handoff.contains("agentk-package-check"));
         assert!(client_handoff.contains("\"$@\""));
+        let dashboard_handoff =
+            fs::read_to_string(out.join("bin/agentk-sidecar-dashboard-handoff"))
+                .expect("dashboard handoff launcher should read");
+        assert!(dashboard_handoff.contains("sidecar-package-dashboard-handoff"));
+        assert!(dashboard_handoff.contains("AGENTK_DASHBOARD_HANDOFF_OUT"));
+        assert!(dashboard_handoff.contains("dashboard-handoff"));
+        assert!(dashboard_handoff.contains("agentk-package-check"));
+        assert!(dashboard_handoff.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -28721,6 +29075,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-permissions-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-production-preflight"));
         assert!(package_readme.contains("bin/agentk-sidecar-client-handoff"));
+        assert!(package_readme.contains("bin/agentk-sidecar-dashboard-handoff"));
         assert!(package_readme.contains("operator-handoff.json"));
         assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("sidecar-doctor.json"));
@@ -28737,12 +29092,15 @@ can_deny = ["*"]
         assert!(package_readme.contains("production-preflight.md"));
         assert!(package_readme.contains("client-handoff.json"));
         assert!(package_readme.contains("client-handoff.md"));
+        assert!(package_readme.contains("dashboard-handoff.json"));
+        assert!(package_readme.contains("dashboard-handoff.md"));
         assert!(package_readme.contains("AGENTK_SUPPORT_BUNDLE_OUT"));
         assert!(package_readme.contains("AGENTK_DEMO_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_QUICKSTART_OUT"));
         assert!(package_readme.contains("AGENTK_PERMISSIONS_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_PRODUCTION_PREFLIGHT_OUT"));
         assert!(package_readme.contains("AGENTK_CLIENT_HANDOFF_OUT"));
+        assert!(package_readme.contains("AGENTK_DASHBOARD_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
         assert!(package_readme.contains("release-manifest binding"));
         assert!(package_readme.contains("local/team sidecar alpha"));
@@ -28826,6 +29184,10 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["team_handoff"]["client_handoff"],
             serde_json::json!("bin/agentk-sidecar-client-handoff")
+        );
+        assert_eq!(
+            package_manifest_json["team_handoff"]["dashboard_handoff"],
+            serde_json::json!("bin/agentk-sidecar-dashboard-handoff")
         );
         assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
@@ -28945,6 +29307,13 @@ can_deny = ["*"]
                 .any(|launcher| launcher == "bin/agentk-sidecar-client-handoff")
         );
         assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-sidecar-dashboard-handoff")
+        );
+        assert!(
             package_manifest_json["client_snippets"]
                 .as_array()
                 .expect("client snippets should be an array")
@@ -28964,6 +29333,7 @@ can_deny = ["*"]
         assert!(onboarding.contains("agentk-sidecar-permissions-handoff"));
         assert!(onboarding.contains("agentk-sidecar-production-preflight"));
         assert!(onboarding.contains("agentk-sidecar-client-handoff"));
+        assert!(onboarding.contains("agentk-sidecar-dashboard-handoff"));
         assert!(onboarding.contains("not hosted SaaS"));
         assert_eq!(
             package_manifest_json["identity"]["manifest"],
@@ -29822,6 +30192,69 @@ can_deny = ["*"]
         assert!(markdown.contains("Cursor"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("Streamable HTTP clients"));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_dashboard_handoff_writes_dashboard_report() {
+        let root = temp_path("agentk-sidecar-dashboard-handoff-root", "dir");
+        let out = temp_path("agentk-sidecar-dashboard-handoff-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        let output_dir = out.join("sidecar/.agentk/dashboard-handoff");
+        let report = write_sidecar_package_dashboard_handoff(&out, &output_dir)
+            .expect("dashboard handoff should write");
+
+        assert!(report.passed);
+        assert!(report.local_team_sidecar_alpha);
+        assert!(!report.hosted_saas);
+        assert_eq!(report.output_dir, output_dir);
+        assert!(report.json_path.is_file());
+        assert!(report.markdown_path.is_file());
+        assert!(report.dashboard_path.is_file());
+        assert!(
+            report
+                .team_store_root
+                .join("current/approvals.json")
+                .is_file()
+        );
+        assert!(
+            report
+                .team_store_root
+                .join("current/notifications.json")
+                .is_file()
+        );
+        assert!(report.artifacts.iter().all(|artifact| {
+            artifact.present && artifact.bytes.unwrap_or_default() > 0 && artifact.sha256.is_some()
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "static dashboard artifact" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "durable team store" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "package team handoff env" && check.status == ReadinessStatus::Pass
+        }));
+
+        let json =
+            fs::read_to_string(&report.json_path).expect("dashboard handoff JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("dashboard handoff JSON should parse");
+        assert_eq!(value["passed"], serde_json::json!(true));
+        assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
+        assert_eq!(value["hosted_saas"], serde_json::json!(false));
+
+        let markdown = fs::read_to_string(&report.markdown_path)
+            .expect("dashboard handoff markdown should read");
+        assert!(markdown.contains("AgentK Dashboard Handoff"));
+        assert!(markdown.contains("Hosted SaaS: `false`"));
+        assert!(markdown.contains("Open approvals"));
+        assert!(markdown.contains("static dashboard"));
+        assert!(markdown.contains("team store"));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
@@ -36818,7 +37251,7 @@ reviewer = "tom"
              ReleaseHomebrewTapHandoffCheck ReleaseTicket SidecarPackageDeployHandoff \
              SidecarPackageDemoHandoff SidecarPackageQuickstart \
              SidecarPackagePermissionsHandoff SidecarPackageProductionPreflight \
-             SidecarPackageClientHandoff",
+             SidecarPackageClientHandoff SidecarPackageDashboardHandoff",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -36833,6 +37266,7 @@ reviewer = "tom"
              write_sidecar_package_permissions_handoff bin/agentk-sidecar-permissions-handoff \
              write_sidecar_package_production_preflight bin/agentk-sidecar-production-preflight \
              write_sidecar_package_client_handoff bin/agentk-sidecar-client-handoff \
+             write_sidecar_package_dashboard_handoff bin/agentk-sidecar-dashboard-handoff \
              release-candidate-smoke write_homebrew_formula check_homebrew_formula \
              check_homebrew_tap_handoff",
         )
