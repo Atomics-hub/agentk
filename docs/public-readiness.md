@@ -3,6 +3,20 @@
 AgentK should stay local until the pre-public checklist is boring. After the first public push,
 keep the same checks in CI and protect the default branch.
 
+Current status: the repository is public and the v0.2 alpha release train is
+gated through `release-ticket`, `release-status`, and the GitHub Actions
+`audit` job. Treat the older checkbox lists below as reusable release hygiene,
+not as the sole source of truth for current alpha readiness. The current
+reviewer bundle is:
+
+```sh
+cargo run --locked -- release-ticket --out dist/release-ticket --force --json
+```
+
+That command writes `release-ticket.json` with product-objective checks,
+accepted-limit checks, finalization/evidence reports, and a top-level artifact
+inventory with paths, byte counts, and SHA-256 hashes for the reviewer handoff.
+
 ## Pre-Public Repository Hygiene
 
 - [ ] No git remote configured before first public push, or
@@ -55,6 +69,11 @@ keep the same checks in CI and protect the default branch.
       dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md
       --out dist/release-finalization.json --json` writes the final local
       release handoff report without tagging, pushing, or publishing.
+- [ ] `cargo run --locked -- release-ticket --out dist/release-ticket
+      --force --json` writes the current maintainer reviewer bundle with
+      release status, smoke evidence, evidence-check results, finalization
+      evidence, product-objective checks, accepted-limit checks, and a
+      top-level artifact inventory for the package and Homebrew handoff files.
 - [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
       dist/agentk-sidecar --json` passes and the reviewer handoff includes
       `clients/http-sse-handoff.md` with bounded local HTTP/SSE alpha language.

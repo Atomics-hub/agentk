@@ -13324,13 +13324,15 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "public readiness covers alpha package smoke",
-            "public-readiness checklist requires release-candidate-smoke and package release manifest",
+            "public-readiness checklist requires release-candidate-smoke, package release manifest, and release-ticket artifact inventory",
             &[
                 ("docs/public-readiness.md", "release-candidate-smoke"),
                 (
                     "docs/public-readiness.md",
                     "sidecar-package-release-manifest",
                 ),
+                ("docs/public-readiness.md", "release-ticket"),
+                ("docs/public-readiness.md", "top-level artifact inventory"),
             ],
             &["docs/public-readiness.md"],
         ),
