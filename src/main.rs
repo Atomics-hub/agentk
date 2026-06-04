@@ -11477,6 +11477,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let install_package_check = release_ticket_install_package_provenance_check(&smoke);
     let store_notification_check = release_ticket_store_notification_handoff_check(&smoke);
     let served_dashboard_runtime_check = release_ticket_served_dashboard_runtime_check(&smoke);
+    let homebrew_handoff_check = release_ticket_homebrew_handoff_check(&out, &release, &smoke)?;
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
@@ -11576,6 +11577,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         install_package_check,
         store_notification_check,
         served_dashboard_runtime_check,
+        homebrew_handoff_check,
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
@@ -11609,6 +11611,158 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_homebrew_handoff_check(
+    out: &Path,
+    release: &str,
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<ReleaseTicketCheckItem, AgentKError> {
+    let report = release_ticket_homebrew_handoff_evidence(out, release, smoke)?;
+    let status = if report
+        .get("passed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or_default()
+    {
+        ReadinessStatus::Pass
+    } else {
+        ReadinessStatus::Fail
+    };
+    Ok(release_ticket_check_item(
+        "Homebrew handoff",
+        status,
+        "Homebrew handoff evidence proves local formula generation, archive SHA verification, tap checkout byte match, dirty-path hygiene, and no tap publication",
+    ))
+}
+
+fn release_ticket_homebrew_handoff_evidence(
+    out: &Path,
+    release: &str,
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<serde_json::Value, AgentKError> {
+    let homebrew_root = out.join("homebrew-handoff");
+    let tap_root = homebrew_root.join("homebrew-agentk");
+    let tap_formula = tap_root.join("Formula/agentk.rb");
+    let formula = homebrew_root.join("agentk.rb");
+    fs::create_dir_all(tap_formula.parent().unwrap_or(&tap_root))?;
+    release_ticket_git_init(&tap_root)?;
+
+    let source_url =
+        format!("https://github.com/Atomics-hub/agentk/archive/refs/tags/{release}.tar.gz");
+    let version = release.trim_start_matches('v');
+    let homepage = "https://github.com/Atomics-hub/agentk";
+    let class_name = "Agentk";
+
+    let formula_report = write_homebrew_formula(
+        &source_url,
+        None,
+        Some(&smoke.package_archive),
+        &formula,
+        Some(version),
+        Some(homepage),
+        Some(class_name),
+        true,
+    )?;
+    let formula_json = homebrew_root.join("formula.json");
+    fs::write(
+        &formula_json,
+        format!("{}\n", serde_json::to_string_pretty(&formula_report)?),
+    )?;
+
+    let formula_check = check_homebrew_formula(
+        &formula,
+        Some(&smoke.package_archive),
+        Some(&source_url),
+        Some(&formula_report.sha256),
+        Some(version),
+        Some(homepage),
+        Some(class_name),
+    )?;
+    let formula_check_json = homebrew_root.join("formula-check.json");
+    fs::write(
+        &formula_check_json,
+        format!("{}\n", serde_json::to_string_pretty(&formula_check)?),
+    )?;
+
+    fs::copy(&formula, &tap_formula)?;
+    let tap_check = check_homebrew_tap_handoff(
+        &formula,
+        &tap_root,
+        "Formula/agentk.rb",
+        Some(&smoke.package_archive),
+        Some(&source_url),
+        Some(&formula_report.sha256),
+        Some(version),
+        Some(homepage),
+        Some(class_name),
+        Some("Atomics-hub/agentk"),
+    )?;
+    let tap_check_json = homebrew_root.join("tap-handoff-check.json");
+    fs::write(
+        &tap_check_json,
+        format!("{}\n", serde_json::to_string_pretty(&tap_check)?),
+    )?;
+
+    let formula_content = fs::read_to_string(&formula)?;
+    for fragment in [
+        "class Agentk < Formula",
+        "depends_on \"rust\" => :build",
+        "cargo\", \"install\"",
+        "#{bin}/agentk",
+    ] {
+        if !formula_content.contains(fragment) {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "Homebrew formula does not prove {fragment}"
+            )));
+        }
+    }
+
+    let passed = formula_check.passed
+        && tap_check.passed
+        && tap_check
+            .dirty_paths
+            .iter()
+            .all(|path| path == "Formula/agentk.rb");
+    let dirty_paths = tap_check.dirty_paths.clone();
+    let report = serde_json::json!({
+        "passed": passed,
+        "published_tap": false,
+        "source_url": source_url,
+        "source_archive": smoke.package_archive.display().to_string(),
+        "package_archive_sha256": smoke.package_archive_sha256,
+        "formula": formula.display().to_string(),
+        "formula_report": formula_json.display().to_string(),
+        "formula_check": formula_check_json.display().to_string(),
+        "tap_root": tap_root.display().to_string(),
+        "tap_formula": tap_formula.display().to_string(),
+        "tap_handoff_check": tap_check_json.display().to_string(),
+        "dirty_paths": dirty_paths,
+        "formula_checks": formula_check.checks,
+        "tap_checks": tap_check.checks,
+    });
+    let report_path = homebrew_root.join("homebrew-handoff.json");
+    fs::write(
+        report_path,
+        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    )?;
+    Ok(report)
+}
+
+fn release_ticket_git_init(path: &Path) -> Result<(), AgentKError> {
+    fs::create_dir_all(path)?;
+    let output = ProcessCommand::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(path)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AgentKError::InvalidMcpRequest(format!(
+            "could not initialize local Homebrew tap checkout at {}",
+            path.display()
+        )))
+    }
 }
 
 fn release_ticket_served_dashboard_runtime_check(

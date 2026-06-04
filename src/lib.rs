@@ -13251,6 +13251,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "served dashboard evidence proves launcher package preflight",
                 ),
+                (
+                    "src/main.rs",
+                    "Homebrew handoff evidence proves local formula generation",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),

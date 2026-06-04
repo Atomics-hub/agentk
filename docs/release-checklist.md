@@ -157,8 +157,11 @@ hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
 similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,
 secret-reference manifests, non-local bind defaults, and no live secret
-retrieval. It does not tag, push, upload, or publish. The remaining commands
-keep the individual gates visible for manual review and final publication.
+retrieval. It checks Homebrew handoff evidence for local formula generation,
+source archive SHA verification, tap checkout byte match, dirty-path hygiene,
+and no tap publication. It does not tag, push, upload, or publish. The
+remaining commands keep the individual gates visible for manual review and
+final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:
