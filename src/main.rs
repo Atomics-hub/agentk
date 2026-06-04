@@ -11619,20 +11619,7 @@ fn release_ticket_objective_checks(
     smoke: &ReleaseCandidateSmokeReport,
 ) -> Vec<ReleaseTicketCheckItem> {
     [
-        release_ticket_objective_check(
-            smoke,
-            "objective: production MCP gateway",
-            &["HTTP handoff check", "production preflight", "deploy handoff"],
-            &[
-                "http handoff check json",
-                "sidecar http env example",
-                "systemd sidecar service",
-                "docker compose",
-                "caddy reverse proxy",
-                "nginx reverse proxy",
-            ],
-            "MCP HTTP gateway handoff, deploy templates, env example, and reverse-proxy artifacts are release-ticket evidence",
-        ),
+        release_ticket_production_mcp_gateway_check(smoke),
         release_ticket_objective_check(
             smoke,
             "objective: approvals/audit dashboard",
@@ -11668,6 +11655,98 @@ fn release_ticket_objective_checks(
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_production_mcp_gateway_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let base_check = release_ticket_objective_check(
+        smoke,
+        "objective: production MCP gateway",
+        &[
+            "HTTP handoff check",
+            "production preflight",
+            "deploy handoff",
+        ],
+        &[
+            "http handoff check json",
+            "http sse handoff",
+            "sidecar http env example",
+            "systemd sidecar service",
+            "docker compose",
+            "caddy reverse proxy",
+            "nginx reverse proxy",
+        ],
+        "MCP HTTP gateway handoff, deploy templates, env example, and reverse-proxy artifacts are release-ticket evidence",
+    );
+    if base_check.status != ReadinessStatus::Pass {
+        return base_check;
+    }
+
+    match release_ticket_production_mcp_gateway_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "objective: production MCP gateway",
+            ReadinessStatus::Pass,
+            "production MCP gateway evidence proves loopback defaults, auth-token env handoff, bounded Streamable HTTP/SSE replay, Last-Event-ID resume, no hosted control plane, and client docs",
+        ),
+        Err(detail) => release_ticket_check_item(
+            "objective: production MCP gateway",
+            ReadinessStatus::Fail,
+            detail,
+        ),
+    }
+}
+
+fn release_ticket_production_mcp_gateway_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let http_handoff = release_ticket_smoke_artifact(smoke, "http handoff check json")
+        .ok_or_else(|| "http handoff check json artifact is missing".to_string())?;
+    let bytes = fs::read(&http_handoff.path).map_err(|err| {
+        format!(
+            "http handoff check json could not be read at {}: {err}",
+            http_handoff.path.display()
+        )
+    })?;
+    let report = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "http handoff check json could not be parsed at {}: {err}",
+            http_handoff.path.display()
+        )
+    })?;
+    if report.get("passed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("http handoff check json does not report passed".into());
+    }
+
+    let checks = report
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "http handoff check json is missing checks".to_string())?;
+    for (name, detail_fragment) in [
+        ("package HTTP/SSE manifest", "bounded SSE alpha contract"),
+        ("package HTTP/SSE launcher", "bounded local env controls"),
+        ("package HTTP/SSE env", "loopback defaults"),
+        (
+            "package HTTP/SSE handoff",
+            "bounded HTTP/SSE alpha contract",
+        ),
+        ("package HTTP/SSE README", "bounded HTTP/SSE handoff"),
+    ] {
+        let passed = checks.iter().any(|check| {
+            check.get("name").and_then(|value| value.as_str()) == Some(name)
+                && check.get("status").and_then(|value| value.as_str()) == Some("pass")
+                && check
+                    .get("detail")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|detail| detail.contains(detail_fragment))
+        });
+        if !passed {
+            return Err(format!(
+                "http handoff check json does not prove {name}: {detail_fragment}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_safe_agent_demo_check(
