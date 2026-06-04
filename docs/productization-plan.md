@@ -464,7 +464,11 @@ The safest first productization slice is the local team sidecar path:
     syntactically valid `Mcp-Session-Id`, pass the same auth/origin/protocol
     checks. The bounded local alpha serves already mediated session responses
     from a capped per-session buffer and supports `Last-Event-ID` resume while
-    keeping metrics redacted.
+    keeping metrics redacted. Downstream MCP spawn or transport failures now
+    return sanitized HTTP 502 JSON-RPC errors with CORS for allowed origins
+    instead of closing the socket, and readiness/metrics count those failures
+    separately from AgentK internal gateway failures without reflecting raw
+    command, environment, payload, or stderr values.
     Full hosted HTTP/SSE transport, TLS, and live external identity verification
     remain future production-gateway work.
 
