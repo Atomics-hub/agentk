@@ -997,6 +997,30 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write one offline release-candidate ticket bundle for reviewer handoff.
+    ReleaseTicket {
+        /// Release identifier to bind into the handoff report.
+        #[arg(long, default_value = "v0.2-alpha")]
+        release: String,
+        /// Output directory for release-status, smoke evidence, finalization, and ticket JSON.
+        #[arg(long, default_value = "dist/release-ticket")]
+        out: PathBuf,
+        /// Release notes file that reviewers will publish from.
+        #[arg(long, default_value = "docs/v0.2-alpha-release-notes.md")]
+        notes: PathBuf,
+        /// Optional signed git tag to verify with git verify-tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Treat dirty worktree, draft notes, dev signer, or missing tag as blockers.
+        #[arg(long)]
+        strict: bool,
+        /// Replace an existing release ticket directory.
+        #[arg(long)]
+        force: bool,
+        /// Emit the full release ticket report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write an offline final release handoff report from verified evidence.
     ReleaseFinalize {
         /// Release identifier to bind into the handoff report.
@@ -1560,6 +1584,15 @@ fn run() -> Result<(), AgentKError> {
             root,
             json,
         } => release_evidence_check(evidence, root, json),
+        Command::ReleaseTicket {
+            release,
+            out,
+            notes,
+            tag,
+            strict,
+            force,
+            json,
+        } => release_ticket(release, out, notes, tag, strict, force, json),
         Command::ReleaseFinalize {
             release,
             evidence,
@@ -9432,6 +9465,34 @@ struct ReleaseEvidenceCheckItem {
     detail: String,
 }
 
+const RELEASE_TICKET_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+struct ReleaseTicketReport {
+    schema_version: u32,
+    release: String,
+    output: PathBuf,
+    ready: bool,
+    strict: bool,
+    release_status: PathBuf,
+    smoke_root: PathBuf,
+    smoke_evidence: PathBuf,
+    finalization: PathBuf,
+    ticket: PathBuf,
+    checks: Vec<ReleaseTicketCheckItem>,
+    status: agentk::AlphaReleaseStatusReport,
+    smoke: ReleaseCandidateSmokeReport,
+    evidence_check: ReleaseEvidenceCheckReport,
+    finalization_report: ReleaseFinalizeReport,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseTicketCheckItem {
+    name: String,
+    status: ReadinessStatus,
+    detail: String,
+}
+
 const RELEASE_FINALIZE_SCHEMA_VERSION: u32 = 1;
 const RELEASE_FINALIZE_DRAFT_MARKERS: &[&str] = &[
     "<commit-sha>",
@@ -10566,6 +10627,58 @@ fn release_evidence_check(
     Ok(())
 }
 
+fn release_ticket(
+    release: String,
+    out: PathBuf,
+    notes: PathBuf,
+    tag: Option<String>,
+    strict: bool,
+    force: bool,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_release_ticket(ReleaseTicketOptions {
+        release,
+        out,
+        notes,
+        tag,
+        strict,
+        force,
+    })?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK release ticket");
+        println!(
+            "verdict   {}",
+            if report.ready {
+                "ready for reviewer handoff"
+            } else {
+                "blocked"
+            }
+        );
+        println!("release   {}", report.release);
+        println!("out       {}", report.output.display());
+        println!("status    {}", report.release_status.display());
+        println!("smoke     {}", report.smoke_root.display());
+        println!("evidence  {}", report.smoke_evidence.display());
+        println!("finalize  {}", report.finalization.display());
+        println!("ticket    {}", report.ticket.display());
+        println!();
+        for check in &report.checks {
+            println!("[{}] {:<24} {}", check.status, check.name, check.detail);
+        }
+    }
+
+    if !report.ready {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release ticket handoff failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn release_finalize(
     release: String,
@@ -10674,6 +10787,166 @@ fn release_publication_check(
     }
 
     Ok(())
+}
+
+struct ReleaseTicketOptions {
+    release: String,
+    out: PathBuf,
+    notes: PathBuf,
+    tag: Option<String>,
+    strict: bool,
+    force: bool,
+}
+
+fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketReport, AgentKError> {
+    let ReleaseTicketOptions {
+        release,
+        out,
+        notes,
+        tag,
+        strict,
+        force,
+    } = options;
+
+    if out.exists() {
+        if !out.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "release ticket output path exists but is not a directory: {}",
+                out.display()
+            )));
+        }
+        if !force {
+            return Err(AgentKError::FileExists(out));
+        }
+        fs::remove_dir_all(&out)?;
+    }
+    fs::create_dir_all(&out)?;
+
+    let release_status_path = out.join("release-status.json");
+    let smoke_root = out.join("release-candidate-smoke");
+    let smoke_evidence = out.join("release-candidate-smoke.json");
+    let finalization = out.join("release-finalization.json");
+    let ticket = out.join("release-ticket.json");
+
+    let status = alpha_release_status_report(".");
+    fs::write(
+        &release_status_path,
+        format!("{}\n", serde_json::to_string_pretty(&status)?),
+    )?;
+
+    let smoke = run_release_candidate_smoke(
+        Some(smoke_root.clone()),
+        true,
+        true,
+        Some(smoke_evidence.clone()),
+    )?;
+    write_release_candidate_smoke_evidence(&smoke, &smoke_evidence, true)?;
+
+    let evidence_check = run_release_evidence_check(&smoke_evidence, Some(smoke_root.clone()))?;
+    let finalization_report = run_release_finalize(ReleaseFinalizeOptions {
+        release: release.clone(),
+        evidence: smoke_evidence.clone(),
+        root: Some(smoke_root.clone()),
+        notes,
+        tag,
+        out: finalization.clone(),
+        strict,
+        force: true,
+    })?;
+
+    let checks = vec![
+        release_ticket_check_item(
+            "release status",
+            if status.ready_for_alpha_rc {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            if status.ready_for_alpha_rc {
+                "release-status reports alpha RC readiness"
+            } else {
+                "release-status reports alpha RC blockers"
+            },
+        ),
+        release_ticket_check_item(
+            "smoke evidence",
+            if smoke.passed {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!("{} artifacts recorded", smoke.artifacts.len()),
+        ),
+        release_ticket_check_item(
+            "evidence check",
+            if evidence_check.passed {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            format!(
+                "{}/{} artifacts verified",
+                evidence_check.artifacts_verified, evidence_check.artifacts_total
+            ),
+        ),
+        release_ticket_check_item(
+            "finalization",
+            if finalization_report.ready {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            if finalization_report.ready {
+                "release-finalize wrote reviewer handoff evidence".to_string()
+            } else {
+                "release-finalize reported blockers".to_string()
+            },
+        ),
+        release_ticket_check_item(
+            "publish action",
+            ReadinessStatus::Pass,
+            "release-ticket writes local evidence only; it does not tag, push, upload, or publish",
+        ),
+    ];
+    let ready = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    let report = ReleaseTicketReport {
+        schema_version: RELEASE_TICKET_SCHEMA_VERSION,
+        release,
+        output: out,
+        ready,
+        strict,
+        release_status: release_status_path,
+        smoke_root,
+        smoke_evidence,
+        finalization,
+        ticket: ticket.clone(),
+        checks,
+        status,
+        smoke,
+        evidence_check,
+        finalization_report,
+    };
+    fs::write(
+        &ticket,
+        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    )?;
+
+    Ok(report)
+}
+
+fn release_ticket_check_item(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReleaseTicketCheckItem {
+    ReleaseTicketCheckItem {
+        name: name.into(),
+        status,
+        detail: detail.into(),
+    }
 }
 
 struct ReleaseFinalizeOptions {
@@ -17023,6 +17296,42 @@ done
         };
         assert_eq!(evidence, PathBuf::from("dist/release-candidate-smoke.json"));
         assert_eq!(root, Some(PathBuf::from("dist/release-candidate-smoke")));
+        assert!(json);
+
+        let release_ticket = Cli::try_parse_from([
+            "agentk",
+            "release-ticket",
+            "--release",
+            "v0.2-alpha",
+            "--out",
+            "dist/release-ticket",
+            "--notes",
+            "docs/v0.2-alpha-release-notes.md",
+            "--tag",
+            "v0.2.0-alpha.1",
+            "--strict",
+            "--force",
+            "--json",
+        ])
+        .expect("release ticket should parse");
+        let Some(Command::ReleaseTicket {
+            release,
+            out,
+            notes,
+            tag,
+            strict,
+            force,
+            json,
+        }) = release_ticket.command
+        else {
+            panic!("expected release-ticket command");
+        };
+        assert_eq!(release, "v0.2-alpha");
+        assert_eq!(out, PathBuf::from("dist/release-ticket"));
+        assert_eq!(notes, PathBuf::from("docs/v0.2-alpha-release-notes.md"));
+        assert_eq!(tag, Some("v0.2.0-alpha.1".to_string()));
+        assert!(strict);
+        assert!(force);
         assert!(json);
 
         let release_status = Cli::try_parse_from(["agentk", "release-status", "--json"])
