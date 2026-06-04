@@ -12792,7 +12792,7 @@ fn release_ticket_deploy_preflight_check(
         Ok(()) => release_ticket_check_item(
             "deploy/preflight handoff",
             ReadinessStatus::Pass,
-            "deploy/preflight evidence proves deploy templates, owner deployment steps, supervisor env examples, secret-reference placeholders, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
+            "deploy/preflight evidence proves deploy templates, owner deployment steps, supervisor env examples, secret-reference placeholders, provider-shaped production refs, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("deploy/preflight handoff", ReadinessStatus::Fail, detail)
@@ -12902,11 +12902,81 @@ fn release_ticket_deploy_preflight_evidence(
             "production preflight json does not prove secret-reference coverage".to_string(),
         );
     }
+    let production_secret_refs = preflight
+        .get("production_secret_refs")
+        .ok_or_else(|| "production preflight json is missing production_secret_refs".to_string())?;
+    let production_secret_count = production_secret_refs
+        .get("secret_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    if production_secret_count == 0
+        || production_secret_refs
+            .get("production_provider_ref_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            != production_secret_count
+        || production_secret_refs
+            .get("shape_checked_ref_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            != production_secret_count
+    {
+        return Err(
+            "production preflight json does not prove production secret-reference shapes"
+                .to_string(),
+        );
+    }
+    let provider_inventory = preflight
+        .get("secret_reference_providers")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            "production preflight json is missing secret_reference_providers".to_string()
+        })?;
+    let required_production_providers = [
+        "aws-secrets-manager",
+        "gcp-secret-manager",
+        "azure-key-vault",
+        "vault",
+        "onepassword",
+    ];
+    for provider in required_production_providers {
+        let Some(entry) = provider_inventory.iter().find(|entry| {
+            entry.get("manifest").and_then(|value| value.as_str())
+                == Some("sidecar/secret-refs-production.toml")
+                && entry.get("provider").and_then(|value| value.as_str()) == Some(provider)
+        }) else {
+            return Err(format!(
+                "production preflight json is missing provider-shaped evidence for {provider}"
+            ));
+        };
+        release_ticket_require_bool(
+            entry,
+            "production_provider",
+            true,
+            "production preflight provider inventory",
+        )?;
+        release_ticket_require_bool(
+            entry,
+            "shape_checked",
+            true,
+            "production preflight provider inventory",
+        )?;
+        release_ticket_require_bool(
+            entry,
+            "live_lookup_performed",
+            false,
+            "production preflight provider inventory",
+        )?;
+    }
     release_ticket_require_checks(
         &preflight,
         "production preflight json",
         &[
             ("secret reference manifest", "values are references"),
+            (
+                "production secret reference shapes",
+                "provider shapes checked without live lookup",
+            ),
             ("package deploy env examples", "required dummy values"),
             ("placeholder coverage", "placeholders"),
             ("non-local bind defaults", "non-local binds disabled"),
@@ -12919,6 +12989,7 @@ fn release_ticket_deploy_preflight_evidence(
         "production preflight json",
         &[
             "secret reference manifest",
+            "production secret reference manifest",
             "deploy/env/sidecar-http.env.example",
             "deploy/env/dashboard.env.example",
             "deploy/env/store-postgres.env.example",

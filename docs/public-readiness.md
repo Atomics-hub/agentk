@@ -129,8 +129,9 @@ inventory with paths, byte counts, and SHA-256 hashes for the reviewer handoff.
       installed/agentk-sidecar --json` writes
       `sidecar/.agentk/production-preflight/production-preflight.json` and
       `sidecar/.agentk/production-preflight/production-preflight.md` with env
-      template, secret-reference, placeholder coverage, and non-local bind
-      default evidence without reading live secrets.
+      template, active secret-reference, provider-shaped production reference,
+      placeholder coverage, and non-local bind default evidence without reading
+      live secrets or performing live provider lookups.
 - [ ] `cargo run --locked -- sidecar-package-client-handoff --root
       installed/agentk-sidecar --json` writes
       `sidecar/.agentk/client-handoff/client-handoff.json` and
