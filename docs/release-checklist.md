@@ -86,7 +86,12 @@ and Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json
-cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- release-candidate-smoke \
+  --root dist/release-candidate-smoke \
+  --force \
+  --keep-root \
+  --evidence-out dist/release-candidate-smoke.json \
+  --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
@@ -158,7 +163,7 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo run --locked -- release-status --json
-cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
