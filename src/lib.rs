@@ -10665,7 +10665,7 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "release checklist covers package handoff",
-            "signed release checklist requires package archive/install/release-manifest evidence",
+            "signed release checklist requires package archive/install/release-manifest evidence and evidence recheck",
             &[
                 ("docs/release-checklist.md", "sidecar-package-install"),
                 (
@@ -10676,8 +10676,22 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "docs/release-checklist.md",
                     "sidecar-package-release-manifest-check",
                 ),
+                ("docs/release-checklist.md", "release-evidence-check"),
             ],
             &["docs/release-checklist.md"],
+        ),
+        alpha_release_source_surface(
+            root,
+            "release ticket evidence checker",
+            "release-evidence-check verifies saved smoke evidence and artifact SHA-256s",
+            &[
+                ("src/main.rs", "ReleaseEvidenceCheck"),
+                ("README.md", "release-evidence-check"),
+                ("docs/v0.2-alpha-release-notes.md", "release-evidence-check"),
+            ],
+            &[
+                "cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke",
+            ],
         ),
         alpha_release_source_surface(
             root,

@@ -1,4 +1,5 @@
 /target
+/dist
 
 # AgentK run artifacts. These may contain prompts, paths, URLs, tool args,
 # or other sensitive local execution context.

@@ -963,6 +963,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify release-candidate smoke evidence and artifact hashes before handoff.
+    ReleaseEvidenceCheck {
+        /// JSON evidence report written by release-candidate-smoke --evidence-out.
+        #[arg(long, default_value = "dist/release-candidate-smoke.json")]
+        evidence: PathBuf,
+        /// Optional relocated smoke root to rebase recorded artifact paths.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Emit the full evidence check report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a Homebrew formula for a reviewed AgentK source release tarball.
     ReleaseHomebrewFormula {
         /// HTTPS source release tarball URL for the formula.
@@ -1406,6 +1418,11 @@ fn run() -> Result<(), AgentKError> {
             evidence_out,
             json,
         } => release_candidate_smoke(root, force, keep_root, evidence_out, json),
+        Command::ReleaseEvidenceCheck {
+            evidence,
+            root,
+            json,
+        } => release_evidence_check(evidence, root, json),
         Command::ReleaseHomebrewFormula {
             source_url,
             sha256,
@@ -8587,7 +8604,33 @@ fn print_alpha_release_status_section(title: &str, items: &[agentk::AlphaRelease
     }
 }
 
-#[derive(Debug, Serialize)]
+const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
+    "manifest",
+    "package lock",
+    "package archive",
+    "package archive checksum",
+    "release manifest",
+    "install receipt",
+    "claude client",
+    "codex cursor client",
+    "http sse handoff",
+    "team audit dashboard handoff",
+    "operator handoff json",
+    "operator handoff markdown",
+    "sidecar doctor json",
+    "sidecar doctor markdown",
+    "trace",
+    "dashboard",
+    "store readme",
+    "postgres load",
+    "team approvals",
+    "slack payloads",
+    "github payloads",
+    "email payloads",
+    "docker compose",
+];
+
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseCandidateSmokeReport {
     root: PathBuf,
     package: PathBuf,
@@ -8609,7 +8652,7 @@ struct ReleaseCandidateSmokeReport {
     artifacts: Vec<ReleaseCandidateSmokeArtifact>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseCandidateSmokeStep {
     name: String,
     command: Vec<String>,
@@ -8617,13 +8660,35 @@ struct ReleaseCandidateSmokeStep {
     exit_code: Option<i32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ReleaseCandidateSmokeArtifact {
     name: String,
     path: PathBuf,
     present: bool,
     bytes: Option<u64>,
     sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseEvidenceCheckReport {
+    evidence: PathBuf,
+    reported_root: PathBuf,
+    checked_root: PathBuf,
+    passed: bool,
+    steps_passed: usize,
+    steps_total: usize,
+    artifacts_verified: usize,
+    artifacts_total: usize,
+    missing_artifacts: usize,
+    changed_artifacts: usize,
+    checks: Vec<ReleaseEvidenceCheckItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseEvidenceCheckItem {
+    name: String,
+    status: ReadinessStatus,
+    detail: String,
 }
 
 fn release_candidate_smoke(
@@ -9358,6 +9423,348 @@ fn write_release_candidate_smoke_evidence(
     Ok(())
 }
 
+fn release_evidence_check(
+    evidence: PathBuf,
+    root: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let report = run_release_evidence_check(&evidence, root)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK release evidence check");
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        println!("evidence  {}", report.evidence.display());
+        println!("reported  {}", report.reported_root.display());
+        println!("checked   {}", report.checked_root.display());
+        println!(
+            "steps     {}/{} passed",
+            report.steps_passed, report.steps_total
+        );
+        println!(
+            "artifacts {}/{} verified",
+            report.artifacts_verified, report.artifacts_total
+        );
+        println!("missing   {}", report.missing_artifacts);
+        println!("changed   {}", report.changed_artifacts);
+        println!();
+        for check in &report.checks {
+            println!("[{}] {:<28} {}", check.status, check.name, check.detail);
+        }
+    }
+
+    if !report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release evidence check failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn run_release_evidence_check(
+    evidence: &Path,
+    root_override: Option<PathBuf>,
+) -> Result<ReleaseEvidenceCheckReport, AgentKError> {
+    let content = fs::read_to_string(evidence)?;
+    let smoke: ReleaseCandidateSmokeReport = serde_json::from_str(&content)?;
+    let checked_root = root_override.unwrap_or_else(|| smoke.root.clone());
+    let mut checks = Vec::new();
+
+    checks.push(release_evidence_check_item(
+        "smoke verdict",
+        if smoke.passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if smoke.passed {
+            "release-candidate-smoke reported ready"
+        } else {
+            "release-candidate-smoke reported blocked"
+        },
+    ));
+
+    let steps_total = smoke.steps.len();
+    let failed_steps = smoke
+        .steps
+        .iter()
+        .filter(|step| !step.passed)
+        .map(|step| step.name.as_str())
+        .collect::<Vec<_>>();
+    let steps_passed = steps_total.saturating_sub(failed_steps.len());
+    checks.push(release_evidence_check_item(
+        "step results",
+        if steps_total > 0 && failed_steps.is_empty() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if steps_total == 0 {
+            "no smoke steps were recorded".to_string()
+        } else if failed_steps.is_empty() {
+            format!("{steps_passed}/{steps_total} smoke steps passed")
+        } else {
+            format!(
+                "{}/{} smoke steps passed; failed: {}",
+                steps_passed,
+                steps_total,
+                failed_steps.join(", ")
+            )
+        },
+    ));
+
+    let artifact_names = smoke
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_required = RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS
+        .iter()
+        .copied()
+        .filter(|name| !artifact_names.contains(name))
+        .collect::<Vec<_>>();
+    let unknown_artifacts = artifact_names
+        .iter()
+        .copied()
+        .filter(|name| !RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS.contains(name))
+        .collect::<Vec<_>>();
+    checks.push(release_evidence_check_item(
+        "artifact inventory",
+        if smoke.artifacts.is_empty() || !missing_required.is_empty() {
+            ReadinessStatus::Fail
+        } else if unknown_artifacts.is_empty() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Warn
+        },
+        if smoke.artifacts.is_empty() {
+            "no artifacts were recorded".to_string()
+        } else if !missing_required.is_empty() {
+            format!(
+                "missing required artifacts: {}",
+                missing_required.join(", ")
+            )
+        } else if unknown_artifacts.is_empty() {
+            format!(
+                "{} required artifacts recorded",
+                RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS.len()
+            )
+        } else {
+            format!("unknown extra artifacts: {}", unknown_artifacts.join(", "))
+        },
+    ));
+
+    let artifact_bindings = [
+        ("package archive", smoke.package_archive.as_path()),
+        (
+            "package archive checksum",
+            smoke.package_archive_checksum.as_path(),
+        ),
+        ("release manifest", smoke.package_release_manifest.as_path()),
+        ("trace", smoke.trace_path.as_path()),
+        ("dashboard", smoke.dashboard_path.as_path()),
+    ];
+    let binding_mismatches = artifact_bindings
+        .iter()
+        .filter_map(|(name, expected_path)| {
+            match smoke
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.name == *name)
+            {
+                Some(artifact) if artifact.path.as_path() == *expected_path => None,
+                Some(artifact) => Some(format!(
+                    "{} artifact path {} does not match report field {}",
+                    name,
+                    artifact.path.display(),
+                    expected_path.display()
+                )),
+                None => Some(format!("{name} artifact is missing")),
+            }
+        })
+        .collect::<Vec<_>>();
+    checks.push(release_evidence_check_item(
+        "artifact bindings",
+        if binding_mismatches.is_empty() {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if binding_mismatches.is_empty() {
+            "report fields match named handoff artifacts".to_string()
+        } else {
+            release_evidence_truncated_detail(&binding_mismatches.join("; "), 360)
+        },
+    ));
+
+    let mut artifacts_verified = 0;
+    let mut missing_artifacts = 0;
+    let mut changed_artifacts = 0;
+    let mut artifact_failures = Vec::new();
+    let mut package_archive_sha = None;
+
+    for artifact in &smoke.artifacts {
+        let path = release_evidence_rebased_path(&artifact.path, &smoke.root, &checked_root);
+        if !artifact.present {
+            missing_artifacts += 1;
+            artifact_failures.push(format!("{} was recorded absent", artifact.name));
+            continue;
+        }
+        let Some(expected_bytes) = artifact.bytes else {
+            changed_artifacts += 1;
+            artifact_failures.push(format!("{} is missing recorded byte count", artifact.name));
+            continue;
+        };
+        let Some(expected_sha256) = artifact.sha256.as_deref() else {
+            changed_artifacts += 1;
+            artifact_failures.push(format!("{} is missing recorded SHA-256", artifact.name));
+            continue;
+        };
+        if !release_evidence_valid_sha256(expected_sha256) {
+            changed_artifacts += 1;
+            artifact_failures.push(format!("{} has invalid recorded SHA-256", artifact.name));
+            continue;
+        }
+        let metadata = match fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+        {
+            Some(metadata) => metadata,
+            None => {
+                missing_artifacts += 1;
+                artifact_failures.push(format!("{} is missing on disk", artifact.name));
+                continue;
+            }
+        };
+        let actual_sha256 = release_candidate_smoke_file_sha256(&path)?;
+        let bytes_match = metadata.len() == expected_bytes;
+        let sha_matches = actual_sha256 == expected_sha256;
+        if bytes_match && sha_matches {
+            artifacts_verified += 1;
+        } else {
+            changed_artifacts += 1;
+            artifact_failures.push(format!("{} hash or size changed", artifact.name));
+        }
+        if artifact.name == "package archive" {
+            package_archive_sha = Some(actual_sha256);
+        }
+    }
+
+    let artifacts_total = smoke.artifacts.len();
+    checks.push(release_evidence_check_item(
+        "artifact hashes",
+        if artifacts_total > 0 && artifacts_verified == artifacts_total {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        if artifact_failures.is_empty() {
+            format!("{artifacts_verified}/{artifacts_total} artifacts match recorded SHA-256")
+        } else {
+            let detail = format!(
+                "{artifacts_verified}/{artifacts_total} artifacts verified; {}",
+                artifact_failures.join("; ")
+            );
+            release_evidence_truncated_detail(&detail, 360)
+        },
+    ));
+
+    checks.push(release_evidence_check_item(
+        "package archive hash",
+        match package_archive_sha.as_deref() {
+            Some(sha) if sha == smoke.package_archive_sha256 => ReadinessStatus::Pass,
+            Some(_) => ReadinessStatus::Fail,
+            None => ReadinessStatus::Fail,
+        },
+        match package_archive_sha {
+            Some(sha) if sha == smoke.package_archive_sha256 => {
+                "package archive matches report-level SHA-256".to_string()
+            }
+            Some(_) => "package archive does not match report-level SHA-256".to_string(),
+            None => "package archive artifact was not verified".to_string(),
+        },
+    ));
+
+    checks.push(release_evidence_check_item(
+        "evidence binding",
+        match smoke.evidence_report.as_ref() {
+            Some(path) if path == evidence => ReadinessStatus::Pass,
+            Some(_) | None => ReadinessStatus::Warn,
+        },
+        match smoke.evidence_report.as_ref() {
+            Some(path) if path == evidence => "evidence path matches recorded report".to_string(),
+            Some(path) => format!(
+                "evidence was recorded as {}; current check used {}",
+                path.display(),
+                evidence.display()
+            ),
+            None => "smoke report was not written with --evidence-out".to_string(),
+        },
+    ));
+
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    Ok(ReleaseEvidenceCheckReport {
+        evidence: evidence.to_path_buf(),
+        reported_root: smoke.root,
+        checked_root,
+        passed,
+        steps_passed,
+        steps_total,
+        artifacts_verified,
+        artifacts_total,
+        missing_artifacts,
+        changed_artifacts,
+        checks,
+    })
+}
+
+fn release_evidence_rebased_path(
+    path: &Path,
+    reported_root: &Path,
+    checked_root: &Path,
+) -> PathBuf {
+    if reported_root != checked_root
+        && let Ok(relative) = path.strip_prefix(reported_root)
+    {
+        return checked_root.join(relative);
+    }
+    path.to_path_buf()
+}
+
+fn release_evidence_valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn release_evidence_truncated_detail(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut truncated = value.chars().take(keep).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn release_evidence_check_item(
+    name: &str,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReleaseEvidenceCheckItem {
+    ReleaseEvidenceCheckItem {
+        name: name.to_string(),
+        status,
+        detail: detail.into(),
+    }
+}
+
 fn release_candidate_smoke_temp_root() -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -9395,6 +9802,64 @@ mod tests {
                 .as_nanos(),
             extension
         ))
+    }
+
+    fn synthetic_release_smoke_report(root: &Path, evidence: &Path) -> ReleaseCandidateSmokeReport {
+        let artifact_root = root.join("artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root should create");
+        let mut artifacts = Vec::new();
+        let mut paths = BTreeMap::new();
+        for name in RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS {
+            let filename = format!("{}.txt", name.replace(' ', "-"));
+            let path = artifact_root.join(filename);
+            fs::write(&path, format!("agentk release evidence {name}\n"))
+                .expect("artifact should write");
+            release_candidate_smoke_artifact(&mut artifacts, name, path.clone())
+                .expect("artifact should record");
+            paths.insert((*name).to_string(), path);
+        }
+        let package_archive_sha256 = artifacts
+            .iter()
+            .find(|artifact| artifact.name == "package archive")
+            .and_then(|artifact| artifact.sha256.clone())
+            .expect("package archive artifact should have sha");
+
+        ReleaseCandidateSmokeReport {
+            root: root.to_path_buf(),
+            package: root.join("dist/agentk-sidecar"),
+            package_archive: paths["package archive"].clone(),
+            package_archive_checksum: paths["package archive checksum"].clone(),
+            package_release_manifest: paths["release manifest"].clone(),
+            evidence_report: Some(evidence.to_path_buf()),
+            installed_package: root.join("installed/agentk-sidecar"),
+            package_archive_sha256,
+            trace_path: paths["trace"].clone(),
+            dashboard_path: paths["dashboard"].clone(),
+            store_export_root: root.join("installed/agentk-sidecar/sidecar/.agentk/store"),
+            team_store_root: root.join("installed/agentk-sidecar/sidecar/.agentk/team-store"),
+            slack_payload_root: root.join("installed/agentk-sidecar/sidecar/.agentk/slack"),
+            github_payload_root: root.join("installed/agentk-sidecar/sidecar/.agentk/github"),
+            kept_root: true,
+            passed: true,
+            steps: vec![
+                ReleaseCandidateSmokeStep {
+                    name: "package install".to_string(),
+                    command: vec!["agentk".to_string(), "sidecar-package-install".to_string()],
+                    passed: true,
+                    exit_code: Some(0),
+                },
+                ReleaseCandidateSmokeStep {
+                    name: "release manifest check".to_string(),
+                    command: vec![
+                        "agentk".to_string(),
+                        "sidecar-package-release-manifest-check".to_string(),
+                    ],
+                    passed: true,
+                    exit_code: Some(0),
+                },
+            ],
+            artifacts,
+        }
     }
 
     fn dashboard_test_request(
@@ -13859,6 +14324,28 @@ done
         assert!(force);
         assert!(keep_root);
 
+        let release_evidence_check = Cli::try_parse_from([
+            "agentk",
+            "release-evidence-check",
+            "--evidence",
+            "dist/release-candidate-smoke.json",
+            "--root",
+            "dist/release-candidate-smoke",
+            "--json",
+        ])
+        .expect("release evidence check should parse");
+        let Some(Command::ReleaseEvidenceCheck {
+            evidence,
+            root,
+            json,
+        }) = release_evidence_check.command
+        else {
+            panic!("expected release-evidence-check command");
+        };
+        assert_eq!(evidence, PathBuf::from("dist/release-candidate-smoke.json"));
+        assert_eq!(root, Some(PathBuf::from("dist/release-candidate-smoke")));
+        assert!(json);
+
         let release_status = Cli::try_parse_from(["agentk", "release-status", "--json"])
             .expect("release status should parse");
         let Some(Command::ReleaseStatus { json }) = release_status.command else {
@@ -14324,6 +14811,85 @@ done
         assert!(content.contains("evidence_report"));
 
         let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn release_evidence_check_verifies_and_detects_changed_artifacts() {
+        let root = test_temp_path("agentk-release-evidence-root", "dir");
+        let evidence = test_temp_path("agentk-release-evidence", "json");
+        let report = synthetic_release_smoke_report(&root, &evidence);
+        write_release_candidate_smoke_evidence(&report, &evidence, false)
+            .expect("evidence should write");
+
+        let clean = run_release_evidence_check(&evidence, None).expect("evidence should check");
+
+        assert!(clean.passed);
+        assert_eq!(clean.steps_passed, clean.steps_total);
+        assert_eq!(
+            clean.artifacts_total,
+            RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS.len()
+        );
+        assert_eq!(clean.artifacts_verified, clean.artifacts_total);
+        assert_eq!(clean.missing_artifacts, 0);
+        assert_eq!(clean.changed_artifacts, 0);
+
+        let package_lock = report
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "package lock")
+            .expect("package lock artifact should exist")
+            .path
+            .clone();
+        fs::write(&package_lock, "tampered package lock\n").expect("artifact should tamper");
+
+        let tampered =
+            run_release_evidence_check(&evidence, None).expect("tampered evidence should parse");
+
+        assert!(!tampered.passed);
+        assert_eq!(tampered.changed_artifacts, 1);
+        assert!(
+            tampered
+                .checks
+                .iter()
+                .any(|check| check.name == "artifact hashes"
+                    && check.status == ReadinessStatus::Fail)
+        );
+
+        fs::remove_dir_all(root).ok();
+        let _ = fs::remove_file(evidence);
+    }
+
+    #[test]
+    fn release_evidence_check_rebases_relocated_smoke_root() {
+        let original_root = test_temp_path("agentk-release-evidence-original", "dir");
+        let relocated_root = test_temp_path("agentk-release-evidence-relocated", "dir");
+        let evidence = test_temp_path("agentk-release-evidence-rebased", "json");
+        let report = synthetic_release_smoke_report(&original_root, &evidence);
+        for artifact in &report.artifacts {
+            let relative = artifact
+                .path
+                .strip_prefix(&original_root)
+                .expect("artifact should live under original root");
+            let relocated = relocated_root.join(relative);
+            if let Some(parent) = relocated.parent() {
+                fs::create_dir_all(parent).expect("relocated parent should create");
+            }
+            fs::copy(&artifact.path, &relocated).expect("artifact should copy");
+        }
+        write_release_candidate_smoke_evidence(&report, &evidence, false)
+            .expect("evidence should write");
+        fs::remove_dir_all(&original_root).expect("original root should remove");
+
+        let check = run_release_evidence_check(&evidence, Some(relocated_root.clone()))
+            .expect("relocated evidence should check");
+
+        assert!(check.passed);
+        assert_eq!(check.reported_root, original_root);
+        assert_eq!(check.checked_root, relocated_root);
+        assert_eq!(check.artifacts_verified, check.artifacts_total);
+
+        fs::remove_dir_all(check.checked_root).ok();
+        let _ = fs::remove_file(evidence);
     }
 
     #[test]
