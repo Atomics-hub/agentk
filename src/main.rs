@@ -9337,6 +9337,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "release manifest",
     "install receipt",
     "package check json",
+    "http handoff check json",
+    "team handoff check json",
     "onboarding guide",
     "claude client",
     "codex cursor client",
@@ -9840,6 +9842,8 @@ fn run_release_candidate_smoke(
     let support_bundle_markdown = support_bundle_root.join("support-bundle.md");
     let release_evidence_root = installed_package.join("sidecar/.agentk/release");
     let package_check_json = release_evidence_root.join("package-check.json");
+    let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
+    let team_handoff_check_json = release_evidence_root.join("team-handoff-check.json");
 
     init_sidecar_bundle(&bundle, false)?;
     package_sidecar_bundle(&bundle, &package, false)?;
@@ -9965,6 +9969,32 @@ fn run_release_candidate_smoke(
     if !package_check_report.passed {
         return Err(AgentKError::InvalidMcpRequest(
             "release candidate smoke package check report was blocked".to_string(),
+        ));
+    }
+    let http_handoff_check_report = check_sidecar_package_http_handoff(&installed_package)?;
+    fs::write(
+        &http_handoff_check_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&http_handoff_check_report)?
+        ),
+    )?;
+    if !http_handoff_check_report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release candidate smoke HTTP handoff report was blocked".to_string(),
+        ));
+    }
+    let team_handoff_check_report = check_sidecar_package_team_handoff(&installed_package)?;
+    fs::write(
+        &team_handoff_check_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&team_handoff_check_report)?
+        ),
+    )?;
+    if !team_handoff_check_report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release candidate smoke team handoff report was blocked".to_string(),
         ));
     }
     release_candidate_smoke_step(
@@ -10203,6 +10233,16 @@ fn run_release_candidate_smoke(
         install_receipt_path.clone(),
     )?;
     release_candidate_smoke_artifact(&mut artifacts, "package check json", package_check_json)?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "http handoff check json",
+        http_handoff_check_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "team handoff check json",
+        team_handoff_check_json,
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "onboarding guide",

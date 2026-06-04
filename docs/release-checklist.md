@@ -80,11 +80,12 @@ Run the packaged sidecar release-candidate smoke in an empty or disposable
 directory. This recreates the package/archive, verifies the archive checksum,
 installs the package, writes and verifies the package release manifest, runs the
 packaged safe-agent demo, dashboard, sidecar checks, durable store
-sync/export/check, package-check JSON artifact, onboarding guide artifact,
-operator handoff artifact, sidecar doctor support report, support bundle
-artifact, Slack/GitHub/email notification payload exporters, systemd/launchd
-service templates, Dockerfile/Compose templates, deploy README, dummy env
-examples, dry-run delivery launchers, and Postgres dry-run push:
+sync/export/check, package-check JSON artifact, HTTP/team handoff check JSON
+artifacts, onboarding guide artifact, operator handoff artifact, sidecar doctor
+support report, support bundle artifact, Slack/GitHub/email notification
+payload exporters, systemd/launchd service templates, Dockerfile/Compose
+templates, deploy README, dummy env examples, dry-run delivery launchers, and
+Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json
