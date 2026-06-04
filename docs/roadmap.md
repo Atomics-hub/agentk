@@ -9,7 +9,7 @@ accumulating unrelated prototype features.
 
 ## Milestone 0: Local Prototype
 
-Status: in progress.
+Status: shipped in v0.1; v0.2 alpha is now focused on the installable local/team sidecar release train.
 
 - [x] Rust CLI scaffold
 - [x] Context labels

@@ -13158,6 +13158,22 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
             ],
             &["docs/v0.2-alpha-release-notes.md"],
         ),
+        alpha_release_source_surface(
+            root,
+            "public product framing names alpha sidecar",
+            "README and CLI status describe the current v0.2 alpha sidecar without reverting to public prototype positioning",
+            &[
+                ("README.md", "v0.2 alpha release candidate"),
+                ("README.md", "installable local/team sidecar"),
+                ("README.md", "not hosted production SaaS"),
+                ("README.md", "installable local/team MCP sidecar"),
+                (
+                    "src/main.rs",
+                    "AgentK: firewall and flight recorder for AI agents.",
+                ),
+            ],
+            &["README.md", "agentk --help"],
+        ),
     ]
 }
 
