@@ -13227,6 +13227,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "Claude/Codex/Cursor sidecar evidence proves packaged Claude JSON",
                 ),
+                (
+                    "src/main.rs",
+                    "deploy/preflight evidence proves deploy templates",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),
