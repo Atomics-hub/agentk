@@ -13515,9 +13515,11 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "offline release ticket bundle",
-            "release-ticket writes status, accepted-limit checks, smoke evidence, product-objective checks, evidence check, finalization reports, and publication handoff checks into one reviewer handoff directory without publishing",
+            "release-ticket writes status, accepted-limit checks, smoke evidence, product-objective checks, evidence check, finalization reports, publication preflight evidence, and publication handoff checks into one reviewer handoff directory without publishing",
             &[
                 ("src/main.rs", "ReleaseTicket"),
+                ("src/main.rs", "release-publication-check.json"),
+                ("src/main.rs", "publication preflight"),
                 ("src/main.rs", "publication handoff"),
                 (
                     "src/main.rs",
@@ -13574,16 +13576,25 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ("src/main.rs", "accepted_limit_checks"),
                 ("README.md", "release-ticket"),
                 ("README.md", "product coverage"),
+                ("README.md", "publication preflight JSON"),
                 ("README.md", "publication handoff evidence"),
                 ("README.md", "accepted alpha limits"),
                 ("docs/release-checklist.md", "release-ticket"),
                 ("docs/release-checklist.md", "product-objective checks"),
+                (
+                    "docs/release-checklist.md",
+                    "publication preflight evidence",
+                ),
                 ("docs/release-checklist.md", "publication handoff evidence"),
                 ("docs/release-checklist.md", "accepted-limit checks"),
                 ("docs/v0.2-alpha-release-notes.md", "release-ticket"),
                 (
                     "docs/v0.2-alpha-release-notes.md",
                     "product-objective coverage checks",
+                ),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "publication preflight evidence",
                 ),
                 (
                     "docs/v0.2-alpha-release-notes.md",

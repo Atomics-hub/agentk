@@ -133,7 +133,8 @@ cargo run --locked -- sidecar-package-dashboard-handoff --root installed/agentk-
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
 writes release status, smoke evidence, evidence-check results, finalization
-evidence, and a summary ticket JSON under `dist/release-ticket/`; the ticket
+evidence, publication preflight evidence, and a summary ticket JSON under
+`dist/release-ticket/`; the ticket
 summary includes explicit product-objective checks for the MCP gateway including
 loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
 reviewer-scoped team-store evidence, multi-user permissions proof for reviewer
@@ -163,7 +164,7 @@ publication steps, and `release-publication-check` coverage. It checks Homebrew
 handoff evidence for local formula generation, source archive SHA verification,
 tap checkout byte match, dirty-path hygiene, and no tap publication, and records
 the release status, smoke evidence,
-finalization, package, quickstart, dashboard, client, permissions, deploy,
+finalization, publication preflight, package, quickstart, dashboard, client, permissions, deploy,
 support, demo, store, notification, service-template, and Homebrew
 formula/check/tap handoff files in the ticket artifact inventory. It does not
 tag, push, upload, or publish. The remaining commands keep the individual gates
