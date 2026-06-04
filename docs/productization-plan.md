@@ -411,10 +411,14 @@ The safest first productization slice is the local team sidecar path:
     `Content-Length` headers, control characters in header values, and any
     transfer-encoding, content-encoding, expectation, or upgrade header with
     sanitized 400 responses; HTTP request bodies must be unencoded and
-    fixed-length. WebSocket handshake headers are rejected because the
-    gateway is a Streamable HTTP adapter, not a WebSocket transport. Method
-    override headers are rejected so routes cannot be reinterpreted by
-    intermediaries. Proxy and trace methods are rejected before route handling.
+    fixed-length. MCP POST bodies must be single JSON-RPC 2.0 request or
+    notification objects with string `method` fields; batches, non-object JSON,
+    response-shaped objects, and invalid JSON-RPC version fields fail before
+    session lookup or downstream forwarding. WebSocket handshake headers are
+    rejected because the gateway is a Streamable HTTP adapter, not a WebSocket
+    transport. Method override headers are rejected so routes cannot be
+    reinterpreted by intermediaries. Proxy and trace methods are rejected before
+    route handling.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
     rejected before request handling. Forwarded proxy metadata is rejected by

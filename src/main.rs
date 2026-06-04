@@ -7579,6 +7579,9 @@ fn mcp_http_post_response(
             });
         }
     };
+    if let Some(response) = mcp_http_json_rpc_shape_error(&message, &request.body) {
+        return Ok(response);
+    }
     let method = message.get("method").and_then(|value| value.as_str());
     let is_initialize = method == Some("initialize");
     let is_notification_or_response = message.get("id").is_none();
@@ -7714,6 +7717,59 @@ fn mcp_http_post_response(
         })
     } else {
         Ok(dashboard_http_text("202 Accepted", "accepted\n"))
+    }
+}
+
+fn mcp_http_json_rpc_shape_error(
+    message: &serde_json::Value,
+    body: &[u8],
+) -> Option<DashboardHttpResponse> {
+    let Some(object) = message.as_object() else {
+        let detail = if message.is_array() {
+            "batch requests are not supported"
+        } else {
+            "message must be a JSON object"
+        };
+        return Some(mcp_http_json_rpc_invalid_request_response(body, detail));
+    };
+
+    if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
+        return Some(mcp_http_json_rpc_invalid_request_response(
+            body,
+            "jsonrpc must be \"2.0\"",
+        ));
+    }
+
+    if !object.get("method").is_some_and(|value| value.is_string()) {
+        return Some(mcp_http_json_rpc_invalid_request_response(
+            body,
+            "method must be a string",
+        ));
+    }
+
+    None
+}
+
+fn mcp_http_json_rpc_invalid_request_response(body: &[u8], detail: &str) -> DashboardHttpResponse {
+    DashboardHttpResponse {
+        status: "400 Bad Request",
+        content_type: "application/json",
+        headers: Vec::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": mcp_http_json_rpc_error_id(body),
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request",
+                "data": {
+                    "detail": detail
+                }
+            }
+        }))
+        .unwrap_or_else(|_| {
+            b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}\n"
+                .to_vec()
+        }),
     }
 }
 
@@ -13076,6 +13132,119 @@ done
                 .expect("session lock should not be poisoned")
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_response_rejects_invalid_json_rpc_shapes_before_session_forwarding() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-shape-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trust_proxy_headers: false,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let initialize_response =
+            mcp_http_response(&initialize, &state).expect("initialize should create session");
+        assert_eq!(initialize_response.status, "200 OK");
+        let session_id = response_header(&initialize_response, "Mcp-Session-Id")
+            .expect("initialize should return session")
+            .to_string();
+
+        let cases = [
+            (
+                r#"[{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"secret":"SHAPE_SECRET_BATCH"}}]"#,
+                "batch requests are not supported",
+            ),
+            (
+                r#""SHAPE_SECRET_PRIMITIVE""#,
+                "message must be a JSON object",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"shape-response","result":{"secret":"SHAPE_SECRET_RESPONSE"}}"#,
+                "method must be a string",
+            ),
+            (
+                r#"{"id":"shape-jsonrpc","method":"tools/list","params":{"secret":"SHAPE_SECRET_JSONRPC"}}"#,
+                "jsonrpc must be \"2.0\"",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":"shape-method","method":{"secret":"SHAPE_SECRET_METHOD"}}"#,
+                "method must be a string",
+            ),
+        ];
+
+        for (body, detail) in cases {
+            let request = dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Mcp-Session-Id", session_id.as_str()),
+                    ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ],
+                body,
+            );
+            let response =
+                mcp_http_response(&request, &state).expect("invalid shape should fail closed");
+            assert_eq!(response.status, "400 Bad Request");
+            assert_eq!(response.content_type, "application/json");
+            let response_body = String::from_utf8_lossy(&response.body);
+            assert!(!response_body.contains("SHAPE_SECRET"));
+            let response_json: serde_json::Value =
+                serde_json::from_slice(&response.body).expect("response should be JSON-RPC");
+            assert_eq!(response_json["error"]["code"], serde_json::json!(-32600));
+            assert_eq!(
+                response_json["error"]["message"],
+                serde_json::json!("Invalid Request")
+            );
+            assert_eq!(
+                response_json["error"]["data"]["detail"],
+                serde_json::json!(detail)
+            );
+        }
+
+        let session = Arc::clone(
+            state
+                .sessions
+                .lock()
+                .expect("sessions should lock")
+                .get(&session_id)
+                .expect("session should still exist"),
+        );
+        let session = session.lock().expect("session should lock");
+        assert_eq!(session.proxy.session_report().client_messages_seen, 1);
+        assert_eq!(session.sse_events.len(), 1);
+        drop(session);
+
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.post_requests, 6);
+        assert_eq!(metrics.client_error_responses, 5);
+        assert_eq!(metrics.sessions_created, 1);
     }
 
     #[test]

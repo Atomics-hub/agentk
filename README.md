@@ -351,7 +351,10 @@ supports optional bearer auth via
 rejects malformed session ids before lookup, rejects unsupported
 `MCP-Protocol-Version` headers, returns direct JSON responses, and rejects
 oversized request bodies with 413 and excess initialized sessions with 429.
-POSTs require an exact `application/json` media type.
+POSTs require an exact `application/json` media type and a single JSON-RPC 2.0
+request or notification object with a string `method`; batches, non-object
+JSON, and response-shaped payloads fail closed before session lookup or
+downstream forwarding.
 Malformed request lines or header lines, including invalid UTF-8, duplicate or
 non-decimal `Content-Length` headers, LF-only line endings, control characters
 in header values, ambiguous MCP control headers, any `Transfer-Encoding` or
@@ -619,11 +622,12 @@ including invalid UTF-8, duplicate or non-decimal `Content-Length`
 headers, LF-only line endings, control characters in header values, and any
 `Transfer-Encoding`, `Content-Encoding`, `Expect`, or `Upgrade` header are
 rejected as invalid framing. Request bodies must be unencoded fixed-length
-payloads. WebSocket handshake headers such as `Sec-WebSocket-Key` and
-`Sec-WebSocket-Protocol` are rejected because this launcher serves the
-Streamable HTTP adapter, not WebSocket. Only `Connection: close` is accepted;
-other `Connection` values plus `Proxy-Connection`, `Keep-Alive`, `TE`, and
-`Trailer` headers are rejected.
+payloads, and MCP POST bodies must be single JSON-RPC 2.0 request or
+notification objects with string `method` fields. WebSocket handshake headers
+such as `Sec-WebSocket-Key` and `Sec-WebSocket-Protocol` are rejected because
+this launcher serves the Streamable HTTP adapter, not WebSocket. Only
+`Connection: close` is accepted; other `Connection` values plus
+`Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` headers are rejected.
 Forwarded proxy metadata is rejected by default; set
 `AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1` only behind a reviewed reverse proxy
 that strips untrusted inbound forwarded headers before adding clean

@@ -330,4 +330,5 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Preflight packaged AgentK binary resolution before launcher work.
 - [x] Embed redacted trace-inspect evidence in the safe-agent demo report.
 - [x] Return sanitized MCP HTTP 502 responses and metrics for downstream gateway failures.
+- [x] Reject invalid Streamable HTTP JSON-RPC message shapes before session forwarding.
 - [ ] Continue bounded local MCP gateway transport hardening.
