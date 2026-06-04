@@ -619,7 +619,8 @@ path, then writes `sidecar/.agentk/demo-handoff/demo-handoff.json` and
 trace, dashboard, store, and notification payload drafts.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-quickstart --json` as the packaged
 first-run team command. It validates package health, HTTP/team handoff checks,
-the demo handoff, deploy handoff, and support bundle, then writes
+the demo handoff, deploy handoff, support bundle, permissions handoff,
+production preflight, client handoff, and dashboard handoff, then writes
 `sidecar/.agentk/quickstart/quickstart.json` and
 `sidecar/.agentk/quickstart/quickstart.md` as one onboarding report.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-permissions-handoff --json` when
