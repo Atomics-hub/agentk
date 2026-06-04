@@ -238,9 +238,10 @@ This creates `release-status.json`, `release-candidate-smoke.json`,
 `dist/release-ticket/` without tagging, pushing, uploading, or publishing. The
 ticket summary includes explicit objective checks for the MCP gateway,
 approval/audit dashboard, multi-user permissions, Claude/Codex/Cursor sidecar
-onboarding, and safe-agent demo evidence so reviewers can see product coverage
-without opening the full smoke report. It also includes accepted alpha limits
-as explicit deferred-scope checks, so the same handoff distinguishes local/team
+onboarding, and GitHub/Postgres/Slack/filesystem safe-agent demo evidence
+including blocked filesystem patch proof, so reviewers can see product coverage
+without opening the full smoke report. It also includes accepted alpha limits as
+explicit deferred-scope checks, so the same handoff distinguishes local/team
 sidecar readiness from hosted SaaS, live IdP, production secret retrieval, and
 public internet gateway claims.
 
