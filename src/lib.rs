@@ -13463,7 +13463,7 @@ done
                 TIMEOUT_PROBE_SCRIPT.to_string(),
                 "agentk-timeout-probe".to_string(),
             ])
-            .with_response_timeout(Duration::from_millis(500)),
+            .with_response_timeout(Duration::from_millis(50)),
     )?;
     let responses = report
         .output
