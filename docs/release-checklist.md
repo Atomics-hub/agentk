@@ -83,7 +83,7 @@ packaged safe-agent demo, dashboard, sidecar checks, durable store
 sync/export/check, package-check JSON artifact, HTTP/team handoff check JSON
 artifacts, onboarding guide artifact, operator handoff artifact, sidecar doctor
 support report, support bundle artifact, deploy handoff artifact, demo handoff
-artifact,
+artifact, quickstart artifact,
 Slack/GitHub/email notification payload exporters, systemd/launchd service
 templates, Dockerfile/Compose templates, deploy README, dummy env examples,
 dry-run delivery launchers, and Postgres dry-run push:
@@ -123,6 +123,7 @@ cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --r
 cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-deploy-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-demo-handoff --root installed/agentk-sidecar --json
+cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 ```
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
@@ -224,6 +225,7 @@ cargo run --locked -- release-publication-check --finalization dist/release-fina
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-demo-handoff --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- release-homebrew-tap-handoff-check --formula dist/homebrew/agentk.rb --tap-root ../homebrew-agentk --tap-formula-path Formula/agentk.rb --source-archive dist/agentk-vX.Y.Z.tar.gz --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz --sha256 <source-tarball-sha256> --version X.Y.Z --homepage https://github.com/OWNER/REPO --tap OWNER/agentk --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>

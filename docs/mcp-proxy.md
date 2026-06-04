@@ -314,6 +314,10 @@ review should focus on the packaged no-credential demo. It refreshes the
 GitHub/Postgres/Slack/filesystem demo evidence through the operator handoff
 path and writes demo-handoff JSON/Markdown with hashed trace, dashboard, store,
 and notification payload artifacts.
+Run `<package>/bin/agentk-sidecar-quickstart --json` as the first command after
+install or copy. It validates package health, HTTP/team handoff checks, demo
+handoff, deploy handoff, and support bundle evidence, then writes one
+quickstart JSON/Markdown report for the team operator.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

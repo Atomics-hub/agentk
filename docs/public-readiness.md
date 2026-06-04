@@ -92,6 +92,13 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/demo-handoff/demo-handoff.md` with refreshed
       credential-free GitHub/Postgres/Slack/filesystem demo evidence,
       dashboard, store, and notification payload hashes for onboarding review.
+- [ ] `cargo run --locked -- sidecar-package-quickstart --root
+      installed/agentk-sidecar --release-manifest
+      dist/agentk-sidecar-release-manifest.json --json` writes
+      `sidecar/.agentk/quickstart/quickstart.json` and
+      `sidecar/.agentk/quickstart/quickstart.md` as the first-run operator
+      report tying package health, HTTP/team handoff checks, demo handoff,
+      deploy handoff, and support bundle evidence together.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest
