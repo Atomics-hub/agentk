@@ -4,7 +4,7 @@
 
 AgentK is a firewall and flight recorder for AI agents.
 
-Status: public prototype, not production-ready.
+Status: v0.2 alpha release candidate; installable local/team sidecar, not hosted production SaaS.
 
 Run a malicious MCP server. Watch baseline passthrough execute fake secret
 exfiltration and repository patch markers. Then put AgentK in front of the same
@@ -43,9 +43,9 @@ around the high-risk transitions.
 
 ## What AgentK Is
 
-AgentK is a tiny prototype of an **agent security kernel**. It is not another
-agent framework. It is the syscall boundary agent frameworks should run
-through:
+AgentK is an **agent security kernel** and installable local/team MCP sidecar
+alpha. It is not another agent framework. It is the syscall boundary agent
+frameworks should run through:
 
 ```txt
 model.call
@@ -168,7 +168,7 @@ Fork-replay with changed hashed behavior outputs:
 cargo run -- fork-replay-behavior .agentk/runs/latest.jsonl --behavior examples/replay-behavior-overrides.json
 ```
 
-Check the prototype policy:
+Check the starter policy:
 
 ```sh
 cargo run -- policy-check examples/agentk.policy.toml
@@ -298,7 +298,7 @@ Mediate newline-delimited MCP-shaped requests over bounded stdin:
 cargo run -- mcp-lines < examples/mcp-tool-requests.jsonl
 ```
 
-Run the minimal MCP JSON-RPC stdio server. The prototype accepts
+Run the minimal MCP JSON-RPC stdio server. The stdio server accepts
 newline-delimited JSON-RPC messages, rejects batches, enforces bounded request
 ids, streams stdin with a per-line message size cap, and does not execute the
 underlying tool. Tool listing and calls require a prior `initialize` request

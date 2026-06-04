@@ -56,7 +56,7 @@ const DASHBOARD_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentk")]
-#[command(about = "AgentK: a tiny security kernel prototype for AI agents.")]
+#[command(about = "AgentK: firewall and flight recorder for AI agents.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
