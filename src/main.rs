@@ -798,7 +798,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Write one packaged deploy handoff artifact with hashed service/env templates.
+    /// Write one packaged deploy handoff artifact with hashed service/env templates and supervisor probes.
     SidecarPackageDeployHandoff {
         /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
         #[arg(long, default_value = "agentk-sidecar-package")]
@@ -12908,7 +12908,7 @@ fn release_ticket_deploy_preflight_check(
         Ok(()) => release_ticket_check_item(
             "deploy/preflight handoff",
             ReadinessStatus::Pass,
-            "deploy/preflight evidence proves deploy templates, owner deployment steps, supervisor env examples, secret-reference placeholders, provider-shaped production refs, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
+            "deploy/preflight evidence proves deploy templates, owner deployment steps, supervisor env examples, supervisor probes, secret-reference placeholders, provider-shaped production refs, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("deploy/preflight handoff", ReadinessStatus::Fail, detail)
@@ -12941,12 +12941,25 @@ fn release_ticket_deploy_preflight_evidence(
             "rollback owner",
         ],
     )?;
+    release_ticket_require_supervisor_probes(
+        &deploy,
+        "deploy handoff json",
+        &[
+            ("MCP HTTP gateway", "/healthz", false),
+            ("MCP HTTP gateway", "/readyz", true),
+            ("MCP HTTP gateway", "/metrics", true),
+            ("dashboard", "/healthz", false),
+            ("dashboard", "/readyz", true),
+            ("dashboard", "/metrics", true),
+        ],
+    )?;
     release_ticket_require_checks(
         &deploy,
         "deploy handoff json",
         &[
             ("package deploy templates", "baseline hardening markers"),
             ("package deploy env examples", "required dummy values"),
+            ("supervisor probes", "health, readiness, and metrics probes"),
             (
                 "package HTTP/SSE handoff",
                 "bounded HTTP/SSE alpha contract",
@@ -13548,6 +13561,46 @@ fn release_ticket_require_deployment_steps(
     Ok(())
 }
 
+fn release_ticket_require_supervisor_probes(
+    report: &serde_json::Value,
+    label: &str,
+    required: &[(&str, &str, bool)],
+) -> Result<(), String> {
+    let probes = report
+        .get("supervisor_probes")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing supervisor_probes"))?;
+    for (service, path, auth_required) in required {
+        let found = probes.iter().any(|probe| {
+            probe.get("service").and_then(|value| value.as_str()) == Some(*service)
+                && probe.get("path").and_then(|value| value.as_str()) == Some(*path)
+                && probe.get("method").and_then(|value| value.as_str()) == Some("GET")
+                && probe
+                    .get("auth_required_when_configured")
+                    .and_then(|value| value.as_bool())
+                    == Some(*auth_required)
+                && probe
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|command| {
+                        command.contains("curl -fsS")
+                            && command.contains("127.0.0.1")
+                            && command.contains(*path)
+                    })
+                && probe
+                    .get("expected")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|expected| expected.contains("redacted") || *path == "/healthz")
+        });
+        if !found {
+            return Err(format!(
+                "{label} does not prove supervisor probe for {service} {path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn release_ticket_require_checks(
     report: &serde_json::Value,
     label: &str,
@@ -14061,7 +14114,7 @@ fn release_ticket_production_mcp_gateway_check(
         Ok(()) => release_ticket_check_item(
             "objective: production MCP gateway",
             ReadinessStatus::Pass,
-            "production MCP gateway evidence proves loopback defaults, auth-token env handoff, bounded Streamable HTTP/SSE replay, Last-Event-ID resume, no hosted control plane, and client docs",
+            "production MCP gateway evidence proves loopback defaults, auth-token env handoff, supervisor probes, bounded Streamable HTTP/SSE replay, Last-Event-ID resume, no hosted control plane, and client docs",
         ),
         Err(detail) => release_ticket_check_item(
             "objective: production MCP gateway",

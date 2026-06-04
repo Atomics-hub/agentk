@@ -118,7 +118,8 @@ inventory with paths, byte counts, and SHA-256 hashes for the reviewer handoff.
       `sidecar/.agentk/quickstart/quickstart.json` and
       `sidecar/.agentk/quickstart/quickstart.md` as the first-run operator
       report tying package health, HTTP/team handoff checks, demo handoff,
-      deploy handoff, and support bundle evidence together.
+      deploy handoff, supervisor probe evidence, and support bundle evidence
+      together.
 - [ ] `cargo run --locked -- sidecar-package-permissions-handoff --root
       installed/agentk-sidecar --json` writes
       `sidecar/.agentk/permissions-handoff/permissions-handoff.json` and
