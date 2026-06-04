@@ -408,9 +408,12 @@ The safest first productization slice is the local team sidecar path:
     intermediaries. Proxy and trace methods are rejected before route handling.
     Only `Connection: close` is accepted; other connection values and
     hop-by-hop negotiation headers are rejected, and proxy auth headers are
-    rejected before request handling. Forwarded proxy metadata such as
-    `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has
-    an explicit trusted-proxy mode. Ambient cookie headers such as `Cookie` and
+    rejected before request handling. Forwarded proxy metadata is rejected by
+    default; explicit trusted-proxy mode accepts only clean `Forwarded`,
+    `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and
+    `X-Real-IP` values from a reviewed reverse proxy, rejects duplicates or
+    malformed values, and exposes only redacted readiness/metrics counts.
+    Ambient cookie headers such as `Cookie` and
     `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
     tokens instead. Request lines must be exactly
     space-delimited, request targets must begin with exactly one `/` and cannot

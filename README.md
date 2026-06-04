@@ -362,9 +362,11 @@ fixed-length request bodies. WebSocket handshake headers such as
 gateway is not a WebSocket transport. `Connection: close` is accepted, while
 other `Connection` values and hop-by-hop negotiation headers such as
 `Proxy-Connection`, `Keep-Alive`, `TE`, and `Trailer` are rejected, as are proxy auth headers such as
-`Proxy-Authorization` and `Proxy-Authenticate`. Forwarded proxy metadata such
-as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` is rejected until AgentK has an
-explicit trusted-proxy mode, and ambient cookie headers such as `Cookie` and
+`Proxy-Authorization` and `Proxy-Authenticate`. Forwarded proxy metadata is
+rejected by default; `--trust-proxy-headers` accepts only clean `Forwarded`,
+`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Real-IP`
+values from a reviewed reverse proxy, rejects duplicates or malformed values,
+and reports only redacted readiness/metrics counts. Ambient cookie headers such as `Cookie` and
 `Set-Cookie` are rejected because the gateway uses explicit bearer/reviewer
 tokens instead. Method override headers such as `X-HTTP-Method-Override` and
 `X-Method-Override` are rejected so gateway routes cannot be reinterpreted by
@@ -618,8 +620,10 @@ payloads. WebSocket handshake headers such as `Sec-WebSocket-Key` and
 Streamable HTTP adapter, not WebSocket. Only `Connection: close` is accepted;
 other `Connection` values plus `Proxy-Connection`, `Keep-Alive`, `TE`, and
 `Trailer` headers are rejected.
-Forwarded proxy metadata such as `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
-is rejected until AgentK has an explicit trusted-proxy mode.
+Forwarded proxy metadata is rejected by default; set
+`AGENTK_MCP_HTTP_TRUST_PROXY_HEADERS=1` only behind a reviewed reverse proxy
+that strips untrusted inbound forwarded headers before adding clean
+`Forwarded` or `X-Forwarded-*` metadata.
 Ambient cookie headers such as `Cookie` and `Set-Cookie` are rejected because
 the gateway uses explicit bearer/reviewer tokens instead.
 Method override headers such as `X-HTTP-Method-Override` and
