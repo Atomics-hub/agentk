@@ -182,6 +182,7 @@ Status: in progress.
 - [x] Add contributor guidelines for security-sensitive changes.
 - [x] Add a signed release checklist for tagged versions.
 - [x] Add an explicit remote-approval signal for strict release gates.
+- [x] Add an offline release-publication preflight for final GitHub release notes and artifact evidence.
 
 ## Milestone 6: v0.1 Release Shape
 
