@@ -41,7 +41,8 @@ keep the same checks in CI and protect the default branch.
       dist/release-candidate-smoke.json --json` passes and writes package,
       archive, install receipt, verified release manifest, package-check JSON,
       HTTP/team handoff check JSON, onboarding guide, demo trace, dashboard,
-      durable store, operator handoff, deploy handoff, notification payload,
+      durable store, operator handoff, deploy handoff, dashboard handoff,
+      notification payload,
       systemd/launchd services, Dockerfile/Compose templates, Caddy/nginx
       reverse-proxy templates, deploy README, dummy env examples, and a JSON
       evidence report with SHA-256/byte counts for required handoff files.
@@ -116,6 +117,12 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/client-handoff/client-handoff.json` and
       `sidecar/.agentk/client-handoff/client-handoff.md` with Claude Desktop,
       Codex, Cursor, stdio, TCP, and Streamable HTTP setup evidence.
+- [ ] `cargo run --locked -- sidecar-package-dashboard-handoff --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/dashboard-handoff/dashboard-handoff.json` and
+      `sidecar/.agentk/dashboard-handoff/dashboard-handoff.md` with refreshed
+      demo trace, static dashboard, durable team store, permissions, identity,
+      dashboard env, and not-hosted-SaaS evidence.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest

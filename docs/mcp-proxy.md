@@ -322,6 +322,11 @@ Run `<package>/bin/agentk-sidecar-client-handoff --json` when client onboarding
 should focus on Claude Desktop, Codex, Cursor, stdio, TCP, and Streamable HTTP
 setup readiness. It writes client-handoff JSON/Markdown with hashes for the
 packaged snippets and launchers without claiming hosted SaaS.
+Run `<package>/bin/agentk-sidecar-dashboard-handoff --json` when approval/audit
+review should focus on the dashboard and durable team store. It refreshes the
+safe-agent demo trace, renders the static dashboard, syncs the team store, and
+writes dashboard-handoff JSON/Markdown with hashes for dashboard, store,
+permissions, identity, env, and launcher evidence without claiming hosted SaaS.
 Run `<package>/bin/agentk-sidecar-demo-handoff --json` when the first team
 review should focus on the packaged no-credential demo. It refreshes the
 GitHub/Postgres/Slack/filesystem demo evidence through the operator handoff
