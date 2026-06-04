@@ -86,6 +86,12 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
       `sidecar/.agentk/deploy-handoff/deploy-handoff.md` with service-template
       and env-example hashes for deployment-ticket review.
+- [ ] `cargo run --locked -- sidecar-package-demo-handoff --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/demo-handoff/demo-handoff.json` and
+      `sidecar/.agentk/demo-handoff/demo-handoff.md` with refreshed
+      credential-free GitHub/Postgres/Slack/filesystem demo evidence,
+      dashboard, store, and notification payload hashes for onboarding review.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest

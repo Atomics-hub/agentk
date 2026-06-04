@@ -578,6 +578,12 @@ packaged service templates and supervisor env examples, then writes
 `sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
 `sidecar/.agentk/deploy-handoff/deploy-handoff.md` with SHA-256 hashes for
 deployment tickets.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-demo-handoff --json` for a
+first-run team demo packet. It refreshes the credential-free
+GitHub/Postgres/Slack/filesystem demo evidence through the operator handoff
+path, then writes `sidecar/.agentk/demo-handoff/demo-handoff.json` and
+`sidecar/.agentk/demo-handoff/demo-handoff.md` with SHA-256 hashes for the
+trace, dashboard, store, and notification payload drafts.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -829,6 +835,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
 AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
   installed/agentk-sidecar/bin/agentk-sidecar-support-bundle --json
 installed/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json
+installed/agentk-sidecar/bin/agentk-sidecar-demo-handoff --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
