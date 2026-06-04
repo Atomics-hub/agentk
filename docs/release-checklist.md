@@ -159,9 +159,10 @@ checks deploy/preflight handoff evidence for templates, placeholders,
 secret-reference manifests, non-local bind defaults, and no live secret
 retrieval. It checks Homebrew handoff evidence for local formula generation,
 source archive SHA verification, tap checkout byte match, dirty-path hygiene,
-and no tap publication. It does not tag, push, upload, or publish. The
-remaining commands keep the individual gates visible for manual review and
-final publication.
+and no tap publication, and records the Homebrew formula/check/tap handoff
+files in the ticket artifact inventory. It does not tag, push, upload, or
+publish. The remaining commands keep the individual gates visible for manual
+review and final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:
