@@ -6755,10 +6755,18 @@ pub struct SidecarPackageSupportBundleReport {
     pub passed: bool,
     pub checks: Vec<ReadinessCheck>,
     pub remediation_steps: Vec<String>,
+    pub ticket_attachments: Vec<SidecarPackageSupportBundleAttachment>,
     pub artifacts: Vec<SidecarPackageSupportBundleArtifact>,
     pub package_check: SidecarPackageCheckReport,
     pub operator_handoff: SidecarPackageOpsHandoffReport,
     pub doctor: SidecarPackageDoctorReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageSupportBundleAttachment {
+    pub name: String,
+    pub path: PathBuf,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8611,6 +8619,12 @@ pub fn write_sidecar_package_support_bundle(
         &operator_handoff,
         &doctor,
     )?;
+    let ticket_attachments = sidecar_package_support_bundle_ticket_attachments(
+        root,
+        release_manifest,
+        &operator_handoff,
+        &doctor,
+    );
     let required_artifacts_present = artifacts
         .iter()
         .filter(|artifact| sidecar_package_support_bundle_artifact_required(&artifact.name))
@@ -8682,6 +8696,7 @@ pub fn write_sidecar_package_support_bundle(
         passed,
         checks,
         remediation_steps,
+        ticket_attachments,
         artifacts,
         package_check,
         operator_handoff,
@@ -10776,6 +10791,88 @@ fn sidecar_package_support_bundle_artifact_required(name: &str) -> bool {
     name != "release manifest"
 }
 
+fn sidecar_package_support_bundle_ticket_attachments(
+    root: &Path,
+    release_manifest: Option<&Path>,
+    operator_handoff: &SidecarPackageOpsHandoffReport,
+    doctor: &SidecarPackageDoctorReport,
+) -> Vec<SidecarPackageSupportBundleAttachment> {
+    let mut attachments = vec![
+        sidecar_package_support_bundle_attachment(
+            "operator handoff",
+            operator_handoff.markdown_path.clone(),
+            "Human-readable summary of package health, demo evidence, dashboard/store state, and notification drafts.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "operator handoff json",
+            operator_handoff.json_path.clone(),
+            "Machine-readable operator handoff with redacted evidence hashes and nested reports.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "sidecar doctor",
+            doctor.markdown_path.clone(),
+            "Human-readable diagnostic and remediation status for install/update support.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "sidecar doctor json",
+            doctor.json_path.clone(),
+            "Machine-readable support diagnostic with package, gateway, dashboard, and release-manifest checks.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "package manifest",
+            root.join("manifest.json"),
+            "Package inventory and launcher contract for support and deployment review.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "package lock",
+            root.join(SIDECAR_PACKAGE_LOCK),
+            "Hash and mode inventory proving packaged files have not drifted.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "safe-agent trace",
+            operator_handoff.trace_path.clone(),
+            "Redacted demo trace showing allowed and blocked GitHub/Postgres/Slack/filesystem-shaped actions.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "store export audit",
+            operator_handoff.store_export_root.join("audit.json"),
+            "Redacted audit summary for reviewers who do not want to parse JSONL traces.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "durable approvals",
+            operator_handoff
+                .team_store_root
+                .join("current/approvals.json"),
+            "Current durable approval state for support and approval-dashboard review.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "notification payload drafts",
+            operator_handoff.slack_payload_root.join("payloads.jsonl"),
+            "Credential-free Slack notification payload drafts proving notification handoff shape.",
+        ),
+    ];
+    if let Some(release_manifest) = release_manifest {
+        attachments.push(sidecar_package_support_bundle_attachment(
+            "release manifest",
+            release_manifest.to_path_buf(),
+            "Release or deployment ticket handoff binding archive, checksum, package lock, and install receipt hashes.",
+        ));
+    }
+    attachments
+}
+
+fn sidecar_package_support_bundle_attachment(
+    name: &str,
+    path: PathBuf,
+    reason: &str,
+) -> SidecarPackageSupportBundleAttachment {
+    SidecarPackageSupportBundleAttachment {
+        name: name.to_string(),
+        path,
+        reason: reason.to_string(),
+    }
+}
+
 fn sidecar_package_support_bundle_markdown(report: &SidecarPackageSupportBundleReport) -> String {
     let verdict = if report.passed { "ready" } else { "blocked" };
     let mut out = String::new();
@@ -10812,6 +10909,17 @@ fn sidecar_package_support_bundle_markdown(report: &SidecarPackageSupportBundleR
             check.status.as_str(),
             markdown_cell(&check.name),
             markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Ticket Attachments\n\n");
+    out.push_str("| Attachment | Path | Reason |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for attachment in &report.ticket_attachments {
+        out.push_str(&format!(
+            "| {} | `{}` | {} |\n",
+            markdown_cell(&attachment.name),
+            attachment.path.display(),
+            markdown_cell(&attachment.reason)
         ));
     }
     out.push_str("\n## Artifacts\n\n");
@@ -30793,6 +30901,28 @@ can_deny = ["*"]
         assert!(support_report.checks.iter().any(|check| {
             check.name == "support artifact inventory" && check.status == ReadinessStatus::Pass
         }));
+        assert!(support_report.ticket_attachments.len() >= 10);
+        for attachment in [
+            "operator handoff",
+            "sidecar doctor",
+            "package manifest",
+            "package lock",
+            "safe-agent trace",
+            "store export audit",
+            "durable approvals",
+            "notification payload drafts",
+            "release manifest",
+        ] {
+            assert!(
+                support_report
+                    .ticket_attachments
+                    .iter()
+                    .any(|item| item.name == attachment
+                        && item.path.is_file()
+                        && !item.reason.trim().is_empty()),
+                "missing support ticket attachment {attachment}"
+            );
+        }
         assert!(support_report.artifacts.iter().any(|artifact| {
             artifact.name == "release manifest" && artifact.present && artifact.sha256.is_some()
         }));
@@ -30809,9 +30939,26 @@ can_deny = ["*"]
             serde_json::json!(true)
         );
         assert_eq!(support_value["hosted_saas"], serde_json::json!(false));
+        assert!(
+            support_value["ticket_attachments"]
+                .as_array()
+                .expect("support ticket attachments should be an array")
+                .iter()
+                .any(
+                    |attachment| attachment["name"] == serde_json::json!("sidecar doctor")
+                        && attachment["reason"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("diagnostic")
+                )
+        );
         let support_markdown = fs::read_to_string(&support_report.markdown_path)
             .expect("support bundle markdown should read");
         assert!(support_markdown.contains("AgentK Support Bundle"));
+        assert!(support_markdown.contains("## Ticket Attachments"));
+        assert!(support_markdown.contains("operator handoff"));
+        assert!(support_markdown.contains("sidecar doctor"));
+        assert!(support_markdown.contains("notification payload drafts"));
         assert!(support_markdown.contains("Hosted SaaS: `false`"));
         assert!(support_markdown.contains("No remediation required"));
 

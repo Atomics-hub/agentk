@@ -12561,7 +12561,7 @@ fn release_ticket_support_doctor_handoff_check(
         Ok(()) => release_ticket_check_item(
             "support/doctor handoff",
             ReadinessStatus::Pass,
-            "support evidence proves operator handoff refresh, sidecar doctor remediation, release-manifest binding, hashed support inventory, and local non-hosted scope",
+            "support evidence proves operator handoff refresh, sidecar doctor remediation, release-manifest binding, hashed support inventory, ticket attachments, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("support/doctor handoff", ReadinessStatus::Fail, detail)
@@ -12636,6 +12636,24 @@ fn release_ticket_support_doctor_handoff_evidence(
     )?;
     release_ticket_require_bool(&support, "hosted_saas", false, "support bundle json")?;
     release_ticket_require_empty_array(&support, "remediation_steps", "support bundle json")?;
+    release_ticket_require_named_records(
+        &support,
+        "ticket_attachments",
+        "support bundle json",
+        &[
+            "operator handoff",
+            "operator handoff json",
+            "sidecar doctor",
+            "sidecar doctor json",
+            "package manifest",
+            "package lock",
+            "safe-agent trace",
+            "store export audit",
+            "durable approvals",
+            "notification payload drafts",
+            "release manifest",
+        ],
+    )?;
     release_ticket_require_checks(
         &support,
         "support bundle json",
@@ -13143,6 +13161,35 @@ fn release_ticket_require_next_actions(
             return Err(format!(
                 "{label} does not prove next action for {owner} using {command_fragment}"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn release_ticket_require_named_records(
+    report: &serde_json::Value,
+    field: &str,
+    label: &str,
+    required_names: &[&str],
+) -> Result<(), String> {
+    let records = report
+        .get(field)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing {field}"))?;
+    for name in required_names {
+        let found = records.iter().any(|record| {
+            record.get("name").and_then(|value| value.as_str()) == Some(*name)
+                && record
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|path| !path.is_empty())
+                && record
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|reason| !reason.is_empty())
+        });
+        if !found {
+            return Err(format!("{label} does not prove {field} entry {name}"));
         }
     }
     Ok(())
