@@ -99,6 +99,12 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/quickstart/quickstart.md` as the first-run operator
       report tying package health, HTTP/team handoff checks, demo handoff,
       deploy handoff, and support bundle evidence together.
+- [ ] `cargo run --locked -- sidecar-package-permissions-handoff --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/permissions-handoff/permissions-handoff.json` and
+      `sidecar/.agentk/permissions-handoff/permissions-handoff.md` with local
+      reviewer-role, reviewer-scoped-read, token coverage, identity mapping,
+      authorized decision, and unknown-reviewer rejection evidence.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest

@@ -53,6 +53,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-deploy-handoff",
     "bin/agentk-sidecar-demo-handoff",
     "bin/agentk-sidecar-quickstart",
+    "bin/agentk-sidecar-permissions-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -81,6 +82,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-deploy-handoff",
     "bin/agentk-sidecar-demo-handoff",
     "bin/agentk-sidecar-quickstart",
+    "bin/agentk-sidecar-permissions-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6847,6 +6849,40 @@ pub struct SidecarPackageQuickstartArtifact {
     pub sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackagePermissionsHandoffReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: PathBuf,
+    pub identity_path: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub artifacts: Vec<SidecarPackagePermissionsHandoffArtifact>,
+    pub package_check: SidecarPackageCheckReport,
+    pub permissions: TeamPermissionsReport,
+    pub identity: TeamIdentityReport,
+    pub open_approvals: usize,
+    pub scoped_open_approvals: usize,
+    pub authorized_reviewer: String,
+    pub authorized_decision_recorded: bool,
+    pub unauthorized_reviewer_rejected: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackagePermissionsHandoffArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub present: bool,
+    pub bytes: Option<u64>,
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -9278,6 +9314,308 @@ fn sidecar_package_quickstart_markdown(report: &SidecarPackageQuickstartReport) 
     out
 }
 
+pub fn write_sidecar_package_permissions_handoff(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<SidecarPackagePermissionsHandoffReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let json_path = output_dir.join("permissions-handoff.json");
+    let markdown_path = output_dir.join("permissions-handoff.md");
+    let trace_path = output_dir.join("permissions-demo.jsonl");
+    let decisions_path = output_dir.join("permissions-decisions.jsonl");
+    let permissions_path = root.join("sidecar/team-permissions.toml");
+    let identity_path = root.join("sidecar/team-identity.toml");
+
+    let package_check = check_sidecar_package(root)?;
+    let permissions = team_permissions_report_from_path(&permissions_path)?;
+    let identity = team_identity_report_from_path(&identity_path, Some(&permissions_path))?;
+    fs::create_dir_all(output_dir)?;
+    let mut kernel = AgentKernel::new("agent://team/permissions-handoff");
+    kernel.syscall(Syscall {
+        kind: SyscallKind::ToolInvoke,
+        target: "slack.send_message".to_string(),
+        intent: "permissions handoff approval probe".to_string(),
+        labels: labels(&[Label::Trusted]),
+        inputs: vec!["input_sha256:permissions-handoff".to_string()],
+    });
+    kernel.write_jsonl(&trace_path)?;
+
+    let review = approval_review_jsonl(&trace_path, &decisions_path)?;
+    let approval_id = review
+        .open_approvals
+        .first()
+        .map(|approval| approval.id.clone())
+        .ok_or_else(|| {
+            AgentKError::InvalidMcpRequest(
+                "permissions handoff did not produce a reviewable approval".to_string(),
+            )
+        })?;
+    let authorized_reviewer = permissions.reviewers.first().cloned().ok_or_else(|| {
+        AgentKError::InvalidMcpRequest(
+            "permissions handoff requires at least one reviewer".to_string(),
+        )
+    })?;
+    let scoped_review = scope_approval_review_for_reviewer(
+        review.clone(),
+        &permissions_path,
+        &authorized_reviewer,
+    )?;
+    let unauthorized_reviewer = "__agentk_unauthorized_reviewer__";
+    let unauthorized_reviewer_rejected = record_approval_decision_jsonl_with_permissions(
+        &trace_path,
+        &decisions_path,
+        &permissions_path,
+        &approval_id,
+        ApprovalDecision::Approve,
+        unauthorized_reviewer,
+        "unauthorized permissions handoff probe",
+    )
+    .is_err();
+    let authorized_decision_recorded = record_approval_decision_jsonl_with_permissions(
+        &trace_path,
+        &decisions_path,
+        &permissions_path,
+        &approval_id,
+        ApprovalDecision::Approve,
+        &authorized_reviewer,
+        "authorized permissions handoff probe",
+    )
+    .is_ok();
+
+    let artifacts = sidecar_package_permissions_handoff_artifacts(
+        &trace_path,
+        &decisions_path,
+        &permissions_path,
+        &identity_path,
+    )?;
+    let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
+    let checks = vec![
+        permissions_handoff_report_check(
+            "package preflight",
+            package_check.passed,
+            format!("{} package readiness checks", package_check.checks.len()),
+        ),
+        permissions_handoff_report_check(
+            "reviewer roles",
+            !permissions.reviewers.is_empty(),
+            format!(
+                "{} users, {} roles, {} reviewers, {} token-protected",
+                permissions.users,
+                permissions.roles,
+                permissions.reviewers.len(),
+                permissions.token_protected_reviewers
+            ),
+        ),
+        permissions_handoff_report_check(
+            "identity mapping coverage",
+            identity.permission_reviewers == identity.covered_permission_reviewers,
+            format!(
+                "{} mapped reviewers cover {:?} permission reviewers",
+                identity.mapped_reviewers, identity.permission_reviewers
+            ),
+        ),
+        permissions_handoff_report_check(
+            "reviewer-scoped read",
+            scoped_review.open_approvals.len() == review.open_approvals.len(),
+            format!(
+                "{} of {} approvals visible to {}",
+                scoped_review.open_approvals.len(),
+                review.open_approvals.len(),
+                authorized_reviewer
+            ),
+        ),
+        permissions_handoff_report_check(
+            "authorized approve path",
+            authorized_decision_recorded,
+            format!("{authorized_reviewer} recorded an approval decision"),
+        ),
+        permissions_handoff_report_check(
+            "unauthorized reviewer rejection",
+            unauthorized_reviewer_rejected,
+            "unknown reviewer was rejected before appending a decision",
+        ),
+        permissions_handoff_report_check(
+            "artifact inventory",
+            required_artifacts_present,
+            format!("{} permissions artifacts inspected", artifacts.len()),
+        ),
+        permissions_handoff_report_check(
+            "alpha scope",
+            true,
+            "local/team sidecar alpha; hosted SaaS and live IdP auth are false",
+        ),
+    ];
+    let passed = required_artifacts_present
+        && checks
+            .iter()
+            .all(|check| check.status != ReadinessStatus::Fail);
+
+    let report = SidecarPackagePermissionsHandoffReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        passed,
+        checks,
+        artifacts,
+        package_check,
+        permissions,
+        identity,
+        open_approvals: review.open_approvals.len(),
+        scoped_open_approvals: scoped_review.open_approvals.len(),
+        authorized_reviewer,
+        authorized_decision_recorded,
+        unauthorized_reviewer_rejected,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(
+        &markdown_path,
+        sidecar_package_permissions_handoff_markdown(&report),
+    )?;
+    Ok(report)
+}
+
+fn permissions_handoff_report_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+fn sidecar_package_permissions_handoff_artifacts(
+    trace_path: &Path,
+    decisions_path: &Path,
+    permissions_path: &Path,
+    identity_path: &Path,
+) -> Result<Vec<SidecarPackagePermissionsHandoffArtifact>, AgentKError> {
+    let mut artifacts = Vec::new();
+    sidecar_package_permissions_handoff_artifact(
+        &mut artifacts,
+        "permissions demo trace",
+        trace_path.to_path_buf(),
+    )?;
+    sidecar_package_permissions_handoff_artifact(
+        &mut artifacts,
+        "permissions demo decisions",
+        decisions_path.to_path_buf(),
+    )?;
+    sidecar_package_permissions_handoff_artifact(
+        &mut artifacts,
+        "team permissions manifest",
+        permissions_path.to_path_buf(),
+    )?;
+    sidecar_package_permissions_handoff_artifact(
+        &mut artifacts,
+        "team identity manifest",
+        identity_path.to_path_buf(),
+    )?;
+    Ok(artifacts)
+}
+
+fn sidecar_package_permissions_handoff_artifact(
+    artifacts: &mut Vec<SidecarPackagePermissionsHandoffArtifact>,
+    name: &str,
+    path: PathBuf,
+) -> Result<(), AgentKError> {
+    let metadata = fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let (present, bytes, sha256) = match metadata {
+        Some(metadata) => (
+            true,
+            Some(metadata.len()),
+            Some(sidecar_package_file_sha256(&path)?),
+        ),
+        None => (false, None, None),
+    };
+    artifacts.push(SidecarPackagePermissionsHandoffArtifact {
+        name: name.to_string(),
+        path,
+        present,
+        bytes,
+        sha256,
+    });
+    Ok(())
+}
+
+fn sidecar_package_permissions_handoff_markdown(
+    report: &SidecarPackagePermissionsHandoffReport,
+) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Permissions Handoff\n\n");
+    out.push_str("This handoff proves the packaged local/team sidecar permissions contract. It validates reviewer roles, token coverage counts, external identity mapping coverage, reviewer-scoped reads, authorized approval decisions, and fail-closed unauthorized reviewer behavior. It does not verify live OIDC/JWT tokens or contact an IdP.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!(
+        "- Permissions: `{}`\n",
+        report.permissions_path.display()
+    ));
+    out.push_str(&format!(
+        "- Identity: `{}`\n",
+        report.identity_path.display()
+    ));
+    out.push_str(&format!(
+        "- Authorized reviewer probe: `{}`\n",
+        report.authorized_reviewer
+    ));
+    out.push_str("- Local/team sidecar alpha: `true`\n");
+    out.push_str("- Hosted SaaS: `false`\n\n");
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Team Summary\n\n");
+    out.push_str(&format!(
+        "- Reviewers: {} ({} token-protected)\n",
+        report.permissions.reviewers.len(),
+        report.permissions.token_protected_reviewers
+    ));
+    out.push_str(&format!(
+        "- Identity mappings: {} mapped reviewers across {} providers\n",
+        report.identity.mapped_reviewers, report.identity.providers
+    ));
+    out.push_str(&format!(
+        "- Scoped approvals visible: {}/{}\n",
+        report.scoped_open_approvals, report.open_approvals
+    ));
+    out.push_str("\n## Artifacts\n\n");
+    for artifact in &report.artifacts {
+        match (artifact.bytes, artifact.sha256.as_deref()) {
+            (Some(bytes), Some(sha256)) => out.push_str(&format!(
+                "- `{}`: {} bytes, sha256 `{}`\n",
+                artifact.name, bytes, sha256
+            )),
+            _ => out.push_str(&format!("- `{}`: missing\n", artifact.name)),
+        }
+    }
+    out.push_str("\nArchive this directory when handing the local permissions model to a team reviewer. Live identity verification remains outside this local alpha handoff.\n");
+    out
+}
+
 fn sidecar_package_support_bundle_artifacts(
     root: &Path,
     release_manifest: Option<&Path>,
@@ -11613,9 +11951,11 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             &[
                 ("src/main.rs", "ReleaseCandidateSmoke"),
                 ("src/main.rs", "SidecarPackageQuickstart"),
+                ("src/main.rs", "SidecarPackagePermissionsHandoff"),
                 ("src/lib.rs", "sidecar-package-release-manifest"),
                 ("src/lib.rs", "clients/onboarding.md"),
                 ("src/lib.rs", "bin/agentk-sidecar-quickstart"),
+                ("src/lib.rs", "bin/agentk-sidecar-permissions-handoff"),
                 ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
@@ -11625,6 +11965,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 "agentk sidecar-package-release-manifest --package installed/agentk-sidecar",
                 "agentk sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json",
                 "bin/agentk-sidecar-quickstart --json",
+                "bin/agentk-sidecar-permissions-handoff --json",
             ],
         ),
         alpha_release_source_surface(
@@ -11665,12 +12006,17 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             "local roles, reviewer scopes, reviewer tokens, and IdP mapping checks are present",
             &[
                 ("src/main.rs", "IdentityCheck"),
+                ("src/main.rs", "SidecarPackagePermissionsHandoff"),
                 ("src/lib.rs", "team_identity_report_from_path"),
                 ("src/lib.rs", "token_env"),
+                ("src/lib.rs", "write_sidecar_package_permissions_handoff"),
+                ("src/lib.rs", "bin/agentk-sidecar-permissions-handoff"),
             ],
             &[
                 "agentk permissions --path agentk-sidecar/team-permissions.toml",
                 "agentk identity-check --identity agentk-sidecar/team-identity.toml",
+                "agentk sidecar-package-permissions-handoff --json",
+                "bin/agentk-sidecar-permissions-handoff --json",
             ],
         ),
         alpha_release_source_surface(
@@ -17877,6 +18223,11 @@ pub fn package_sidecar_bundle(
             out,
             "bin/agentk-sidecar-quickstart",
             &sidecar_quickstart_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-permissions-handoff",
+            &sidecar_permissions_handoff_script(),
         )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
@@ -24421,6 +24772,9 @@ install receipt still match the handoff.
 - `bin/agentk-sidecar-quickstart`: runs the package, HTTP/team handoff, demo,
   deploy, and support checks, then writes one first-run quickstart
   JSON/Markdown report for operator onboarding.
+- `bin/agentk-sidecar-permissions-handoff`: validates the packaged team
+  permissions and identity mapping handoff, including reviewer-scoped reads,
+  authorized decisions, and fail-closed unknown reviewer rejection.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -24477,6 +24831,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/ag
 ./bin/agentk-sidecar-deploy-handoff --json
 ./bin/agentk-sidecar-demo-handoff --json
 ./bin/agentk-sidecar-quickstart --json
+./bin/agentk-sidecar-permissions-handoff --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -24557,6 +24912,14 @@ demo handoff, validates deployment templates, runs the support bundle, and
 records hashes for the generated demo/deploy/support evidence. Set
 `AGENTK_QUICKSTART_OUT` to choose another output directory and set
 `AGENTK_PACKAGE_RELEASE_MANIFEST` when release-manifest evidence is available.
+
+`bin/agentk-sidecar-permissions-handoff` writes
+`sidecar/.agentk/permissions-handoff/permissions-handoff.json` and
+`sidecar/.agentk/permissions-handoff/permissions-handoff.md` by default. It
+validates the package, team permissions, identity mapping coverage,
+reviewer-scoped reads, authorized approval recording, and unknown reviewer
+rejection without contacting an IdP or claiming hosted SaaS. Set
+`AGENTK_PERMISSIONS_HANDOFF_OUT` to choose another output directory.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -24815,6 +25178,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             "deploy_handoff": "bin/agentk-sidecar-deploy-handoff",
             "demo_handoff": "bin/agentk-sidecar-demo-handoff",
             "quickstart": "bin/agentk-sidecar-quickstart",
+            "permissions_handoff": "bin/agentk-sidecar-permissions-handoff",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -24921,6 +25285,7 @@ local relay configuration and keep payload exports package-local.
 ```sh
 {package}/bin/agentk-sidecar-demo-handoff --json
 {package}/bin/agentk-sidecar-quickstart --json
+{package}/bin/agentk-sidecar-permissions-handoff --json
 {package}/bin/agentk-sidecar-deploy-handoff --json
 {package}/bin/agentk-sidecar-ops-handoff --json
 {package}/bin/agentk-sidecar-doctor --json
@@ -25380,6 +25745,19 @@ if [ -n "$RELEASE_MANIFEST" ]; then
   exec "$AGENTK_BIN" sidecar-package-quickstart --root "$ROOT" --out "$QUICKSTART_OUT" --release-manifest "$RELEASE_MANIFEST" "$@"
 fi
 exec "$AGENTK_BIN" sidecar-package-quickstart --root "$ROOT" --out "$QUICKSTART_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_permissions_handoff_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+PERMISSIONS_OUT="${AGENTK_PERMISSIONS_HANDOFF_OUT:-$ROOT/sidecar/.agentk/permissions-handoff}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-permissions-handoff --root "$ROOT" --out "$PERMISSIONS_OUT" "$@"
 "#
     .to_string()
 }
@@ -27180,7 +27558,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 48);
+        assert_eq!(report.files.len(), 49);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -27200,6 +27578,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-deploy-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-demo-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-quickstart").exists());
+        assert!(out.join("bin/agentk-sidecar-permissions-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -27327,6 +27706,14 @@ can_deny = ["*"]
         assert!(quickstart.contains("quickstart"));
         assert!(quickstart.contains("agentk-package-check"));
         assert!(quickstart.contains("\"$@\""));
+        let permissions_handoff =
+            fs::read_to_string(out.join("bin/agentk-sidecar-permissions-handoff"))
+                .expect("permissions handoff launcher should read");
+        assert!(permissions_handoff.contains("sidecar-package-permissions-handoff"));
+        assert!(permissions_handoff.contains("AGENTK_PERMISSIONS_HANDOFF_OUT"));
+        assert!(permissions_handoff.contains("permissions-handoff"));
+        assert!(permissions_handoff.contains("agentk-package-check"));
+        assert!(permissions_handoff.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -27495,6 +27882,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-deploy-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-demo-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-quickstart"));
+        assert!(package_readme.contains("bin/agentk-sidecar-permissions-handoff"));
         assert!(package_readme.contains("operator-handoff.json"));
         assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("sidecar-doctor.json"));
@@ -27505,9 +27893,12 @@ can_deny = ["*"]
         assert!(package_readme.contains("demo-handoff.md"));
         assert!(package_readme.contains("quickstart.json"));
         assert!(package_readme.contains("quickstart.md"));
+        assert!(package_readme.contains("permissions-handoff.json"));
+        assert!(package_readme.contains("permissions-handoff.md"));
         assert!(package_readme.contains("AGENTK_SUPPORT_BUNDLE_OUT"));
         assert!(package_readme.contains("AGENTK_DEMO_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_QUICKSTART_OUT"));
+        assert!(package_readme.contains("AGENTK_PERMISSIONS_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
         assert!(package_readme.contains("release-manifest binding"));
         assert!(package_readme.contains("local/team sidecar alpha"));
@@ -27579,6 +27970,10 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["team_handoff"]["quickstart"],
             serde_json::json!("bin/agentk-sidecar-quickstart")
+        );
+        assert_eq!(
+            package_manifest_json["team_handoff"]["permissions_handoff"],
+            serde_json::json!("bin/agentk-sidecar-permissions-handoff")
         );
         assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
@@ -27663,6 +28058,13 @@ can_deny = ["*"]
                 .any(|launcher| launcher == "bin/agentk-sidecar-quickstart")
         );
         assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-sidecar-permissions-handoff")
+        );
+        assert!(
             package_manifest_json["client_snippets"]
                 .as_array()
                 .expect("client snippets should be an array")
@@ -27679,6 +28081,7 @@ can_deny = ["*"]
         assert!(onboarding.contains("agentk-sidecar-deploy-handoff"));
         assert!(onboarding.contains("agentk-sidecar-demo-handoff"));
         assert!(onboarding.contains("agentk-sidecar-quickstart"));
+        assert!(onboarding.contains("agentk-sidecar-permissions-handoff"));
         assert!(onboarding.contains("not hosted SaaS"));
         assert_eq!(
             package_manifest_json["identity"]["manifest"],
@@ -28350,6 +28753,64 @@ can_deny = ["*"]
         fs::remove_file(archive_report.checksum).ok();
         fs::remove_file(release_manifest).ok();
         fs::remove_dir_all(install).ok();
+    }
+
+    #[test]
+    fn sidecar_package_permissions_handoff_writes_authorization_report() {
+        let root = temp_path("agentk-sidecar-permissions-handoff-root", "dir");
+        let out = temp_path("agentk-sidecar-permissions-handoff-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        let output_dir = out.join("sidecar/.agentk/permissions-handoff");
+        let report = write_sidecar_package_permissions_handoff(&out, &output_dir)
+            .expect("permissions handoff should write");
+
+        assert!(report.passed);
+        assert!(report.local_team_sidecar_alpha);
+        assert!(!report.hosted_saas);
+        assert_eq!(report.output_dir, output_dir);
+        assert!(report.json_path.is_file());
+        assert!(report.markdown_path.is_file());
+        assert!(report.trace_path.is_file());
+        assert!(report.decisions_path.is_file());
+        assert!(report.authorized_decision_recorded);
+        assert!(report.unauthorized_reviewer_rejected);
+        assert!(!report.permissions.reviewers.is_empty());
+        assert_eq!(
+            report.identity.permission_reviewers,
+            report.identity.covered_permission_reviewers
+        );
+        assert!(report.artifacts.iter().all(|artifact| {
+            artifact.present && artifact.bytes.unwrap_or_default() > 0 && artifact.sha256.is_some()
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "authorized approve path" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "unauthorized reviewer rejection" && check.status == ReadinessStatus::Pass
+        }));
+
+        let json =
+            fs::read_to_string(&report.json_path).expect("permissions handoff JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("permissions handoff JSON should parse");
+        assert_eq!(value["passed"], serde_json::json!(true));
+        assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
+        assert_eq!(value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(
+            value["unauthorized_reviewer_rejected"],
+            serde_json::json!(true)
+        );
+
+        let markdown = fs::read_to_string(&report.markdown_path)
+            .expect("permissions handoff markdown should read");
+        assert!(markdown.contains("AgentK Permissions Handoff"));
+        assert!(markdown.contains("Hosted SaaS: `false`"));
+        assert!(markdown.contains("unauthorized reviewer"));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
     }
 
     #[test]
@@ -35341,7 +35802,8 @@ reviewer = "tom"
              /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo \
              SidecarPackageSupportBundle ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck \
              ReleaseHomebrewTapHandoffCheck ReleaseTicket SidecarPackageDeployHandoff \
-             SidecarPackageDemoHandoff SidecarPackageQuickstart",
+             SidecarPackageDemoHandoff SidecarPackageQuickstart \
+             SidecarPackagePermissionsHandoff",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -35353,6 +35815,7 @@ reviewer = "tom"
              write_sidecar_package_deploy_handoff bin/agentk-sidecar-deploy-handoff \
              write_sidecar_package_demo_handoff bin/agentk-sidecar-demo-handoff \
              write_sidecar_package_quickstart bin/agentk-sidecar-quickstart \
+             write_sidecar_package_permissions_handoff bin/agentk-sidecar-permissions-handoff \
              release-candidate-smoke write_homebrew_formula check_homebrew_formula \
              check_homebrew_tap_handoff",
         )

@@ -83,7 +83,7 @@ packaged safe-agent demo, dashboard, sidecar checks, durable store
 sync/export/check, package-check JSON artifact, HTTP/team handoff check JSON
 artifacts, onboarding guide artifact, operator handoff artifact, sidecar doctor
 support report, support bundle artifact, deploy handoff artifact, demo handoff
-artifact, quickstart artifact,
+artifact, quickstart artifact, permissions handoff artifact,
 Slack/GitHub/email notification payload exporters, systemd/launchd service
 templates, Dockerfile/Compose templates, deploy README, dummy env examples,
 dry-run delivery launchers, and Postgres dry-run push:
@@ -124,6 +124,7 @@ cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sid
 cargo run --locked -- sidecar-package-deploy-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-demo-handoff --root installed/agentk-sidecar --json
 cargo run --locked -- sidecar-package-quickstart --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
+cargo run --locked -- sidecar-package-permissions-handoff --root installed/agentk-sidecar --json
 ```
 
 `release-ticket` is the maintainer fast path for a local reviewer bundle. It
