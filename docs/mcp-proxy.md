@@ -336,7 +336,9 @@ Run `<package>/bin/agentk-sidecar-quickstart --json` as the first command after
 install or copy. It validates package health, HTTP/team handoff checks, demo
 handoff, deploy handoff, support bundle, permissions handoff, production
 preflight, client handoff, and dashboard handoff evidence, then writes one
-quickstart JSON/Markdown report for the team operator.
+quickstart JSON/Markdown report for the team operator with owner-specific next
+actions for client, dashboard, permissions, deployment, security, support, and
+demo reviewers.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

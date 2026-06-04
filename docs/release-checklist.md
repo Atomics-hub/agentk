@@ -150,7 +150,7 @@ preflight, loopback/admin-token defaults, bounded request caps, supervisor
 hardening, redacted probes, and permission-checked review APIs. It also checks
 quickstart handoff evidence for first-run package health,
 HTTP/team handoff, demo, deploy, support, permissions, preflight, client,
-dashboard, and artifact inventory coverage. It checks support/doctor handoff
+dashboard, owner-specific next actions, and artifact inventory coverage. It checks support/doctor handoff
 evidence for operator refresh, no-remediation doctor output, release-manifest
 binding, and hashed support inventory, plus accepted-limit checks that keep
 hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
