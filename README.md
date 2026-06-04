@@ -237,14 +237,15 @@ This creates `release-status.json`, `release-candidate-smoke.json`,
 `release-finalization.json`, and `release-ticket.json` under
 `dist/release-ticket/` without tagging, pushing, uploading, or publishing. The
 ticket summary includes explicit objective checks for the MCP gateway, including
-loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard, multi-user
-permissions, Claude/Codex/Cursor sidecar onboarding, and
-GitHub/Postgres/Slack/filesystem safe-agent demo evidence including blocked
-filesystem patch proof, so reviewers can see product coverage without opening
-the full smoke report. It also includes accepted alpha limits as explicit
-deferred-scope checks, so the same handoff distinguishes local/team sidecar
-readiness from hosted SaaS, live IdP, production secret retrieval, and public
-internet gateway claims.
+loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
+reviewer-scoped team-store evidence, multi-user permissions, Claude/Codex/Cursor
+sidecar onboarding, and GitHub/Postgres/Slack/filesystem safe-agent demo
+evidence including blocked filesystem patch proof, so reviewers can see product
+coverage without opening the full smoke report. The product coverage summary
+also includes accepted alpha
+limits as explicit deferred-scope checks, so the same handoff distinguishes
+local/team sidecar readiness from hosted SaaS, live IdP, production secret
+retrieval, and public internet gateway claims.
 
 Or run the packaged sidecar release-candidate gates individually:
 
