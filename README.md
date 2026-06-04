@@ -491,7 +491,9 @@ dist/agentk-sidecar/bin/agentk-sidecar
 ```
 
 Packaged Claude Desktop and generic Codex/Cursor command snippets are written
-under `dist/agentk-sidecar/clients/`, alongside
+under `dist/agentk-sidecar/clients/`, alongside `clients/onboarding.md` as the
+operator checklist for first-run package verification, client setup, demo,
+dashboard/store, notification, and support-bundle steps,
 `clients/http-sse-handoff.md` for teams whose MCP client explicitly supports
 Streamable HTTP plus bearer-token headers and
 `clients/team-audit-dashboard-handoff.md` for the installable local/team
@@ -796,6 +798,7 @@ Packaged installs include the same workflow as stable launchers:
 ```sh
 dist/agentk-sidecar/bin/agentk-package-info
 AGENTK_BIN="$(command -v agentk)" dist/agentk-sidecar/bin/agentk-package-check
+sed -n '1,220p' dist/agentk-sidecar/clients/onboarding.md
 agentk sidecar-package-archive-check --archive dist/agentk-sidecar.tar
 agentk sidecar-package-install --archive dist/agentk-sidecar.tar --out installed/agentk-sidecar
 agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json

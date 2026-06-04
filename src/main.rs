@@ -10179,6 +10179,11 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
+        "onboarding guide",
+        installed_package.join("clients/onboarding.md"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
         "claude client",
         installed_package.join("clients/claude-desktop.mcp.json"),
     )?;

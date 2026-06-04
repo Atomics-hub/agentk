@@ -54,8 +54,9 @@ Implemented today:
   safe reads and drafts still work;
 - `sidecar-package`, which writes a deployable sidecar folder plus optional
   single-file tar handoff and checksum with stable launchers,
-  Claude/Codex/Cursor snippets, service/container templates, dummy deploy env
-  examples, `manifest.json`, and a hash/mode `package.lock.json`;
+  Claude/Codex/Cursor snippets, an operator onboarding checklist,
+  service/container templates, dummy deploy env examples, `manifest.json`, and
+  a hash/mode `package.lock.json`;
 - `sidecar-package-archive-check`, which verifies the tar handoff against the
   generated checksum before a team unpacks or deploys it;
 - `sidecar-package-install`, which verifies the tar handoff, safely unpacks it,
