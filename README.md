@@ -225,7 +225,19 @@ cargo run --locked -- release-status
 This prints the shipped team sidecar surfaces, accepted alpha limits, final
 release blockers, and verification gates.
 
-Run the packaged sidecar release-candidate smoke:
+Write one offline release-candidate ticket bundle for reviewer handoff:
+
+```sh
+cargo run --locked -- release-ticket \
+  --out dist/release-ticket \
+  --force
+```
+
+This creates `release-status.json`, `release-candidate-smoke.json`,
+`release-finalization.json`, and `release-ticket.json` under
+`dist/release-ticket/` without tagging, pushing, uploading, or publishing.
+
+Or run the packaged sidecar release-candidate gates individually:
 
 ```sh
 cargo run --locked -- release-candidate-smoke \
@@ -828,7 +840,11 @@ dist/agentk-sidecar/bin/agentk-store-email-send --dry-run
 
 Maintainers can run `cargo run --locked -- release-status` to summarize the
 v0.2 alpha shipped surfaces, accepted limits, final blockers, and verification
-gates. Run
+gates. Run `cargo run --locked -- release-ticket --out dist/release-ticket --force`
+to create one offline reviewer handoff directory containing release status,
+release-candidate smoke evidence, evidence-check results, finalization evidence,
+and a summary ticket JSON without tagging, pushing, uploading, or publishing.
+The individual steps remain available: run
 `cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json`
 to recreate the package, archive, checksum, and release manifest in a
 repo-local smoke root, execute the packaged HTTP and team handoff checks,

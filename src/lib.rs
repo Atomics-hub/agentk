@@ -11080,6 +11080,18 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         ),
         alpha_release_source_surface(
             root,
+            "offline release ticket bundle",
+            "release-ticket writes status, smoke evidence, evidence check, and finalization reports into one reviewer handoff directory without publishing",
+            &[
+                ("src/main.rs", "ReleaseTicket"),
+                ("README.md", "release-ticket"),
+                ("docs/release-checklist.md", "release-ticket"),
+                ("docs/v0.2-alpha-release-notes.md", "release-ticket"),
+            ],
+            &["cargo run --locked -- release-ticket --out dist/release-ticket"],
+        ),
+        alpha_release_source_surface(
+            root,
             "release publication preflight",
             "release-publication-check validates strict finalization, signed tag evidence, package archive hash, and final release notes before GitHub publication",
             &[
@@ -34113,7 +34125,7 @@ reviewer = "tom"
             "ReleaseCandidateSmoke sidecar-serve-tcp sidecar-serve-http DashboardServe \
              /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo \
              SidecarPackageSupportBundle ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck \
-             ReleaseHomebrewTapHandoffCheck",
+             ReleaseHomebrewTapHandoffCheck ReleaseTicket",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -34128,7 +34140,7 @@ reviewer = "tom"
         .expect("lib fixture should be writable");
         fs::write(
             root.join("docs/release-checklist.md"),
-            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check release-homebrew-formula-check release-homebrew-tap-handoff-check",
+            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check release-ticket release-homebrew-formula-check release-homebrew-tap-handoff-check",
         )
         .expect("release checklist fixture should be writable");
         fs::write(

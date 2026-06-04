@@ -89,6 +89,10 @@ Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json
+cargo run --locked -- release-ticket \
+  --out dist/release-ticket \
+  --force \
+  --json
 cargo run --locked -- release-candidate-smoke \
   --root dist/release-candidate-smoke \
   --force \
@@ -117,6 +121,12 @@ cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/age
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 ```
+
+`release-ticket` is the maintainer fast path for a local reviewer bundle. It
+writes release status, smoke evidence, evidence-check results, finalization
+evidence, and a summary ticket JSON under `dist/release-ticket/`; it does not
+tag, push, upload, or publish. The remaining commands keep the individual gates
+visible for manual review and final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:
