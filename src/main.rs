@@ -12728,7 +12728,7 @@ fn release_ticket_deploy_preflight_check(
         Ok(()) => release_ticket_check_item(
             "deploy/preflight handoff",
             ReadinessStatus::Pass,
-            "deploy/preflight evidence proves deploy templates, supervisor env examples, secret-reference placeholders, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
+            "deploy/preflight evidence proves deploy templates, owner deployment steps, supervisor env examples, secret-reference placeholders, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("deploy/preflight handoff", ReadinessStatus::Fail, detail)
@@ -12750,6 +12750,17 @@ fn release_ticket_deploy_preflight_evidence(
         "deploy handoff json",
     )?;
     release_ticket_require_bool(&deploy, "hosted_saas", false, "deploy handoff json")?;
+    release_ticket_require_deployment_steps(
+        &deploy,
+        "deploy handoff json",
+        &[
+            "service manager owner",
+            "container owner",
+            "proxy and TLS owner",
+            "secrets owner",
+            "rollback owner",
+        ],
+    )?;
     release_ticket_require_checks(
         &deploy,
         "deploy handoff json",
@@ -13190,6 +13201,40 @@ fn release_ticket_require_named_records(
         });
         if !found {
             return Err(format!("{label} does not prove {field} entry {name}"));
+        }
+    }
+    Ok(())
+}
+
+fn release_ticket_require_deployment_steps(
+    report: &serde_json::Value,
+    label: &str,
+    required_owners: &[&str],
+) -> Result<(), String> {
+    let steps = report
+        .get("deployment_steps")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing deployment_steps"))?;
+    for owner in required_owners {
+        let found = steps.iter().any(|step| {
+            step.get("owner").and_then(|value| value.as_str()) == Some(*owner)
+                && step
+                    .get("artifact")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|path| !path.is_empty())
+                && step
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|action| !action.is_empty())
+                && step
+                    .get("risk")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|risk| !risk.is_empty())
+        });
+        if !found {
+            return Err(format!(
+                "{label} does not prove deployment step for {owner}"
+            ));
         }
     }
     Ok(())

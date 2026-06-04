@@ -156,7 +156,7 @@ binding, hashed support inventory, and ticket-attachment guidance, plus accepted
 hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
 similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,
-secret-reference manifests, non-local bind defaults, and no live secret
+owner deployment steps, secret-reference manifests, non-local bind defaults, and no live secret
 retrieval. It checks Homebrew handoff evidence for local formula generation,
 source archive SHA verification, tap checkout byte match, dirty-path hygiene,
 and no tap publication, and records the release status, smoke evidence,

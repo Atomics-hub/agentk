@@ -363,6 +363,9 @@ add one-off flags such as `--allow-origin` or `--auth-token-env` without editing
 the package script.
 The package also includes systemd, launchd, Docker Compose, Caddy, and nginx
 templates for the MCP HTTP gateway itself, not only the review dashboard.
+`<package>/bin/agentk-sidecar-deploy-handoff --json` turns those templates into
+a deployment-step checklist for service-manager, container, proxy/TLS, secrets,
+and rollback owners.
 Package checks verify baseline deploy-template hardening markers, including
 no-new-privileges systemd services, a non-root package Dockerfile,
 loopback-published, capability-dropped, read-only Compose services, reviewed
