@@ -9336,6 +9336,7 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "package archive checksum",
     "release manifest",
     "install receipt",
+    "package check json",
     "onboarding guide",
     "claude client",
     "codex cursor client",
@@ -9837,6 +9838,8 @@ fn run_release_candidate_smoke(
     let support_bundle_root = installed_package.join("sidecar/.agentk/support-bundle");
     let support_bundle_json = support_bundle_root.join("support-bundle.json");
     let support_bundle_markdown = support_bundle_root.join("support-bundle.md");
+    let release_evidence_root = installed_package.join("sidecar/.agentk/release");
+    let package_check_json = release_evidence_root.join("package-check.json");
 
     init_sidecar_bundle(&bundle, false)?;
     package_sidecar_bundle(&bundle, &package, false)?;
@@ -9953,6 +9956,17 @@ fn run_release_candidate_smoke(
         &["--json"],
         &common_env,
     )?;
+    fs::create_dir_all(&release_evidence_root)?;
+    let package_check_report = check_sidecar_package(&installed_package)?;
+    fs::write(
+        &package_check_json,
+        format!("{}\n", serde_json::to_string_pretty(&package_check_report)?),
+    )?;
+    if !package_check_report.passed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "release candidate smoke package check report was blocked".to_string(),
+        ));
+    }
     release_candidate_smoke_step(
         &mut steps,
         "HTTP handoff check",
@@ -10188,6 +10202,7 @@ fn run_release_candidate_smoke(
         "install receipt",
         install_receipt_path.clone(),
     )?;
+    release_candidate_smoke_artifact(&mut artifacts, "package check json", package_check_json)?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "onboarding guide",
