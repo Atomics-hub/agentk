@@ -91,6 +91,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-store-email-send",
 ];
 const SIDECAR_PACKAGE_CLIENT_SNIPPETS: &[&str] = &[
+    "clients/onboarding.md",
     "clients/claude-desktop.mcp.json",
     "clients/codex-cursor-command.txt",
     "clients/http-sse-handoff.md",
@@ -10797,10 +10798,11 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         alpha_release_source_surface(
             root,
             "installable team sidecar package",
-            "package/archive/install/release-manifest workflow is present",
+            "package/archive/install/release-manifest workflow and onboarding checklist are present",
             &[
                 ("src/main.rs", "ReleaseCandidateSmoke"),
                 ("src/lib.rs", "sidecar-package-release-manifest"),
+                ("src/lib.rs", "clients/onboarding.md"),
                 ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
@@ -17058,6 +17060,11 @@ pub fn package_sidecar_bundle(
             out,
             "bin/agentk-store-email-send",
             &sidecar_store_email_send_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "clients/onboarding.md",
+            &sidecar_packaged_onboarding(out),
         )?,
         write_packaged_sidecar_file(
             out,
@@ -23537,6 +23544,9 @@ install receipt still match the handoff.
 - `bin/agentk-store-email-send`: delivers exported email payloads through a
   local `sendmail`-compatible command.
 - `clients/`: ready-to-copy client snippets.
+- `clients/onboarding.md`: operator checklist for verifying the package,
+  connecting Claude/Codex/Cursor, running the safe-agent demo, reviewing the
+  dashboard/store, preparing notifications, and archiving support evidence.
 - `clients/team-audit-dashboard-handoff.md`: reviewer-facing local/team
   sidecar alpha handoff for the safe-agent demo, dashboard server, durable team
   store, and notification outbox. This is not hosted SaaS.
@@ -23900,6 +23910,102 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
         },
         "evidence_contract": "redacted hash/evidence-first audit data; no raw tool payloads or secret values"
     }))?)
+}
+
+fn sidecar_packaged_onboarding(package_root: &Path) -> String {
+    let package = package_root.display();
+    format!(
+        r#"# AgentK Team Sidecar Onboarding
+
+This package is a local/team sidecar alpha for putting AgentK in front of
+Claude, Codex, Cursor, and compatible MCP clients. It is not hosted SaaS, does
+not upload support evidence, and does not store delivery credentials.
+
+## 1. Verify The Install
+
+```sh
+{package}/bin/agentk-package-info
+AGENTK_BIN="$(command -v agentk)" {package}/bin/agentk-package-check --json
+{package}/bin/agentk-sidecar-http-handoff-check --json
+{package}/bin/agentk-sidecar-team-handoff-check --json
+{package}/bin/agentk-identity-check --json
+```
+
+## 2. Connect MCP Clients
+
+- Claude Desktop: copy `clients/claude-desktop.mcp.json` into the reviewed
+  Claude MCP config location.
+- Codex/Cursor: copy the command from `clients/codex-cursor-command.txt`.
+- Streamable HTTP clients: run `bin/agentk-sidecar-http` and use
+  `clients/http-sse-handoff.md` for the local HTTP/SSE contract.
+
+The stdio, TCP, and HTTP launchers all run the package self-check before
+serving. Set `AGENTK_BIN` when `agentk` is not on the service account `PATH`.
+
+## 3. Run The Safe-Agent Demo
+
+```sh
+{package}/bin/agentk-safe-agent-demo --json
+AGENTK_TRACE={package}/sidecar/.agentk/runs/safe-agent-demo.jsonl \
+  {package}/bin/agentk-dashboard
+AGENTK_TRACE={package}/sidecar/.agentk/runs/safe-agent-demo.jsonl \
+  {package}/bin/agentk-store-sync
+```
+
+The demo exercises credential-free GitHub/Postgres/Slack/filesystem policy
+evidence, blocked writes, reviewer-scoped approvals, dashboard output, and
+durable store summaries.
+
+## 4. Review Approvals And Audit
+
+```sh
+AGENTK_TRACE={package}/sidecar/.agentk/runs/safe-agent-demo.jsonl \
+  {package}/bin/agentk-dashboard-server
+{package}/bin/agentk-store-export
+{package}/bin/agentk-store-check
+{package}/bin/agentk-store-push --dry-run
+```
+
+Use `sidecar/team-permissions.toml` for reviewer scopes and
+`sidecar/team-identity.toml` for external group-to-reviewer mappings. Dashboard
+review endpoints require scoped reviewer/admin tokens when enabled.
+
+## 5. Prepare Team Notifications
+
+```sh
+{package}/bin/agentk-store-slack --channel '#agentk-approvals'
+{package}/bin/agentk-store-slack-send --dry-run
+{package}/bin/agentk-store-github --repository owner/repo --label agentk --label approvals
+{package}/bin/agentk-store-github-send --dry-run
+{package}/bin/agentk-store-email --to agentk-alerts@example.com
+{package}/bin/agentk-store-email-send --dry-run
+```
+
+Delivery commands read Slack/GitHub/email credentials only from environment or
+local relay configuration and keep payload exports package-local.
+
+## 6. Archive Support Evidence
+
+```sh
+{package}/bin/agentk-sidecar-ops-handoff --json
+{package}/bin/agentk-sidecar-doctor --json
+{package}/bin/agentk-sidecar-support-bundle --json
+```
+
+When a release manifest is available, set
+`AGENTK_PACKAGE_RELEASE_MANIFEST=/path/to/agentk-sidecar-release-manifest.json`
+before running doctor or support-bundle so support can bind package, archive,
+lock, and install receipt hashes.
+
+## 7. Deploy Locally
+
+Start from `deploy/README.md`, `deploy/systemd/`, `deploy/launchd/`, or
+`deploy/docker/`. Replace `CHANGE_ME` values in service-manager or CI secret
+storage, not in the packaged examples. Keep MCP HTTP and dashboard binds
+loopback-only unless a reviewed reverse proxy and explicit non-local bind
+settings are in place.
+"#
+    )
 }
 
 fn audit_store_readme() -> String {
@@ -26095,7 +26201,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 44);
+        assert_eq!(report.files.len(), 45);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -26126,6 +26232,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-store-github-send").exists());
         assert!(out.join("bin/agentk-store-email").exists());
         assert!(out.join("bin/agentk-store-email-send").exists());
+        assert!(out.join("clients/onboarding.md").exists());
         assert!(out.join("clients/claude-desktop.mcp.json").exists());
         assert!(out.join("clients/http-sse-handoff.md").exists());
         assert!(out.join("clients/team-audit-dashboard-handoff.md").exists());
@@ -26371,6 +26478,8 @@ can_deny = ["*"]
         assert!(package_readme.contains("with `/`, without query strings"));
         assert!(package_readme.contains("fixed-length"));
         assert!(package_readme.contains("clients/http-sse-handoff.md"));
+        assert!(package_readme.contains("clients/onboarding.md"));
+        assert!(package_readme.contains("operator checklist"));
         assert!(package_readme.contains("bounded local adapter"));
         assert!(package_readme.contains("not a hosted production"));
         assert!(package_readme.contains("clients/team-audit-dashboard-handoff.md"));
@@ -26506,6 +26615,21 @@ can_deny = ["*"]
                 .iter()
                 .any(|launcher| launcher == "bin/agentk-sidecar-support-bundle")
         );
+        assert!(
+            package_manifest_json["client_snippets"]
+                .as_array()
+                .expect("client snippets should be an array")
+                .iter()
+                .any(|snippet| snippet == "clients/onboarding.md")
+        );
+        let onboarding =
+            fs::read_to_string(out.join("clients/onboarding.md")).expect("onboarding should read");
+        assert!(onboarding.contains("AgentK Team Sidecar Onboarding"));
+        assert!(onboarding.contains("Claude"));
+        assert!(onboarding.contains("Codex"));
+        assert!(onboarding.contains("Cursor"));
+        assert!(onboarding.contains("agentk-sidecar-support-bundle"));
+        assert!(onboarding.contains("not hosted SaaS"));
         assert_eq!(
             package_manifest_json["identity"]["manifest"],
             serde_json::json!("sidecar/team-identity.toml")

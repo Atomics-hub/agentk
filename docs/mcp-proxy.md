@@ -253,7 +253,10 @@ credentials.
 For a more stable local deployment folder, run `agentk sidecar-package --root
 <bundle> --out <package> --archive-out <package>.tar` and point clients at
 `<package>/bin/agentk-sidecar` or the generated snippets under
-`<package>/clients/`. The optional uncompressed tar is written only after the
+`<package>/clients/`. Start with `<package>/clients/onboarding.md` for the
+operator checklist that ties package verification, Claude/Codex/Cursor setup,
+the safe-agent demo, dashboard/store review, notifications, and support bundle
+capture into one install handoff. The optional uncompressed tar is written only after the
 package self-check passes; `<package>.tar.sha256` is written beside it, and the
 archive SHA-256 plus checksum path are included in JSON output. After editing a
 packaged bundle or receiving a tar handoff, run
