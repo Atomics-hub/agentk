@@ -236,6 +236,12 @@ cargo run --locked -- release-candidate-smoke \
 cargo run --locked -- release-evidence-check \
   --evidence dist/release-candidate-smoke.json \
   --root dist/release-candidate-smoke
+cargo run --locked -- release-finalize \
+  --release v0.2-alpha \
+  --evidence dist/release-candidate-smoke.json \
+  --root dist/release-candidate-smoke \
+  --notes docs/v0.2-alpha-release-notes.md \
+  --out dist/release-finalization.json
 ```
 
 Run the strict pre-push audit with a configured signing key file:
@@ -809,6 +815,14 @@ the required handoff artifacts before a release branch or tag. Then run
 `cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke`
 to re-verify that release-ticket evidence against the current package, archive,
 release manifest, dashboard, store, notification, and handoff files.
+Then run
+`cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md --out dist/release-finalization.json`
+to write the final local handoff report that binds the release commit, release
+notes hash, package archive SHA-256, package release manifest, saved smoke
+evidence, active evidence-signing public key, worktree state, and optional
+signed tag verification. `release-finalize` does not create tags, push, or
+publish a GitHub release; after a maintainer creates a signed tag, rerun it with
+`--tag vX.Y.Z --strict` before publication.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 

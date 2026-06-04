@@ -85,12 +85,17 @@ Implemented today:
   evidence JSON against the current package, archive, release manifest,
   dashboard, store, notification, and handoff artifact byte counts and
   SHA-256s before a maintainer attaches it to a release or deployment ticket.
+- `release-finalize`, which writes one offline final release handoff report
+  binding the release commit, release notes hash, package archive SHA-256,
+  package release manifest, saved smoke evidence, active evidence-signing
+  public key, worktree state, and optional signed-tag verification without
+  tagging, pushing, uploading, or publishing.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 
 Still missing for a team product:
 
-- final signed release run on a protected public branch;
+- final signed release publication on a protected public branch;
 - production secret/key storage integrations beyond local env/file adapters and
   provider-specific reference-shape checks;
 - live external identity verification, hosted/ticket notification

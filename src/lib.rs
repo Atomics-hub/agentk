@@ -10695,6 +10695,20 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         ),
         alpha_release_source_surface(
             root,
+            "final release handoff report",
+            "release-finalize binds commit, notes, signer, package, evidence, and optional signed tag without publishing",
+            &[
+                ("src/main.rs", "ReleaseFinalize"),
+                ("README.md", "release-finalize"),
+                ("docs/release-checklist.md", "release-finalize"),
+                ("docs/v0.2-alpha-release-notes.md", "release-finalize"),
+            ],
+            &[
+                "cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
             "public readiness covers alpha package smoke",
             "public-readiness checklist requires release-candidate-smoke and package release manifest",
             &[

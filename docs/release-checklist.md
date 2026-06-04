@@ -96,6 +96,13 @@ cargo run --locked -- release-evidence-check \
   --evidence dist/release-candidate-smoke.json \
   --root dist/release-candidate-smoke \
   --json
+cargo run --locked -- release-finalize \
+  --release v0.2-alpha \
+  --evidence dist/release-candidate-smoke.json \
+  --root dist/release-candidate-smoke \
+  --notes docs/v0.2-alpha-release-notes.md \
+  --out dist/release-finalization.json \
+  --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
@@ -169,6 +176,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json --json
 cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --json
+cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md --out dist/release-finalization.json --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
@@ -207,6 +215,25 @@ git push origin vX.Y.Z
 If a maintainer cannot sign with GPG or SSH yet, do not publish a release tag.
 Open an issue or pull request to establish signing first.
 
+After creating the signed tag but before pushing a release page, regenerate the
+final local handoff report in strict mode:
+
+```sh
+cargo run --locked -- release-finalize \
+  --release v0.2-alpha \
+  --evidence dist/release-candidate-smoke.json \
+  --root dist/release-candidate-smoke \
+  --notes docs/v0.2-alpha-release-notes.md \
+  --tag vX.Y.Z \
+  --out dist/release-finalization.json \
+  --strict \
+  --force \
+  --json
+```
+
+This command writes local JSON evidence only. It does not create a tag, push a
+tag, upload assets, or publish a GitHub release.
+
 ## GitHub Release
 
 - [ ] Release notes are updated for the final commit and tag.
@@ -216,6 +243,8 @@ Open an issue or pull request to establish signing first.
 - [ ] Package archive SHA-256 and package release-manifest path are recorded.
 - [ ] The signed tag verification result is recorded in the release notes.
 - [ ] Any public key rotation manifest is linked and verified.
+- [ ] `dist/release-finalization.json` is attached or linked as the final
+      local handoff report.
 
 ## After Publishing
 
