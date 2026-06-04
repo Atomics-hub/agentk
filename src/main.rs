@@ -11521,6 +11521,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
+    let publication_handoff_check = release_ticket_publication_handoff_check(&status);
     let accepted_limit_checks = release_ticket_accepted_limit_checks(&status);
     let accepted_limits_ready = !accepted_limit_checks.is_empty()
         && accepted_limit_checks
@@ -11621,6 +11622,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
+        publication_handoff_check,
     ];
     checks.extend(objective_checks);
     let ready = checks
@@ -12878,6 +12880,63 @@ fn release_ticket_deploy_preflight_evidence(
             "deploy/env/notifications.env.example",
         ],
     )?;
+    Ok(())
+}
+
+fn release_ticket_publication_handoff_check(
+    status: &agentk::AlphaReleaseStatusReport,
+) -> ReleaseTicketCheckItem {
+    match release_ticket_publication_handoff_evidence(status) {
+        Ok(()) => release_ticket_check_item(
+            "publication handoff",
+            ReadinessStatus::Pass,
+            "release-status publication preflight proves strict finalization, signed tag evidence, package archive hash, release notes, and owner-scoped publication steps before GitHub release",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("publication handoff", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_publication_handoff_evidence(
+    status: &agentk::AlphaReleaseStatusReport,
+) -> Result<(), String> {
+    let gate = status
+        .verification_gates
+        .iter()
+        .find(|gate| gate.name == "release publication preflight")
+        .ok_or_else(|| {
+            "release-status is missing release publication preflight gate".to_string()
+        })?;
+    if gate.status != ReadinessStatus::Pass {
+        return Err(format!(
+            "release publication preflight gate is {}: {}",
+            gate.status, gate.detail
+        ));
+    }
+    for fragment in [
+        "strict finalization",
+        "signed tag evidence",
+        "package archive hash",
+        "final release notes",
+        "owner-scoped publication steps",
+    ] {
+        if !gate.detail.contains(fragment) {
+            return Err(format!(
+                "release publication preflight gate does not prove {fragment}"
+            ));
+        }
+    }
+    if !gate
+        .evidence
+        .iter()
+        .any(|evidence| evidence.contains("release-publication-check"))
+    {
+        return Err(
+            "release publication preflight gate is missing release-publication-check evidence"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -20756,6 +20815,32 @@ done
             Some(PathBuf::from("docs/v0.2-alpha-release-notes.md"))
         );
         assert!(json);
+
+        let status = alpha_release_status_report(".");
+        let publication_check = release_ticket_publication_handoff_check(&status);
+        assert_eq!(publication_check.status, ReadinessStatus::Pass);
+        assert!(
+            publication_check
+                .detail
+                .contains("owner-scoped publication steps")
+        );
+
+        let mut missing_steps = status.clone();
+        let publication_gate = missing_steps
+            .verification_gates
+            .iter_mut()
+            .find(|gate| gate.name == "release publication preflight")
+            .expect("publication gate should exist");
+        publication_gate.detail = publication_gate
+            .detail
+            .replace(", and owner-scoped publication steps", "");
+        let missing_steps_check = release_ticket_publication_handoff_check(&missing_steps);
+        assert_eq!(missing_steps_check.status, ReadinessStatus::Fail);
+        assert!(
+            missing_steps_check
+                .detail
+                .contains("owner-scoped publication steps")
+        );
 
         let release_homebrew_formula = Cli::try_parse_from([
             "agentk",
