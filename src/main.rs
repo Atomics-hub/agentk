@@ -9778,6 +9778,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "launchd dashboard plist",
     "dockerfile",
     "docker compose",
+    "caddy reverse proxy",
+    "nginx reverse proxy",
     "deploy readme",
     "sidecar http env example",
     "dashboard env example",
@@ -10920,6 +10922,16 @@ fn run_release_candidate_smoke(
         &mut artifacts,
         "docker compose",
         installed_package.join("deploy/docker/compose.yml"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "caddy reverse proxy",
+        installed_package.join("deploy/proxy/Caddyfile"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "nginx reverse proxy",
+        installed_package.join("deploy/proxy/nginx.conf"),
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,

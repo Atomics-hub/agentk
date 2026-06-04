@@ -957,15 +957,19 @@ The commands write and verify a local formula, then verify that a local tap
 checkout contains the same formula file and has no unrelated dirty paths.
 AgentK does not publish a tap.
 
-`dist/agentk-sidecar/deploy/` includes systemd, launchd, and Docker Compose
-templates for running the packaged MCP HTTP sidecar gateway, dashboard, and
-store workflow after review; packaged runtime launchers run the package
+`dist/agentk-sidecar/deploy/` includes systemd, launchd, Docker Compose, and
+reverse-proxy templates for running the packaged MCP HTTP sidecar gateway,
+dashboard, and store workflow after review; packaged runtime launchers run the package
 self-check before launching, serving, writing demo traces, rendering dashboards,
 or updating store artifacts. `agentk-package-check` also verifies
 baseline deploy-template hardening markers, including no-new-privileges systemd
 services, a non-root package Dockerfile, and loopback-published,
 capability-dropped, read-only Compose services, plus dummy env examples with
-required variables and no real-looking credentials.
+required variables and no real-looking credentials. `deploy/proxy/Caddyfile`
+and `deploy/proxy/nginx.conf` route `/mcp` to `127.0.0.1:9798`, route
+dashboard/API/probe paths to `127.0.0.1:8765`, strip ambient cookies and proxy
+auth headers, and provide reviewed starting points for TLS, external auth, and
+network policy in the deployment layer.
 The packaged safe-agent demo JSON includes the same redacted inspect counts,
 syscall summary, evidence-ref summary, and blocked policy rules that
 `trace-inspect` would show separately.
