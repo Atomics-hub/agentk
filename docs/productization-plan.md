@@ -81,6 +81,10 @@ Implemented today:
   one compact operator handoff report, one sidecar doctor support/remediation
   report with release-manifest binding, release-manifest verification,
   Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
+- `release-evidence-check`, which re-validates a saved release-candidate smoke
+  evidence JSON against the current package, archive, release manifest,
+  dashboard, store, notification, and handoff artifact byte counts and
+  SHA-256s before a maintainer attaches it to a release or deployment ticket.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 

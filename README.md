@@ -233,6 +233,9 @@ cargo run --locked -- release-candidate-smoke \
   --force \
   --keep-root \
   --evidence-out dist/release-candidate-smoke.json
+cargo run --locked -- release-evidence-check \
+  --evidence dist/release-candidate-smoke.json \
+  --root dist/release-candidate-smoke
 ```
 
 Run the strict pre-push audit with a configured signing key file:
@@ -802,7 +805,10 @@ safe-agent demo, dashboard, sidecar check, store export/check/sync, operator
 handoff artifact, release-manifest check, sidecar doctor release-manifest
 binding, Slack/GitHub/email payload exporters, and Postgres dry-run push
 launchers, then write one JSON evidence report with SHA-256 and byte counts for
-the required handoff artifacts before a release branch or tag.
+the required handoff artifacts before a release branch or tag. Then run
+`cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke`
+to re-verify that release-ticket evidence against the current package, archive,
+release manifest, dashboard, store, notification, and handoff files.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 
