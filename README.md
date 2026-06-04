@@ -507,6 +507,13 @@ Run `dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json` to
 validate the local/team approval and audit handoff contract, including the
 safe-agent demo, dashboard server, reviewer-scoped permissions, identity
 summary, durable team store, notification outbox, manifest, and handoff doc.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json` when a team
+needs one operator artifact: it refreshes the packaged safe-agent demo,
+dashboard, exported store, durable team store, Slack/GitHub/email payload
+drafts, identity summary, and permissions summary, then writes
+`sidecar/.agentk/operator-handoff/operator-handoff.json` and
+`sidecar/.agentk/operator-handoff/operator-handoff.md` without sending
+notifications or loading Postgres.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -526,7 +533,9 @@ dashboard, sidecar-check, identity-check, and store workflow launchers run the
 package self-check before touching package-local evidence or store artifacts.
 The team handoff checker and
 `dist/agentk-sidecar/clients/team-audit-dashboard-handoff.md` make this a
-reviewable local/team sidecar alpha path, not hosted SaaS.
+reviewable local/team sidecar alpha path, not hosted SaaS. The ops handoff
+launcher adds a compact JSON/Markdown summary that teams can archive or attach
+to a deployment ticket without reading every command output.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-check` after editing the packaged
 bundle to validate policy, permissions, identity mappings, secret references,
 and client snippets without spawning downstream tools. Run
@@ -745,6 +754,7 @@ agentk sidecar-package-install --archive dist/agentk-sidecar.tar --out installed
 agentk sidecar-package-release-manifest --package installed/agentk-sidecar --archive dist/agentk-sidecar.tar --out dist/agentk-sidecar-release-manifest.json
 dist/agentk-sidecar/bin/agentk-sidecar-http-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json
+dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
@@ -768,9 +778,9 @@ package, `dist/agentk-sidecar.tar`, and
 `dist/agentk-sidecar.tar.sha256`, write
 `dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
 packaged HTTP and team handoff checks, safe-agent demo, dashboard, sidecar
-check, store export/check/sync, Slack/GitHub/email payload exporters, and
-Postgres dry-run push launchers, then verify the install receipt and other
-artifacts before a release branch or tag.
+check, store export/check/sync, operator handoff artifact,
+Slack/GitHub/email payload exporters, and Postgres dry-run push launchers, then
+verify the install receipt and other artifacts before a release branch or tag.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 

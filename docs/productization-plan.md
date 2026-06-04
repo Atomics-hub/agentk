@@ -75,7 +75,8 @@ Implemented today:
   secrets;
 - a release-candidate smoke gate that recreates the package/archive, runs the
   packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
-  Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
+  one compact operator handoff report, Slack/GitHub/email payload exporters,
+  and Postgres dry-run push flow.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 
@@ -300,21 +301,27 @@ The safest first productization slice is the local team sidecar path:
     notification outbox rows, and reviewers. `store-export` writes matching
     Postgres TSV/schema/load artifacts for the summary tables. It remains
     hash/evidence-first and does not store raw tool payloads or secret values.
-13. The subprocess MCP gateway has an operator-configurable
+13. `sidecar-package-ops-handoff` and the packaged
+    `bin/agentk-sidecar-ops-handoff` launcher refresh the safe-agent demo,
+    dashboard, exported store, durable team store, notification payload drafts,
+    team permissions, and identity summary, then write `operator-handoff.json`
+    and `operator-handoff.md` for archiveable local/team release review. This
+    is a handoff artifact, not a hosted control plane.
+14. The subprocess MCP gateway has an operator-configurable
     `max_client_messages` cap, exposed on `mcp-proxy-stdio` and generated
     sidecar bundles, so runaway clients cannot hold one proxy session forever.
-14. The subprocess MCP gateway now performs clean downstream shutdown on client
+15. The subprocess MCP gateway now performs clean downstream shutdown on client
     EOF: it closes child stdin, waits briefly for a normal exit, and only then
     escalates to termination.
-15. `sidecar-check` validates the generated Claude Desktop JSON and generic
+16. `sidecar-check` validates the generated Claude Desktop JSON and generic
     Codex/Cursor command snippets, so broken client wiring is caught before a
     team pastes the config into an MCP client.
-16. The subprocess MCP gateway writes redacted session summaries with readiness
+17. The subprocess MCP gateway writes redacted session summaries with readiness
     state, client message counts, configured caps, and allow/deny event totals.
     `mcp-proxy-stdio` exposes this as `--session-report-out`, and
     `sidecar-run` writes a `*.session.json` file beside the configured audit
     log automatically.
-17. The served dashboard now has role-aware reviewer views. Reviewers can load
+18. The served dashboard now has role-aware reviewer views. Reviewers can load
     their scoped inbox from the browser page, and direct `/?reviewer=<id>` HTML
     views use the same team-permission and reviewer-token checks as
     `/api/review?reviewer=<id>`. Token-protected reviewer reads reject requests
@@ -324,7 +331,7 @@ The safest first productization slice is the local team sidecar path:
     reject requests that combine reviewer and requester scope selectors,
     unsupported review query parameters, or reviewer-token carriers without
     reviewer scope.
-18. Trace events now carry hash-bound AgentK agent identity for new logs, while
+19. Trace events now carry hash-bound AgentK agent identity for new logs, while
     old logs without that field still verify. The served dashboard and review
     API use that identity for requester views at `/?requester=<agent-id>` and
     `/api/review?requester=<agent-id>`, and durable JSONL/Postgres exports carry

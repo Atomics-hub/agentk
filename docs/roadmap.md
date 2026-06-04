@@ -224,6 +224,7 @@ gateway is the delivery surface, not a pivot into a generic AI gateway.
 - [x] Validate deploy-template hardening in package self-checks.
 - [x] Validate Dockerfile non-root runtime hardening in package self-checks.
 - [x] Add a packaged team approval/audit handoff checker for dashboard and durable store review.
+- [x] Add a packaged operator handoff report for one-command local/team archive evidence.
 - [x] Preflight packaged sidecar launchers with the package validator.
 - [x] Preflight packaged demo/dashboard/store workflow launchers with the package validator.
 - [x] Add redacted dashboard readiness probes for service supervisors.
