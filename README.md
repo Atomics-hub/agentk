@@ -580,6 +580,12 @@ rejection, then writes
 `sidecar/.agentk/permissions-handoff/permissions-handoff.json` and
 `sidecar/.agentk/permissions-handoff/permissions-handoff.md` without contacting
 an IdP or claiming hosted SaaS.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-production-preflight --json` before
+deployment review to validate supervisor env templates, `sidecar/secrets.toml`,
+placeholder coverage, and non-local bind defaults. It writes
+`sidecar/.agentk/production-preflight/production-preflight.json` and
+`sidecar/.agentk/production-preflight/production-preflight.md` without reading
+live secrets, configuring TLS, contacting an IdP, or claiming hosted SaaS.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json` before a
 service-manager, Docker, or reverse-proxy deployment review. It validates the
 packaged service templates and supervisor env examples, then writes
@@ -600,6 +606,9 @@ the demo handoff, deploy handoff, and support bundle, then writes
 Run `dist/agentk-sidecar/bin/agentk-sidecar-permissions-handoff --json` when
 the permissions owner wants the narrower authorization handoff without rerunning
 the full support bundle.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-production-preflight --json` when
+the deployment owner wants the narrower env/secret-reference handoff without
+rerunning the full support bundle.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -855,6 +864,7 @@ installed/agentk-sidecar/bin/agentk-sidecar-demo-handoff --json
 AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
   installed/agentk-sidecar/bin/agentk-sidecar-quickstart --json
 installed/agentk-sidecar/bin/agentk-sidecar-permissions-handoff --json
+installed/agentk-sidecar/bin/agentk-sidecar-production-preflight --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json

@@ -105,6 +105,12 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/permissions-handoff/permissions-handoff.md` with local
       reviewer-role, reviewer-scoped-read, token coverage, identity mapping,
       authorized decision, and unknown-reviewer rejection evidence.
+- [ ] `cargo run --locked -- sidecar-package-production-preflight --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/production-preflight/production-preflight.json` and
+      `sidecar/.agentk/production-preflight/production-preflight.md` with env
+      template, secret-reference, placeholder coverage, and non-local bind
+      default evidence without reading live secrets.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest

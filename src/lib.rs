@@ -54,6 +54,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-demo-handoff",
     "bin/agentk-sidecar-quickstart",
     "bin/agentk-sidecar-permissions-handoff",
+    "bin/agentk-sidecar-production-preflight",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -83,6 +84,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-demo-handoff",
     "bin/agentk-sidecar-quickstart",
     "bin/agentk-sidecar-permissions-handoff",
+    "bin/agentk-sidecar-production-preflight",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6883,6 +6885,36 @@ pub struct SidecarPackagePermissionsHandoffArtifact {
     pub sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageProductionPreflightReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub secrets_path: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub live_secret_retrieval: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub artifacts: Vec<SidecarPackageProductionPreflightArtifact>,
+    pub package_check: SidecarPackageCheckReport,
+    pub secret_refs: SecretReferenceManifestReport,
+    pub env_templates: usize,
+    pub env_assignments: usize,
+    pub placeholder_assignments: usize,
+    pub non_local_bind_defaults_disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageProductionPreflightArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub present: bool,
+    pub bytes: Option<u64>,
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -8738,6 +8770,247 @@ fn sidecar_package_deploy_handoff_markdown(report: &SidecarPackageDeployHandoffR
         }
     }
     out.push_str("\nAttach this directory to a deployment ticket after replacing `CHANGE_ME` values in supervisor-owned secret stores. Keep real credentials out of the package and terminate TLS/external auth in the deployment layer.\n");
+    out
+}
+
+pub fn write_sidecar_package_production_preflight(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<SidecarPackageProductionPreflightReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let json_path = output_dir.join("production-preflight.json");
+    let markdown_path = output_dir.join("production-preflight.md");
+    let secrets_path = root.join("sidecar/secrets.toml");
+
+    let package_check = check_sidecar_package(root)?;
+    let secret_refs = secret_reference_manifest_report_from_path(&secrets_path)?;
+    let env_summary = sidecar_package_env_template_summary(root)?;
+    let non_local_bind_defaults_disabled = sidecar_package_non_local_bind_defaults_disabled(root)?;
+    let artifacts = sidecar_package_production_preflight_artifacts(root)?;
+    let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
+    let checks = vec![
+        production_preflight_report_check(
+            "package self-check",
+            package_check.passed,
+            format!("{} package readiness checks", package_check.checks.len()),
+        ),
+        production_preflight_report_check(
+            "secret reference manifest",
+            secret_refs.secret_count > 0,
+            format!(
+                "{} refs across {} providers; values are references, not secrets",
+                secret_refs.secret_count, secret_refs.provider_count
+            ),
+        ),
+        check_sidecar_package_deploy_env_examples(root),
+        production_preflight_report_check(
+            "placeholder coverage",
+            env_summary.placeholder_assignments >= 4,
+            format!(
+                "{} placeholders across {} env assignments",
+                env_summary.placeholder_assignments, env_summary.assignments
+            ),
+        ),
+        production_preflight_report_check(
+            "non-local bind defaults",
+            non_local_bind_defaults_disabled,
+            "MCP HTTP and dashboard env examples keep non-local binds disabled by default",
+        ),
+        production_preflight_report_check(
+            "artifact inventory",
+            required_artifacts_present,
+            format!(
+                "{} production preflight artifacts inspected",
+                artifacts.len()
+            ),
+        ),
+        readiness_check(
+            "live secret retrieval",
+            ReadinessStatus::Warn,
+            "not performed; this preflight validates references/placeholders without reading secret values",
+        ),
+        production_preflight_report_check(
+            "alpha scope",
+            true,
+            "local/team sidecar alpha; hosted SaaS is false",
+        ),
+    ];
+    let passed = required_artifacts_present
+        && checks
+            .iter()
+            .all(|check| check.status != ReadinessStatus::Fail);
+
+    fs::create_dir_all(output_dir)?;
+    let report = SidecarPackageProductionPreflightReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        secrets_path,
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        live_secret_retrieval: false,
+        passed,
+        checks,
+        artifacts,
+        package_check,
+        secret_refs,
+        env_templates: env_summary.templates,
+        env_assignments: env_summary.assignments,
+        placeholder_assignments: env_summary.placeholder_assignments,
+        non_local_bind_defaults_disabled,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(
+        &markdown_path,
+        sidecar_package_production_preflight_markdown(&report),
+    )?;
+    Ok(report)
+}
+
+fn production_preflight_report_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SidecarPackageEnvTemplateSummary {
+    templates: usize,
+    assignments: usize,
+    placeholder_assignments: usize,
+}
+
+fn sidecar_package_env_template_summary(
+    root: &Path,
+) -> Result<SidecarPackageEnvTemplateSummary, AgentKError> {
+    let mut summary = SidecarPackageEnvTemplateSummary {
+        templates: 0,
+        assignments: 0,
+        placeholder_assignments: 0,
+    };
+    for relative in SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES {
+        let content = fs::read_to_string(root.join(relative))?;
+        summary.templates += 1;
+        for line in content.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') || !line.contains('=') {
+                continue;
+            }
+            summary.assignments += 1;
+            if line.contains("CHANGE_ME") {
+                summary.placeholder_assignments += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn sidecar_package_non_local_bind_defaults_disabled(root: &Path) -> Result<bool, AgentKError> {
+    let sidecar_http = fs::read_to_string(root.join("deploy/env/sidecar-http.env.example"))?;
+    let dashboard = fs::read_to_string(root.join("deploy/env/dashboard.env.example"))?;
+    Ok(
+        sidecar_http.contains("AGENTK_MCP_HTTP_ALLOW_NON_LOCAL_BIND=0")
+            && dashboard.contains("AGENTK_DASHBOARD_ALLOW_NON_LOCAL_BIND=0"),
+    )
+}
+
+fn sidecar_package_production_preflight_artifacts(
+    root: &Path,
+) -> Result<Vec<SidecarPackageProductionPreflightArtifact>, AgentKError> {
+    let mut artifacts = Vec::new();
+    sidecar_package_production_preflight_artifact(
+        &mut artifacts,
+        "secret reference manifest",
+        root.join("sidecar/secrets.toml"),
+    )?;
+    for relative in SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES {
+        sidecar_package_production_preflight_artifact(
+            &mut artifacts,
+            relative,
+            root.join(relative),
+        )?;
+    }
+    Ok(artifacts)
+}
+
+fn sidecar_package_production_preflight_artifact(
+    artifacts: &mut Vec<SidecarPackageProductionPreflightArtifact>,
+    name: &str,
+    path: PathBuf,
+) -> Result<(), AgentKError> {
+    let metadata = fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let (present, bytes, sha256) = match metadata {
+        Some(metadata) => (
+            true,
+            Some(metadata.len()),
+            Some(sidecar_package_file_sha256(&path)?),
+        ),
+        None => (false, None, None),
+    };
+    artifacts.push(SidecarPackageProductionPreflightArtifact {
+        name: name.to_string(),
+        path,
+        present,
+        bytes,
+        sha256,
+    });
+    Ok(())
+}
+
+fn sidecar_package_production_preflight_markdown(
+    report: &SidecarPackageProductionPreflightReport,
+) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Production Preflight\n\n");
+    out.push_str("This handoff validates the package-local production-adjacent inputs a team must review before deployment: supervisor env templates, secret-reference manifests, placeholder coverage, and non-local bind defaults. It does not retrieve live secrets, configure TLS, contact an IdP, or claim hosted SaaS readiness.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!(
+        "- Secret refs: `{}`\n",
+        report.secrets_path.display()
+    ));
+    out.push_str(&format!(
+        "- Env templates: `{}` templates, `{}` assignments, `{}` placeholders\n",
+        report.env_templates, report.env_assignments, report.placeholder_assignments
+    ));
+    out.push_str("- Live secret retrieval: `false`\n");
+    out.push_str("- Hosted SaaS: `false`\n\n");
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Artifacts\n\n");
+    for artifact in &report.artifacts {
+        match (artifact.bytes, artifact.sha256.as_deref()) {
+            (Some(bytes), Some(sha256)) => out.push_str(&format!(
+                "- `{}`: {} bytes, sha256 `{}`\n",
+                artifact.name, bytes, sha256
+            )),
+            _ => out.push_str(&format!("- `{}`: missing\n", artifact.name)),
+        }
+    }
+    out.push_str("\nAttach this report to deployment review after replacing placeholders in supervisor-owned secret stores. Keep edited env files and real secret values outside the package.\n");
     out
 }
 
@@ -11956,6 +12229,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 ("src/lib.rs", "clients/onboarding.md"),
                 ("src/lib.rs", "bin/agentk-sidecar-quickstart"),
                 ("src/lib.rs", "bin/agentk-sidecar-permissions-handoff"),
+                ("src/lib.rs", "bin/agentk-sidecar-production-preflight"),
                 ("src/lib.rs", "check_sidecar_package_release_manifest"),
                 ("src/lib.rs", "package.lock.json"),
             ],
@@ -11966,6 +12240,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 "agentk sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json",
                 "bin/agentk-sidecar-quickstart --json",
                 "bin/agentk-sidecar-permissions-handoff --json",
+                "bin/agentk-sidecar-production-preflight --json",
             ],
         ),
         alpha_release_source_surface(
@@ -12027,6 +12302,8 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 ("src/main.rs", "StoreEmailSend"),
                 ("src/lib.rs", "export_github_notification_payloads"),
                 ("src/lib.rs", "export_email_notification_payloads"),
+                ("src/lib.rs", "write_sidecar_package_production_preflight"),
+                ("src/lib.rs", "bin/agentk-sidecar-production-preflight"),
             ],
             &[
                 "agentk store-sync",
@@ -12034,6 +12311,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
                 "agentk store-slack-send --dry-run",
                 "agentk store-github-send --dry-run",
                 "agentk store-email-send --dry-run",
+                "agentk sidecar-package-production-preflight --json",
             ],
         ),
         alpha_release_source_surface(
@@ -18228,6 +18506,11 @@ pub fn package_sidecar_bundle(
             out,
             "bin/agentk-sidecar-permissions-handoff",
             &sidecar_permissions_handoff_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-production-preflight",
+            &sidecar_production_preflight_script(),
         )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
@@ -24775,6 +25058,9 @@ install receipt still match the handoff.
 - `bin/agentk-sidecar-permissions-handoff`: validates the packaged team
   permissions and identity mapping handoff, including reviewer-scoped reads,
   authorized decisions, and fail-closed unknown reviewer rejection.
+- `bin/agentk-sidecar-production-preflight`: validates deploy env templates,
+  secret-reference manifests, placeholder coverage, and non-local bind defaults
+  before deployment review.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -24832,6 +25118,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/ag
 ./bin/agentk-sidecar-demo-handoff --json
 ./bin/agentk-sidecar-quickstart --json
 ./bin/agentk-sidecar-permissions-handoff --json
+./bin/agentk-sidecar-production-preflight --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -24920,6 +25207,13 @@ validates the package, team permissions, identity mapping coverage,
 reviewer-scoped reads, authorized approval recording, and unknown reviewer
 rejection without contacting an IdP or claiming hosted SaaS. Set
 `AGENTK_PERMISSIONS_HANDOFF_OUT` to choose another output directory.
+
+`bin/agentk-sidecar-production-preflight` writes
+`sidecar/.agentk/production-preflight/production-preflight.json` and
+`sidecar/.agentk/production-preflight/production-preflight.md` by default. It
+checks deploy env templates, `sidecar/secrets.toml`, placeholder coverage, and
+non-local bind defaults without reading live secrets or claiming hosted SaaS.
+Set `AGENTK_PRODUCTION_PREFLIGHT_OUT` to choose another output directory.
 
 `bin/agentk-dashboard-server` exposes `/api/review` plus permission-checked
 `/api/approve` and `/api/deny` JSON endpoints after running
@@ -25179,6 +25473,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             "demo_handoff": "bin/agentk-sidecar-demo-handoff",
             "quickstart": "bin/agentk-sidecar-quickstart",
             "permissions_handoff": "bin/agentk-sidecar-permissions-handoff",
+            "production_preflight": "bin/agentk-sidecar-production-preflight",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -25286,6 +25581,7 @@ local relay configuration and keep payload exports package-local.
 {package}/bin/agentk-sidecar-demo-handoff --json
 {package}/bin/agentk-sidecar-quickstart --json
 {package}/bin/agentk-sidecar-permissions-handoff --json
+{package}/bin/agentk-sidecar-production-preflight --json
 {package}/bin/agentk-sidecar-deploy-handoff --json
 {package}/bin/agentk-sidecar-ops-handoff --json
 {package}/bin/agentk-sidecar-doctor --json
@@ -25758,6 +26054,19 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 PERMISSIONS_OUT="${AGENTK_PERMISSIONS_HANDOFF_OUT:-$ROOT/sidecar/.agentk/permissions-handoff}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-package-permissions-handoff --root "$ROOT" --out "$PERMISSIONS_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_production_preflight_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+PREFLIGHT_OUT="${AGENTK_PRODUCTION_PREFLIGHT_OUT:-$ROOT/sidecar/.agentk/production-preflight}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-production-preflight --root "$ROOT" --out "$PREFLIGHT_OUT" "$@"
 "#
     .to_string()
 }
@@ -27558,7 +27867,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 49);
+        assert_eq!(report.files.len(), 50);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -27579,6 +27888,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-demo-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-quickstart").exists());
         assert!(out.join("bin/agentk-sidecar-permissions-handoff").exists());
+        assert!(out.join("bin/agentk-sidecar-production-preflight").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -27714,6 +28024,14 @@ can_deny = ["*"]
         assert!(permissions_handoff.contains("permissions-handoff"));
         assert!(permissions_handoff.contains("agentk-package-check"));
         assert!(permissions_handoff.contains("\"$@\""));
+        let production_preflight =
+            fs::read_to_string(out.join("bin/agentk-sidecar-production-preflight"))
+                .expect("production preflight launcher should read");
+        assert!(production_preflight.contains("sidecar-package-production-preflight"));
+        assert!(production_preflight.contains("AGENTK_PRODUCTION_PREFLIGHT_OUT"));
+        assert!(production_preflight.contains("production-preflight"));
+        assert!(production_preflight.contains("agentk-package-check"));
+        assert!(production_preflight.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -27883,6 +28201,7 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-demo-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-quickstart"));
         assert!(package_readme.contains("bin/agentk-sidecar-permissions-handoff"));
+        assert!(package_readme.contains("bin/agentk-sidecar-production-preflight"));
         assert!(package_readme.contains("operator-handoff.json"));
         assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("sidecar-doctor.json"));
@@ -27895,10 +28214,13 @@ can_deny = ["*"]
         assert!(package_readme.contains("quickstart.md"));
         assert!(package_readme.contains("permissions-handoff.json"));
         assert!(package_readme.contains("permissions-handoff.md"));
+        assert!(package_readme.contains("production-preflight.json"));
+        assert!(package_readme.contains("production-preflight.md"));
         assert!(package_readme.contains("AGENTK_SUPPORT_BUNDLE_OUT"));
         assert!(package_readme.contains("AGENTK_DEMO_HANDOFF_OUT"));
         assert!(package_readme.contains("AGENTK_QUICKSTART_OUT"));
         assert!(package_readme.contains("AGENTK_PERMISSIONS_HANDOFF_OUT"));
+        assert!(package_readme.contains("AGENTK_PRODUCTION_PREFLIGHT_OUT"));
         assert!(package_readme.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
         assert!(package_readme.contains("release-manifest binding"));
         assert!(package_readme.contains("local/team sidecar alpha"));
@@ -27974,6 +28296,10 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["team_handoff"]["permissions_handoff"],
             serde_json::json!("bin/agentk-sidecar-permissions-handoff")
+        );
+        assert_eq!(
+            package_manifest_json["team_handoff"]["production_preflight"],
+            serde_json::json!("bin/agentk-sidecar-production-preflight")
         );
         assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
@@ -28065,6 +28391,13 @@ can_deny = ["*"]
                 .any(|launcher| launcher == "bin/agentk-sidecar-permissions-handoff")
         );
         assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-sidecar-production-preflight")
+        );
+        assert!(
             package_manifest_json["client_snippets"]
                 .as_array()
                 .expect("client snippets should be an array")
@@ -28082,6 +28415,7 @@ can_deny = ["*"]
         assert!(onboarding.contains("agentk-sidecar-demo-handoff"));
         assert!(onboarding.contains("agentk-sidecar-quickstart"));
         assert!(onboarding.contains("agentk-sidecar-permissions-handoff"));
+        assert!(onboarding.contains("agentk-sidecar-production-preflight"));
         assert!(onboarding.contains("not hosted SaaS"));
         assert_eq!(
             package_manifest_json["identity"]["manifest"],
@@ -28808,6 +29142,61 @@ can_deny = ["*"]
         assert!(markdown.contains("AgentK Permissions Handoff"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("unauthorized reviewer"));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_production_preflight_writes_env_and_secret_report() {
+        let root = temp_path("agentk-sidecar-production-preflight-root", "dir");
+        let out = temp_path("agentk-sidecar-production-preflight-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        let output_dir = out.join("sidecar/.agentk/production-preflight");
+        let report = write_sidecar_package_production_preflight(&out, &output_dir)
+            .expect("production preflight should write");
+
+        assert!(report.passed);
+        assert!(report.local_team_sidecar_alpha);
+        assert!(!report.hosted_saas);
+        assert!(!report.live_secret_retrieval);
+        assert_eq!(report.output_dir, output_dir);
+        assert!(report.json_path.is_file());
+        assert!(report.markdown_path.is_file());
+        assert_eq!(report.secret_refs.secret_count, 3);
+        assert_eq!(
+            report.env_templates,
+            SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES.len()
+        );
+        assert!(report.env_assignments > report.placeholder_assignments);
+        assert!(report.placeholder_assignments >= 4);
+        assert!(report.non_local_bind_defaults_disabled);
+        assert!(report.artifacts.iter().all(|artifact| {
+            artifact.present && artifact.bytes.unwrap_or_default() > 0 && artifact.sha256.is_some()
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "secret reference manifest" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "live secret retrieval" && check.status == ReadinessStatus::Warn
+        }));
+
+        let json =
+            fs::read_to_string(&report.json_path).expect("production preflight JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("production preflight JSON should parse");
+        assert_eq!(value["passed"], serde_json::json!(true));
+        assert_eq!(value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(value["live_secret_retrieval"], serde_json::json!(false));
+
+        let markdown = fs::read_to_string(&report.markdown_path)
+            .expect("production preflight markdown should read");
+        assert!(markdown.contains("AgentK Production Preflight"));
+        assert!(markdown.contains("Live secret retrieval: `false`"));
+        assert!(markdown.contains("Hosted SaaS: `false`"));
+        assert!(markdown.contains("secret reference manifest"));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
@@ -35803,7 +36192,7 @@ reviewer = "tom"
              SidecarPackageSupportBundle ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck \
              ReleaseHomebrewTapHandoffCheck ReleaseTicket SidecarPackageDeployHandoff \
              SidecarPackageDemoHandoff SidecarPackageQuickstart \
-             SidecarPackagePermissionsHandoff",
+             SidecarPackagePermissionsHandoff SidecarPackageProductionPreflight",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -35816,6 +36205,7 @@ reviewer = "tom"
              write_sidecar_package_demo_handoff bin/agentk-sidecar-demo-handoff \
              write_sidecar_package_quickstart bin/agentk-sidecar-quickstart \
              write_sidecar_package_permissions_handoff bin/agentk-sidecar-permissions-handoff \
+             write_sidecar_package_production_preflight bin/agentk-sidecar-production-preflight \
              release-candidate-smoke write_homebrew_formula check_homebrew_formula \
              check_homebrew_tap_handoff",
         )
