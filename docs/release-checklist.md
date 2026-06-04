@@ -159,7 +159,8 @@ hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
 similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,
 owner deployment steps, secret-reference manifests, provider-shaped production
-refs, non-local bind defaults, and no live secret retrieval. It checks
+refs, supervisor health/readiness/metrics probes, non-local bind defaults, and
+no live secret retrieval. It checks
 publication handoff evidence for strict finalization,
 signed tag evidence, package archive hash, final release notes, owner-scoped
 publication steps, `release-publication-check` coverage, and a

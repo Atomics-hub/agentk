@@ -6833,6 +6833,7 @@ pub struct SidecarPackageDeployHandoffReport {
     pub passed: bool,
     pub checks: Vec<ReadinessCheck>,
     pub deployment_steps: Vec<SidecarPackageDeployStep>,
+    pub supervisor_probes: Vec<SidecarPackageDeployProbe>,
     pub artifacts: Vec<SidecarPackageDeployHandoffArtifact>,
     pub package_check: SidecarPackageCheckReport,
 }
@@ -6843,6 +6844,16 @@ pub struct SidecarPackageDeployStep {
     pub action: String,
     pub artifact: PathBuf,
     pub risk: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageDeployProbe {
+    pub service: String,
+    pub path: String,
+    pub method: String,
+    pub command: String,
+    pub auth_required_when_configured: bool,
+    pub expected: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8802,6 +8813,11 @@ pub fn write_sidecar_package_deploy_handoff(
         check_sidecar_package_deploy_env_examples(root),
         check_sidecar_package_http_client_handoff(root),
         check_sidecar_package_dashboard_env_handoff(root),
+        deploy_handoff_report_check(
+            "supervisor probes",
+            true,
+            "health, readiness, and metrics probes are documented for MCP HTTP and dashboard services",
+        ),
         deploy_handoff_check(
             "deploy scope",
             ReadinessStatus::Pass,
@@ -8816,6 +8832,7 @@ pub fn write_sidecar_package_deploy_handoff(
         sidecar_package_deploy_handoff_artifact(&mut artifacts, relative, root.join(relative))?;
     }
     let deployment_steps = sidecar_package_deploy_steps(root);
+    let supervisor_probes = sidecar_package_deploy_supervisor_probes();
     let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
     let passed = required_artifacts_present
         && checks
@@ -8833,6 +8850,7 @@ pub fn write_sidecar_package_deploy_handoff(
         passed,
         checks,
         deployment_steps,
+        supervisor_probes,
         artifacts,
         package_check,
     };
@@ -8917,6 +8935,70 @@ fn sidecar_package_deploy_step(
     }
 }
 
+fn sidecar_package_deploy_supervisor_probes() -> Vec<SidecarPackageDeployProbe> {
+    vec![
+        sidecar_package_deploy_probe(
+            "MCP HTTP gateway",
+            "/healthz",
+            "curl -fsS http://127.0.0.1:9798/healthz",
+            false,
+            "liveness returns 200 without exposing tokens or downstream payloads",
+        ),
+        sidecar_package_deploy_probe(
+            "MCP HTTP gateway",
+            "/readyz",
+            "curl -fsS -H @/run/agentk/mcp-http-auth.headers http://127.0.0.1:9798/readyz",
+            true,
+            "readiness returns redacted protocol, cap, session, and origin counts",
+        ),
+        sidecar_package_deploy_probe(
+            "MCP HTTP gateway",
+            "/metrics",
+            "curl -fsS -H @/run/agentk/mcp-http-auth.headers http://127.0.0.1:9798/metrics",
+            true,
+            "metrics return redacted numeric request, rejection, and session counters",
+        ),
+        sidecar_package_deploy_probe(
+            "dashboard",
+            "/healthz",
+            "curl -fsS http://127.0.0.1:8765/healthz",
+            false,
+            "liveness returns 200 without requiring dashboard admin auth",
+        ),
+        sidecar_package_deploy_probe(
+            "dashboard",
+            "/readyz",
+            "curl -fsS -H \"X-AgentK-Admin-Token: $AGENTK_DASHBOARD_ADMIN_AUTH_VALUE\" http://127.0.0.1:8765/readyz",
+            true,
+            "readiness returns redacted dashboard, store, and permission counts",
+        ),
+        sidecar_package_deploy_probe(
+            "dashboard",
+            "/metrics",
+            "curl -fsS -H \"X-AgentK-Admin-Token: $AGENTK_DASHBOARD_ADMIN_AUTH_VALUE\" http://127.0.0.1:8765/metrics",
+            true,
+            "metrics return redacted dashboard gauges for service supervisors",
+        ),
+    ]
+}
+
+fn sidecar_package_deploy_probe(
+    service: &str,
+    path: &str,
+    command: &str,
+    auth_required_when_configured: bool,
+    expected: &str,
+) -> SidecarPackageDeployProbe {
+    SidecarPackageDeployProbe {
+        service: service.to_string(),
+        path: path.to_string(),
+        method: "GET".to_string(),
+        command: command.to_string(),
+        auth_required_when_configured,
+        expected: expected.to_string(),
+    }
+}
+
 fn sidecar_package_deploy_handoff_artifact(
     artifacts: &mut Vec<SidecarPackageDeployHandoffArtifact>,
     name: &str,
@@ -8974,6 +9056,20 @@ fn sidecar_package_deploy_handoff_markdown(report: &SidecarPackageDeployHandoffR
             markdown_cell(&step.action),
             step.artifact.display(),
             markdown_cell(&step.risk)
+        ));
+    }
+    out.push_str("\n## Supervisor Probes\n\n");
+    out.push_str("| Service | Probe | Command | Auth | Expected |\n");
+    out.push_str("| --- | --- | --- | --- | --- |\n");
+    for probe in &report.supervisor_probes {
+        out.push_str(&format!(
+            "| {} | `{}` `{}` | `{}` | `{}` | {} |\n",
+            markdown_cell(&probe.service),
+            probe.method,
+            markdown_cell(&probe.path),
+            markdown_cell(&probe.command),
+            probe.auth_required_when_configured,
+            markdown_cell(&probe.expected)
         ));
     }
     out.push_str("\n## Deploy Artifacts\n\n");
@@ -13438,10 +13534,11 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         alpha_release_source_surface(
             root,
             "deploy handoff package path",
-            "packaged deploy handoff validates service templates, env examples, and hashed local deployment evidence",
+            "packaged deploy handoff validates service templates, env examples, supervisor probes, and hashed local deployment evidence",
             &[
                 ("src/main.rs", "SidecarPackageDeployHandoff"),
                 ("src/lib.rs", "write_sidecar_package_deploy_handoff"),
+                ("src/lib.rs", "supervisor_probes"),
                 ("src/lib.rs", "bin/agentk-sidecar-deploy-handoff"),
             ],
             &[
@@ -16599,7 +16696,7 @@ done
                 TIMEOUT_PROBE_SCRIPT.to_string(),
                 "agentk-timeout-probe".to_string(),
             ])
-            .with_response_timeout(Duration::from_millis(50)),
+            .with_response_timeout(Duration::from_millis(500)),
     )?;
     let responses = report
         .output
@@ -30621,6 +30718,29 @@ can_deny = ["*"]
             check.name == "package deploy env examples" && check.status == ReadinessStatus::Pass
         }));
         assert_eq!(report.deployment_steps.len(), 5);
+        assert_eq!(report.supervisor_probes.len(), 6);
+        for (service, path, auth_required) in [
+            ("MCP HTTP gateway", "/healthz", false),
+            ("MCP HTTP gateway", "/readyz", true),
+            ("MCP HTTP gateway", "/metrics", true),
+            ("dashboard", "/healthz", false),
+            ("dashboard", "/readyz", true),
+            ("dashboard", "/metrics", true),
+        ] {
+            assert!(
+                report.supervisor_probes.iter().any(|probe| {
+                    probe.service == service
+                        && probe.path == path
+                        && probe.method == "GET"
+                        && probe.auth_required_when_configured == auth_required
+                        && probe.command.contains("curl -fsS")
+                        && probe.command.contains("127.0.0.1")
+                        && probe.command.contains(path)
+                        && (path == "/healthz" || probe.expected.contains("redacted"))
+                }),
+                "missing supervisor probe for {service} {path}"
+            );
+        }
         for owner in [
             "service manager owner",
             "container owner",
@@ -30648,10 +30768,21 @@ can_deny = ["*"]
                 .len(),
             5
         );
+        assert_eq!(
+            value["supervisor_probes"]
+                .as_array()
+                .expect("supervisor probes should be an array")
+                .len(),
+            6
+        );
         let markdown =
             fs::read_to_string(&report.markdown_path).expect("deploy handoff markdown should read");
         assert!(markdown.contains("AgentK Deploy Handoff"));
         assert!(markdown.contains("## Deployment Steps"));
+        assert!(markdown.contains("## Supervisor Probes"));
+        assert!(markdown.contains("curl -fsS http://127.0.0.1:9798/healthz"));
+        assert!(markdown.contains("@/run/agentk/mcp-http-auth.headers"));
+        assert!(markdown.contains("X-AgentK-Admin-Token: $AGENTK_DASHBOARD_ADMIN_AUTH_VALUE"));
         assert!(markdown.contains("service manager owner"));
         assert!(markdown.contains("proxy and TLS owner"));
         assert!(markdown.contains("rollback owner"));

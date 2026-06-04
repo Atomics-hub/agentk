@@ -636,7 +636,8 @@ Run `dist/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json` before a
 service-manager, Docker, or reverse-proxy deployment review. It validates the
 packaged service templates and supervisor env examples, adds deployment-step
 guidance for service-manager, container, proxy/TLS, secrets, and rollback
-owners, then writes
+owners, and records health/readiness/metrics supervisor probes for the MCP HTTP
+gateway and dashboard, then writes
 `sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
 `sidecar/.agentk/deploy-handoff/deploy-handoff.md` with SHA-256 hashes for
 deployment tickets.
