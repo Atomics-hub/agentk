@@ -127,6 +127,10 @@ responses omit bodies; `HEAD` on the MCP endpoint remains an unsupported method
 response with the normal `Allow` header. When HTTP auth is
 configured, `/readyz` and `/metrics` require the same bearer token as MCP
 requests; `/healthz` remains open for minimal liveness checks.
+If the configured downstream MCP process cannot be spawned or reached, the
+adapter returns a sanitized HTTP 502 JSON-RPC error on MCP `POST` instead of
+closing the socket or reflecting raw command, environment, payload, or stderr
+values.
 `--max-active-sessions` caps initialized MCP HTTP
 sessions and excess initialize requests return 429.
 `--session-idle-timeout-ms` reaps idle initialized sessions and releases their
@@ -212,7 +216,8 @@ trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
 rejections, CORS preflight validation rejections, SSE stream/resume totals,
-invalid-framing/header-too-large/body-too-large stream rejections, and session
+invalid-framing/header-too-large/body-too-large stream rejections, downstream
+transport failures, AgentK internal gateway failures, and session
 create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control
 plane, TLS termination, hosted SSE streaming, or live external identity verification.

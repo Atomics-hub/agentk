@@ -44,6 +44,7 @@ const MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS: usize = 32;
 const MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 const MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS: u64 = 30 * 1000;
 const MCP_HTTP_MAX_SSE_EVENTS_PER_SESSION: usize = 128;
+const MCP_HTTP_JSON_RPC_MAX_ID_BYTES: usize = 128;
 const MCP_HTTP_DEFAULT_ALLOW_ORIGINS_ENV: &str = "AGENTK_MCP_HTTP_ALLOW_ORIGINS";
 const DASHBOARD_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const DASHBOARD_HTTP_MAX_BODY_BYTES: usize = 8 * 1024;
@@ -6231,6 +6232,8 @@ struct McpHttpGatewayMetrics {
     header_too_large_responses: usize,
     body_too_large_responses: usize,
     trusted_proxy_header_requests: usize,
+    downstream_transport_error_responses: usize,
+    gateway_internal_error_responses: usize,
     sessions_created: usize,
     sessions_deleted: usize,
     sessions_expired: usize,
@@ -6678,7 +6681,10 @@ fn mcp_http_response(
     request: &DashboardHttpRequest,
     state: &Arc<McpHttpGatewayState>,
 ) -> Result<DashboardHttpResponse, AgentKError> {
-    let mut response = mcp_http_response_inner(request, state)?;
+    let mut response = match mcp_http_response_inner(request, state) {
+        Ok(response) => response,
+        Err(error) => mcp_http_gateway_error_response(request, state, &error),
+    };
     mcp_http_record_response_metrics(request, &response, state)?;
     if request.method == "HEAD" {
         response.body.clear();
@@ -6801,6 +6807,8 @@ fn mcp_http_record_response_metrics(
             "401 Unauthorized" => metrics.auth_rejections += 1,
             "403 Forbidden" => metrics.origin_rejections += 1,
             "405 Method Not Allowed" => metrics.method_rejections += 1,
+            "502 Bad Gateway" => metrics.downstream_transport_error_responses += 1,
+            "500 Internal Server Error" => metrics.gateway_internal_error_responses += 1,
             "404 Not Found"
                 if request.target.split('?').next() == Some(state.endpoint.as_str()) =>
             {
@@ -6991,6 +6999,8 @@ fn mcp_http_operational_response(
             "header_too_large_responses": metrics.header_too_large_responses,
             "body_too_large_responses": metrics.body_too_large_responses,
             "trusted_proxy_header_requests": metrics.trusted_proxy_header_requests,
+            "downstream_transport_error_responses": metrics.downstream_transport_error_responses,
+            "gateway_internal_error_responses": metrics.gateway_internal_error_responses,
             "sessions_created": metrics.sessions_created,
             "sessions_deleted": metrics.sessions_deleted,
             "sessions_expired": metrics.sessions_expired,
@@ -7105,6 +7115,12 @@ agentk_mcp_http_body_too_large_responses_total {body_too_large_responses}\n\
 # HELP agentk_mcp_http_trusted_proxy_header_requests_total Requests carrying clean trusted proxy metadata.\n\
 # TYPE agentk_mcp_http_trusted_proxy_header_requests_total counter\n\
 agentk_mcp_http_trusted_proxy_header_requests_total {trusted_proxy_header_requests}\n\
+# HELP agentk_mcp_http_downstream_transport_error_responses_total Sanitized HTTP responses returned for downstream MCP spawn or transport failures.\n\
+# TYPE agentk_mcp_http_downstream_transport_error_responses_total counter\n\
+agentk_mcp_http_downstream_transport_error_responses_total {downstream_transport_error_responses}\n\
+# HELP agentk_mcp_http_gateway_internal_error_responses_total Sanitized HTTP responses returned for AgentK MCP HTTP gateway internal failures.\n\
+# TYPE agentk_mcp_http_gateway_internal_error_responses_total counter\n\
+agentk_mcp_http_gateway_internal_error_responses_total {gateway_internal_error_responses}\n\
 # HELP agentk_mcp_http_sessions_created_total Initialized MCP HTTP sessions created by this gateway.\n\
 # TYPE agentk_mcp_http_sessions_created_total counter\n\
 agentk_mcp_http_sessions_created_total {sessions_created}\n\
@@ -7147,11 +7163,105 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         header_too_large_responses = metrics.header_too_large_responses,
         body_too_large_responses = metrics.body_too_large_responses,
         trusted_proxy_header_requests = metrics.trusted_proxy_header_requests,
+        downstream_transport_error_responses = metrics.downstream_transport_error_responses,
+        gateway_internal_error_responses = metrics.gateway_internal_error_responses,
         sessions_created = metrics.sessions_created,
         sessions_deleted = metrics.sessions_deleted,
         sessions_expired = metrics.sessions_expired,
         session_not_found = metrics.session_not_found
     )
+}
+
+fn mcp_http_gateway_error_response(
+    request: &DashboardHttpRequest,
+    state: &Arc<McpHttpGatewayState>,
+    error: &AgentKError,
+) -> DashboardHttpResponse {
+    let downstream = mcp_http_error_is_downstream_transport(error);
+    let status = if downstream {
+        "502 Bad Gateway"
+    } else {
+        "500 Internal Server Error"
+    };
+    let message = if downstream {
+        "Downstream MCP gateway error"
+    } else {
+        "AgentK MCP HTTP gateway error"
+    };
+    let detail = if downstream {
+        "AgentK could not reach the configured downstream MCP server; raw command, environment, and payload values were not reflected"
+    } else {
+        "AgentK could not complete this MCP HTTP request; raw command, environment, and payload values were not reflected"
+    };
+
+    let mut response = if request.method == "POST"
+        && request.target.split('?').next() == Some(state.endpoint.as_str())
+    {
+        DashboardHttpResponse {
+            status,
+            content_type: "application/json",
+            headers: Vec::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": mcp_http_json_rpc_error_id(&request.body),
+                "error": {
+                    "code": if downstream { -32012 } else { -32603 },
+                    "message": message,
+                    "data": {
+                        "detail": detail,
+                        "agentk": {
+                            "proxy": "streamable-http",
+                            "mediated": false,
+                            "downstream_forwarded": false,
+                            "server_executed": false
+                        }
+                    }
+                }
+            }))
+            .unwrap_or_else(|_| b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"AgentK MCP HTTP gateway error\"}}\n".to_vec()),
+        }
+    } else {
+        dashboard_http_text(status, &format!("{message}\n"))
+    };
+
+    if request.target.split('?').next() == Some(state.endpoint.as_str())
+        && let Some(origin) = mcp_http_cors_origin(request, &state.allow_origins)
+    {
+        mcp_http_apply_cors_headers(&mut response, &origin);
+    }
+
+    response
+}
+
+fn mcp_http_error_is_downstream_transport(error: &AgentKError) -> bool {
+    match error {
+        AgentKError::InvalidMcpRequest(message) => {
+            message.contains("downstream MCP")
+                || message.contains("failed to spawn downstream MCP server process")
+        }
+        _ => false,
+    }
+}
+
+fn mcp_http_json_rpc_error_id(body: &[u8]) -> serde_json::Value {
+    let Ok(message) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return serde_json::Value::Null;
+    };
+    let Some(id) = message.get("id") else {
+        return serde_json::Value::Null;
+    };
+    match id {
+        serde_json::Value::Null => serde_json::Value::Null,
+        serde_json::Value::String(value) if value.len() <= MCP_HTTP_JSON_RPC_MAX_ID_BYTES => {
+            id.clone()
+        }
+        serde_json::Value::Number(number)
+            if number.as_i64().is_some() || number.as_u64().is_some() =>
+        {
+            id.clone()
+        }
+        _ => serde_json::Value::Null,
+    }
 }
 
 fn mcp_http_protocol_version_error(
@@ -12021,6 +12131,82 @@ done
         assert_eq!(metrics.sessions_deleted, 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_response_sanitizes_downstream_spawn_failures() {
+        let missing_command = "agentk-missing-downstream-command-9f8d7c6b";
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new(
+                "agent://test",
+                "http-missing-probe",
+                missing_command,
+            )
+            .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trust_proxy_headers: false,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Origin", "http://127.0.0.1:3000"),
+            ],
+            r#"{"jsonrpc":"2.0","id":"spawn-check","method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"CLIENT_SECRET_SHOULD_NOT_REFLECT","version":"0"}}}"#,
+        );
+
+        let response =
+            mcp_http_response(&initialize, &state).expect("spawn failure should return response");
+
+        assert_eq!(response.status, "502 Bad Gateway");
+        assert_eq!(response.content_type, "application/json");
+        assert_eq!(
+            response_header(&response, "Access-Control-Allow-Origin"),
+            Some("http://127.0.0.1:3000")
+        );
+        let body = String::from_utf8(response.body.clone()).expect("body should be utf8");
+        assert!(!body.contains(missing_command));
+        assert!(!body.contains("CLIENT_SECRET_SHOULD_NOT_REFLECT"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("response should be JSON-RPC");
+        assert_eq!(json["id"], serde_json::json!("spawn-check"));
+        assert_eq!(
+            json["error"]["message"],
+            serde_json::json!("Downstream MCP gateway error")
+        );
+        assert_eq!(
+            json["error"]["data"]["agentk"]["downstream_forwarded"],
+            serde_json::json!(false)
+        );
+        assert!(
+            state
+                .sessions
+                .lock()
+                .expect("session lock should not be poisoned")
+                .is_empty()
+        );
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.requests_total, 1);
+        assert_eq!(metrics.post_requests, 1);
+        assert_eq!(metrics.server_error_responses, 1);
+        assert_eq!(metrics.downstream_transport_error_responses, 1);
+        assert_eq!(metrics.gateway_internal_error_responses, 0);
+        assert_eq!(metrics.sessions_created, 0);
+    }
+
     #[test]
     fn mcp_http_response_handles_browser_cors_preflight_without_auth() {
         let state = Arc::new(McpHttpGatewayState {
@@ -13847,6 +14033,14 @@ done
             serde_json::json!(0)
         );
         assert_eq!(ready_json["body_too_large_responses"], serde_json::json!(0));
+        assert_eq!(
+            ready_json["downstream_transport_error_responses"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            ready_json["gateway_internal_error_responses"],
+            serde_json::json!(0)
+        );
         assert_eq!(ready_json["sessions_created"], serde_json::json!(0));
         assert_eq!(ready_json["session_not_found"], serde_json::json!(0));
 
@@ -13904,6 +14098,12 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_body_too_large_responses_total 0\n"));
+        assert!(
+            metrics_body.contains("agentk_mcp_http_downstream_transport_error_responses_total 0\n")
+        );
+        assert!(
+            metrics_body.contains("agentk_mcp_http_gateway_internal_error_responses_total 0\n")
+        );
         assert!(metrics_body.contains("agentk_mcp_http_sessions_created_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_session_not_found_total 0\n"));
         assert!(

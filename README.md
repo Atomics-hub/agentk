@@ -409,7 +409,11 @@ serves local `GET`/`HEAD` operational probes at `/healthz`,
 `/readyz` reports the supported MCP protocol version plus session,
 idle-timeout, and request body caps, while `/metrics` exposes redacted numeric
 gateway gauges plus cumulative request, preflight-rejection, session, and
-framing-rejection counters for service supervisors.
+framing-rejection counters for service supervisors. Downstream MCP spawn or
+transport failures are returned as sanitized HTTP 502 JSON-RPC errors without
+reflecting raw commands, environment values, request payloads, or downstream
+stderr, and readiness/metrics count those failures separately from internal
+gateway failures.
 All MCP HTTP `HEAD` responses omit bodies; `HEAD` on the MCP endpoint remains
 an unsupported method response with the normal `Allow` header.
 When `AGENTK_MCP_HTTP_TOKEN` is set, `/readyz` and `/metrics` require the same
