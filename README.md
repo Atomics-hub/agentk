@@ -240,10 +240,11 @@ ticket summary includes explicit objective checks for the MCP gateway, including
 loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
 reviewer-scoped team-store evidence, multi-user permissions proof for reviewer
 roles, identity coverage, and unauthorized rejection, Claude/Codex/Cursor
-sidecar onboarding, and GitHub/Postgres/Slack/filesystem safe-agent demo
-evidence including blocked filesystem patch proof, so reviewers can see product
-coverage without opening the full smoke report. The product coverage summary
-also includes accepted alpha
+sidecar onboarding proof for packaged client snippets and stdio/TCP/HTTP
+launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo evidence
+including blocked filesystem patch proof, so reviewers can see product coverage
+without opening the full smoke report. The product coverage summary also
+includes accepted alpha
 limits as explicit deferred-scope checks, so the same handoff distinguishes
 local/team sidecar readiness from hosted SaaS, live IdP, production secret
 retrieval, and public internet gateway claims.
