@@ -968,8 +968,9 @@ Then run
 `cargo run --locked -- release-publication-check --finalization dist/release-finalization.json --notes docs/v0.2-alpha-release-notes.md`
 to verify the strict finalization report, signed-tag evidence, production-ready
 evidence signer, package archive hash, release-manifest path, and final release
-notes evidence fields before creating the GitHub release page. This check is
-still offline; it does not tag, push, upload assets, or publish a release.
+notes evidence fields, plus owner-scoped publication steps, before creating the
+GitHub release page. This check is still offline; it does not tag, push, upload
+assets, or publish a release.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 

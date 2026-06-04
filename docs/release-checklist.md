@@ -321,8 +321,9 @@ cargo run --locked -- release-publication-check \
 These commands write and verify local JSON evidence only. They do not create a
 tag, push a tag, upload assets, or publish a GitHub release. The publication
 check also verifies the strict finalization report, package archive hash,
-signed-tag evidence, production-ready evidence signer, and final release-note
-evidence fields before a maintainer opens the GitHub release page.
+signed-tag evidence, production-ready evidence signer, final release-note
+evidence fields, and owner-scoped publication steps before a maintainer opens
+the GitHub release page.
 
 ## GitHub Release
 
