@@ -13212,6 +13212,7 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ("src/main.rs", "ReleaseTicket"),
                 ("src/main.rs", "objective: production MCP gateway"),
                 ("src/main.rs", "objective: safe-agent demo"),
+                ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),
                 ("src/main.rs", "accepted_limit_checks"),
                 ("README.md", "release-ticket"),

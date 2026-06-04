@@ -11664,23 +11664,112 @@ fn release_ticket_objective_checks(
             &["claude client", "codex cursor client", "client handoff json"],
             "client snippets, package check, and client handoff are release-ticket evidence",
         ),
-        release_ticket_objective_check(
-            smoke,
-            "objective: safe-agent demo",
-            &["safe-agent demo", "demo handoff", "store sync"],
-            &[
-                "trace",
-                "demo handoff json",
-                "team approvals",
-                "slack payloads",
-                "github payloads",
-                "postgres load",
-            ],
-            "safe-agent demo trace, handoff, store, notification, and Postgres artifacts are release-ticket evidence",
-        ),
+        release_ticket_safe_agent_demo_check(smoke),
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_safe_agent_demo_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let base_check = release_ticket_objective_check(
+        smoke,
+        "objective: safe-agent demo",
+        &["safe-agent demo", "demo handoff", "store sync"],
+        &[
+            "trace",
+            "demo handoff json",
+            "demo handoff markdown",
+            "team approvals",
+            "slack payloads",
+            "github payloads",
+            "postgres load",
+        ],
+        "safe-agent demo filesystem evidence, trace, handoff, store, notification, and Postgres artifacts are release-ticket evidence",
+    );
+    if base_check.status != ReadinessStatus::Pass {
+        return base_check;
+    }
+
+    match release_ticket_safe_agent_demo_filesystem_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "objective: safe-agent demo",
+            ReadinessStatus::Pass,
+            "safe-agent demo proves GitHub/Postgres/Slack/filesystem evidence, including allowed filesystem read and blocked filesystem patch",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("objective: safe-agent demo", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_safe_agent_demo_filesystem_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let demo_handoff = release_ticket_smoke_artifact(smoke, "demo handoff json")
+        .ok_or_else(|| "demo handoff json artifact is missing".to_string())?;
+    let bytes = fs::read(&demo_handoff.path).map_err(|err| {
+        format!(
+            "demo handoff json could not be read at {}: {err}",
+            demo_handoff.path.display()
+        )
+    })?;
+    let report = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "demo handoff json could not be parsed at {}: {err}",
+            demo_handoff.path.display()
+        )
+    })?;
+    let demo = report
+        .get("safe_agent_demo")
+        .or_else(|| {
+            report
+                .get("operator_handoff")
+                .and_then(|handoff| handoff.get("safe_agent_demo"))
+        })
+        .ok_or_else(|| "demo handoff json is missing safe_agent_demo".to_string())?;
+    let scenario = demo
+        .get("scenario")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    if !scenario.contains("GitHub/Postgres/Slack/filesystem") {
+        return Err(
+            "safe-agent demo scenario does not name GitHub/Postgres/Slack/filesystem".into(),
+        );
+    }
+    let agentk = demo
+        .get("agentk")
+        .ok_or_else(|| "safe-agent demo is missing agentk mode evidence".to_string())?;
+    let patch_executed = agentk
+        .get("filesystem_patch_executed")
+        .and_then(|value| value.as_bool());
+    if patch_executed != Some(false) {
+        return Err("safe-agent demo does not prove AgentK blocked filesystem patch".into());
+    }
+    let allowed_actions = agentk
+        .get("allowed_read_or_draft_actions")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    if allowed_actions < 4 {
+        return Err("safe-agent demo does not prove filesystem read plus GitHub/Postgres/Slack draft/read actions".into());
+    }
+    let scorecard_blocks_patch = demo
+        .get("scorecard")
+        .and_then(|value| value.as_array())
+        .is_some_and(|checks| {
+            checks.iter().any(|check| {
+                check.get("check").and_then(|value| value.as_str())
+                    == Some("Filesystem patch is blocked")
+                    && check.get("improved").and_then(|value| value.as_bool()) == Some(true)
+            })
+        });
+    if !scorecard_blocks_patch {
+        return Err(
+            "safe-agent demo scorecard does not prove filesystem patch blocking improved".into(),
+        );
+    }
+    Ok(())
 }
 
 fn release_ticket_objective_check(
@@ -11731,10 +11820,17 @@ fn release_ticket_smoke_step_passed(smoke: &ReleaseCandidateSmokeReport, name: &
 }
 
 fn release_ticket_smoke_artifact_present(smoke: &ReleaseCandidateSmokeReport, name: &str) -> bool {
+    release_ticket_smoke_artifact(smoke, name).is_some()
+}
+
+fn release_ticket_smoke_artifact<'a>(
+    smoke: &'a ReleaseCandidateSmokeReport,
+    name: &str,
+) -> Option<&'a ReleaseCandidateSmokeArtifact> {
     smoke
         .artifacts
         .iter()
-        .any(|artifact| artifact.name == name && artifact.present)
+        .find(|artifact| artifact.name == name && artifact.present)
 }
 
 fn release_ticket_check_item(
