@@ -11474,6 +11474,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .copied()
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
+    let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
     let accepted_limit_checks = release_ticket_accepted_limit_checks(&status);
     let accepted_limits_ready = !accepted_limit_checks.is_empty()
         && accepted_limit_checks
@@ -11567,6 +11568,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
                     .to_string()
             },
         ),
+        deploy_preflight_check,
     ];
     checks.extend(objective_checks);
     let ready = checks
@@ -11599,6 +11601,159 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     Ok(report)
 }
 
+fn release_ticket_deploy_preflight_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let missing_artifacts = [
+        "deploy handoff json",
+        "deploy handoff markdown",
+        "production preflight json",
+        "production preflight markdown",
+    ]
+    .iter()
+    .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+    .copied()
+    .collect::<Vec<_>>();
+    if !missing_artifacts.is_empty() {
+        return release_ticket_check_item(
+            "deploy/preflight handoff",
+            ReadinessStatus::Fail,
+            format!(
+                "missing deploy/preflight artifacts: {}",
+                missing_artifacts.join(", ")
+            ),
+        );
+    }
+
+    match release_ticket_deploy_preflight_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "deploy/preflight handoff",
+            ReadinessStatus::Pass,
+            "deploy/preflight evidence proves deploy templates, supervisor env examples, secret-reference placeholders, non-local bind defaults, no live secret retrieval, and local non-hosted scope",
+        ),
+        Err(detail) => {
+            release_ticket_check_item("deploy/preflight handoff", ReadinessStatus::Fail, detail)
+        }
+    }
+}
+
+fn release_ticket_deploy_preflight_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let deploy = release_ticket_json_artifact(smoke, "deploy handoff json")?;
+    let preflight = release_ticket_json_artifact(smoke, "production preflight json")?;
+
+    release_ticket_require_bool(&deploy, "passed", true, "deploy handoff json")?;
+    release_ticket_require_bool(
+        &deploy,
+        "local_team_sidecar_alpha",
+        true,
+        "deploy handoff json",
+    )?;
+    release_ticket_require_bool(&deploy, "hosted_saas", false, "deploy handoff json")?;
+    release_ticket_require_checks(
+        &deploy,
+        "deploy handoff json",
+        &[
+            ("package deploy templates", "baseline hardening markers"),
+            ("package deploy env examples", "required dummy values"),
+            (
+                "package HTTP/SSE handoff",
+                "bounded HTTP/SSE alpha contract",
+            ),
+            ("dashboard deploy env handoff", "loopback defaults"),
+            ("deploy scope", "TLS, external identity, and network policy"),
+        ],
+    )?;
+    release_ticket_require_artifacts(
+        &deploy,
+        "deploy handoff json",
+        &[
+            "deploy/systemd/agentk-sidecar-http.service",
+            "deploy/systemd/agentk-dashboard.service",
+            "deploy/docker/Dockerfile",
+            "deploy/docker/compose.yml",
+            "deploy/proxy/Caddyfile",
+            "deploy/proxy/nginx.conf",
+            "deploy/env/sidecar-http.env.example",
+            "deploy/env/dashboard.env.example",
+            "deploy/env/store-postgres.env.example",
+            "deploy/env/notifications.env.example",
+        ],
+    )?;
+
+    release_ticket_require_bool(&preflight, "passed", true, "production preflight json")?;
+    release_ticket_require_bool(
+        &preflight,
+        "local_team_sidecar_alpha",
+        true,
+        "production preflight json",
+    )?;
+    release_ticket_require_bool(
+        &preflight,
+        "hosted_saas",
+        false,
+        "production preflight json",
+    )?;
+    release_ticket_require_bool(
+        &preflight,
+        "live_secret_retrieval",
+        false,
+        "production preflight json",
+    )?;
+    release_ticket_require_bool(
+        &preflight,
+        "non_local_bind_defaults_disabled",
+        true,
+        "production preflight json",
+    )?;
+    if preflight
+        .get("placeholder_assignments")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        < 4
+    {
+        return Err("production preflight json does not prove placeholder coverage".to_string());
+    }
+    let secret_refs = preflight
+        .get("secret_refs")
+        .ok_or_else(|| "production preflight json is missing secret_refs".to_string())?;
+    if secret_refs
+        .get("secret_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        == 0
+    {
+        return Err(
+            "production preflight json does not prove secret-reference coverage".to_string(),
+        );
+    }
+    release_ticket_require_checks(
+        &preflight,
+        "production preflight json",
+        &[
+            ("secret reference manifest", "values are references"),
+            ("package deploy env examples", "required dummy values"),
+            ("placeholder coverage", "placeholders"),
+            ("non-local bind defaults", "non-local binds disabled"),
+            ("live secret retrieval", "without reading secret values"),
+            ("alpha scope", "hosted SaaS is false"),
+        ],
+    )?;
+    release_ticket_require_artifacts(
+        &preflight,
+        "production preflight json",
+        &[
+            "secret reference manifest",
+            "deploy/env/sidecar-http.env.example",
+            "deploy/env/dashboard.env.example",
+            "deploy/env/store-postgres.env.example",
+            "deploy/env/notifications.env.example",
+        ],
+    )?;
+    Ok(())
+}
+
 fn release_ticket_accepted_limit_checks(
     status: &agentk::AlphaReleaseStatusReport,
 ) -> Vec<ReleaseTicketCheckItem> {
@@ -11627,6 +11782,88 @@ fn release_ticket_objective_checks(
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_json_artifact(
+    smoke: &ReleaseCandidateSmokeReport,
+    name: &str,
+) -> Result<serde_json::Value, String> {
+    let artifact = release_ticket_smoke_artifact(smoke, name)
+        .ok_or_else(|| format!("{name} artifact is missing"))?;
+    let bytes = fs::read(&artifact.path).map_err(|err| {
+        format!(
+            "{name} could not be read at {}: {err}",
+            artifact.path.display()
+        )
+    })?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "{name} could not be parsed at {}: {err}",
+            artifact.path.display()
+        )
+    })
+}
+
+fn release_ticket_require_bool(
+    report: &serde_json::Value,
+    field: &str,
+    expected: bool,
+    label: &str,
+) -> Result<(), String> {
+    if report.get(field).and_then(|value| value.as_bool()) == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("{label} does not prove {field} == {expected}"))
+    }
+}
+
+fn release_ticket_require_checks(
+    report: &serde_json::Value,
+    label: &str,
+    required: &[(&str, &str)],
+) -> Result<(), String> {
+    let checks = report
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing checks"))?;
+    for (name, detail_fragment) in required {
+        let passed = checks.iter().any(|check| {
+            check.get("name").and_then(|value| value.as_str()) == Some(*name)
+                && matches!(
+                    check.get("status").and_then(|value| value.as_str()),
+                    Some("pass" | "warn")
+                )
+                && check
+                    .get("detail")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|detail| detail.contains(detail_fragment))
+        });
+        if !passed {
+            return Err(format!("{label} does not prove {name}: {detail_fragment}"));
+        }
+    }
+    Ok(())
+}
+
+fn release_ticket_require_artifacts(
+    report: &serde_json::Value,
+    label: &str,
+    required: &[&str],
+) -> Result<(), String> {
+    let artifacts = report
+        .get("artifacts")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing artifacts"))?;
+    for name in required {
+        let present = artifacts.iter().any(|artifact| {
+            artifact.get("name").and_then(|value| value.as_str()) == Some(*name)
+                && artifact.get("present").and_then(|value| value.as_bool()) == Some(true)
+        });
+        if !present {
+            return Err(format!("{label} does not prove required artifact {name}"));
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_claude_codex_cursor_sidecar_check(

@@ -142,9 +142,11 @@ Claude/Codex/Cursor sidecar onboarding proof for packaged client snippets and
 stdio/TCP/HTTP launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo
 including blocked filesystem patch proof, plus accepted-limit checks that keep
 hosted SaaS, live IdP, production secret retrieval, public internet gateway,
-and similar deferred-scope claims out of the alpha handoff. It does not tag,
-push, upload, or publish. The remaining commands keep the individual gates
-visible for manual review and final publication.
+and similar deferred-scope claims out of the alpha handoff. The same ticket
+checks deploy/preflight handoff evidence for templates, placeholders,
+secret-reference manifests, non-local bind defaults, and no live secret
+retrieval. It does not tag, push, upload, or publish. The remaining commands
+keep the individual gates visible for manual review and final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:

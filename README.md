@@ -244,7 +244,8 @@ sidecar onboarding proof for packaged client snippets and stdio/TCP/HTTP
 launchers, and GitHub/Postgres/Slack/filesystem safe-agent demo evidence
 including blocked filesystem patch proof, so reviewers can see product coverage
 without opening the full smoke report. The product coverage summary also
-includes accepted alpha
+checks deploy/preflight handoff evidence for templates, placeholders,
+secret-reference manifests, and non-local bind defaults. It also includes accepted alpha
 limits as explicit deferred-scope checks, so the same handoff distinguishes
 local/team sidecar readiness from hosted SaaS, live IdP, production secret
 retrieval, and public internet gateway claims.
