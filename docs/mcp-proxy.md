@@ -647,17 +647,17 @@ trace evidence.
 
 ## Current Limits
 
-This is the local subprocess proxy path: stdio for MCP clients that launch a
-command directly, plus bounded localhost TCP JSONL and Streamable HTTP POST
-adapters for internal integrations. It is suitable for local review,
-release-audit smoke coverage, and integration experiments. A complete
-production MCP transport still needs a hardened server packaging story, SSE
-streaming, hosted deployment guidance, live external identity/auth integration, TLS
-termination, and operational key management. The current boundary mediates tool
-listing/calls, resource
-listing/reads, and prompt listing/gets; child stderr is suppressed rather than
-treated as evidence. Resource subscription flows still need explicit policy
-contracts and are not forwarded as generic passthrough.
+This is the installable local/team sidecar path: stdio for MCP clients that
+launch a command directly, plus bounded localhost TCP JSONL and Streamable HTTP
+POST/SSE adapters for internal deployments. It is suitable for local review,
+release-audit smoke coverage, team sidecar trials, and deployment-ticket
+handoff. A complete hosted production MCP service still needs hosted deployment
+guidance, live external identity/auth integration, TLS termination, operational
+key management, and a maintained public distribution channel. The current
+boundary mediates tool listing/calls, resource listing/reads, and prompt
+listing/gets; child stderr is suppressed rather than treated as evidence.
+Resource subscription flows still need explicit policy contracts and are not
+forwarded as generic passthrough.
 
-The v0.1 release disposition for these limits is tracked in
+The earlier v0.1 release disposition for the original proxy limits is tracked in
 [`docs/v0.1-limit-disposition.md`](v0.1-limit-disposition.md).

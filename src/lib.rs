@@ -13365,6 +13365,31 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
             ],
             &["README.md", "agentk --help"],
         ),
+        alpha_release_source_surface(
+            root,
+            "productization plan matches v0.2 sidecar",
+            "productization plan names the current v0.2 alpha sidecar, release-ticket bundle, and accepted local/team limits",
+            &[
+                (
+                    "docs/productization-plan.md",
+                    "v0.2 alpha release candidate",
+                ),
+                (
+                    "docs/productization-plan.md",
+                    "installable local/team MCP sidecar",
+                ),
+                ("docs/productization-plan.md", "Claude, Codex, Cursor"),
+                ("docs/productization-plan.md", "release-ticket"),
+                (
+                    "docs/productization-plan.md",
+                    "top-level artifact inventory",
+                ),
+                ("docs/productization-plan.md", "hosted control plane"),
+                ("docs/mcp-proxy.md", "installable local/team sidecar path"),
+                ("docs/mcp-proxy.md", "POST/SSE adapters"),
+            ],
+            &["docs/productization-plan.md", "docs/mcp-proxy.md"],
+        ),
     ]
 }
 
@@ -37520,8 +37545,18 @@ reviewer = "tom"
             "release-candidate-smoke sidecar-package-release-manifest sidecar-package-release-manifest-check release-ticket top-level artifact inventory",
         )
         .expect("public readiness fixture should be writable");
-        fs::write(root.join("docs/productization-plan.md"), "v0.2 alpha")
-            .expect("productization fixture should be writable");
+        fs::write(
+            root.join("docs/productization-plan.md"),
+            "v0.2 alpha release candidate installable local/team MCP sidecar \
+             Claude, Codex, Cursor release-ticket top-level artifact inventory \
+             hosted control plane",
+        )
+        .expect("productization fixture should be writable");
+        fs::write(
+            root.join("docs/mcp-proxy.md"),
+            "installable local/team sidecar path Streamable HTTP POST/SSE",
+        )
+        .expect("mcp proxy fixture should be writable");
 
         let report = alpha_release_status_report(&root);
 
