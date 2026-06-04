@@ -9927,12 +9927,21 @@ struct ReleaseTicketReport {
     smoke_evidence: PathBuf,
     finalization: PathBuf,
     ticket: PathBuf,
+    artifacts: Vec<ReleaseTicketArtifact>,
     checks: Vec<ReleaseTicketCheckItem>,
     accepted_limit_checks: Vec<ReleaseTicketCheckItem>,
     status: agentk::AlphaReleaseStatusReport,
     smoke: ReleaseCandidateSmokeReport,
     evidence_check: ReleaseEvidenceCheckReport,
     finalization_report: ReleaseFinalizeReport,
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseTicketArtifact {
+    name: String,
+    path: PathBuf,
+    bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -11282,6 +11291,17 @@ fn release_ticket(
         for check in &report.checks {
             println!("[{}] {:<24} {}", check.status, check.name, check.detail);
         }
+        println!();
+        println!("Artifacts");
+        for artifact in &report.artifacts {
+            println!(
+                "- {:<28} {} ({} bytes, sha256 {})",
+                artifact.name,
+                artifact.path.display(),
+                artifact.bytes,
+                artifact.sha256
+            );
+        }
     }
 
     if !report.ready {
@@ -11477,7 +11497,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let install_package_check = release_ticket_install_package_provenance_check(&smoke);
     let store_notification_check = release_ticket_store_notification_handoff_check(&smoke);
     let served_dashboard_runtime_check = release_ticket_served_dashboard_runtime_check(&smoke);
-    let homebrew_handoff_check = release_ticket_homebrew_handoff_check(&out, &release, &smoke)?;
+    let homebrew_handoff = release_ticket_homebrew_handoff_check(&out, &release, &smoke)?;
     let quickstart_check = release_ticket_quickstart_handoff_check(&smoke);
     let support_handoff_check = release_ticket_support_doctor_handoff_check(&smoke);
     let deploy_preflight_check = release_ticket_deploy_preflight_check(&smoke);
@@ -11577,7 +11597,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         install_package_check,
         store_notification_check,
         served_dashboard_runtime_check,
-        homebrew_handoff_check,
+        homebrew_handoff.check,
         quickstart_check,
         support_handoff_check,
         deploy_preflight_check,
@@ -11586,6 +11606,13 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     let ready = checks
         .iter()
         .all(|check| check.status != ReadinessStatus::Fail);
+
+    let mut artifacts = vec![
+        release_ticket_artifact("release status", &release_status_path)?,
+        release_ticket_artifact("smoke evidence", &smoke_evidence)?,
+        release_ticket_artifact("finalization", &finalization)?,
+    ];
+    artifacts.extend(homebrew_handoff.artifacts);
 
     let report = ReleaseTicketReport {
         schema_version: RELEASE_TICKET_SCHEMA_VERSION,
@@ -11598,6 +11625,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         smoke_evidence,
         finalization,
         ticket: ticket.clone(),
+        artifacts,
         checks,
         accepted_limit_checks,
         status,
@@ -11613,13 +11641,19 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     Ok(report)
 }
 
+struct ReleaseTicketHomebrewHandoff {
+    check: ReleaseTicketCheckItem,
+    artifacts: Vec<ReleaseTicketArtifact>,
+}
+
 fn release_ticket_homebrew_handoff_check(
     out: &Path,
     release: &str,
     smoke: &ReleaseCandidateSmokeReport,
-) -> Result<ReleaseTicketCheckItem, AgentKError> {
-    let report = release_ticket_homebrew_handoff_evidence(out, release, smoke)?;
-    let status = if report
+) -> Result<ReleaseTicketHomebrewHandoff, AgentKError> {
+    let evidence = release_ticket_homebrew_handoff_evidence(out, release, smoke)?;
+    let status = if evidence
+        .report
         .get("passed")
         .and_then(|value| value.as_bool())
         .unwrap_or_default()
@@ -11628,18 +11662,26 @@ fn release_ticket_homebrew_handoff_check(
     } else {
         ReadinessStatus::Fail
     };
-    Ok(release_ticket_check_item(
-        "Homebrew handoff",
-        status,
-        "Homebrew handoff evidence proves local formula generation, archive SHA verification, tap checkout byte match, dirty-path hygiene, and no tap publication",
-    ))
+    Ok(ReleaseTicketHomebrewHandoff {
+        check: release_ticket_check_item(
+            "Homebrew handoff",
+            status,
+            "Homebrew handoff evidence proves local formula generation, archive SHA verification, tap checkout byte match, dirty-path hygiene, and no tap publication artifacts",
+        ),
+        artifacts: evidence.artifacts,
+    })
+}
+
+struct ReleaseTicketHomebrewEvidence {
+    report: serde_json::Value,
+    artifacts: Vec<ReleaseTicketArtifact>,
 }
 
 fn release_ticket_homebrew_handoff_evidence(
     out: &Path,
     release: &str,
     smoke: &ReleaseCandidateSmokeReport,
-) -> Result<serde_json::Value, AgentKError> {
+) -> Result<ReleaseTicketHomebrewEvidence, AgentKError> {
     let homebrew_root = out.join("homebrew-handoff");
     let tap_root = homebrew_root.join("homebrew-agentk");
     let tap_formula = tap_root.join("Formula/agentk.rb");
@@ -11742,10 +11784,18 @@ fn release_ticket_homebrew_handoff_evidence(
     });
     let report_path = homebrew_root.join("homebrew-handoff.json");
     fs::write(
-        report_path,
+        &report_path,
         format!("{}\n", serde_json::to_string_pretty(&report)?),
     )?;
-    Ok(report)
+    let artifacts = vec![
+        release_ticket_artifact("Homebrew formula", &formula)?,
+        release_ticket_artifact("Homebrew formula report", &formula_json)?,
+        release_ticket_artifact("Homebrew formula check", &formula_check_json)?,
+        release_ticket_artifact("Homebrew tap formula", &tap_formula)?,
+        release_ticket_artifact("Homebrew tap handoff check", &tap_check_json)?,
+        release_ticket_artifact("Homebrew handoff report", &report_path)?,
+    ];
+    Ok(ReleaseTicketHomebrewEvidence { report, artifacts })
 }
 
 fn release_ticket_git_init(path: &Path) -> Result<(), AgentKError> {
@@ -11763,6 +11813,20 @@ fn release_ticket_git_init(path: &Path) -> Result<(), AgentKError> {
             path.display()
         )))
     }
+}
+
+fn release_ticket_artifact(
+    name: impl Into<String>,
+    path: impl AsRef<Path>,
+) -> Result<ReleaseTicketArtifact, AgentKError> {
+    let path = path.as_ref();
+    let metadata = fs::metadata(path)?;
+    Ok(ReleaseTicketArtifact {
+        name: name.into(),
+        path: path.to_path_buf(),
+        bytes: metadata.len(),
+        sha256: release_candidate_smoke_file_sha256(path)?,
+    })
 }
 
 fn release_ticket_served_dashboard_runtime_check(
