@@ -36,10 +36,13 @@ keep the same checks in CI and protect the default branch.
 - [ ] `cargo run -- release-audit` passes.
 - [ ] `cargo run --locked -- release-status --json` reports the shipped alpha
       surfaces, accepted limits, final blockers, and verification gates.
-- [ ] `cargo run --locked -- release-candidate-smoke --json` passes and writes
-      package, archive, install receipt, verified release manifest, demo trace,
-      dashboard, durable store, operator handoff, notification payload, and
-      deploy-template artifacts.
+- [ ] `cargo run --locked -- release-candidate-smoke --root
+      dist/release-candidate-smoke --force --keep-root --evidence-out
+      dist/release-candidate-smoke.json --json` passes and writes package,
+      archive, install receipt, verified release manifest, demo trace,
+      dashboard, durable store, operator handoff, notification payload,
+      deploy-template artifacts, and a JSON evidence report with SHA-256/byte
+      counts for required handoff files.
 - [ ] `cargo run --locked -- sidecar-package-http-handoff-check --root
       dist/agentk-sidecar --json` passes and the reviewer handoff includes
       `clients/http-sse-handoff.md` with bounded local HTTP/SSE alpha language.
@@ -129,7 +132,7 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features
 cargo run --locked -- release-status --json
-cargo run --locked -- release-candidate-smoke --json
+cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json

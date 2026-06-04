@@ -26,6 +26,7 @@ use agentk::{
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
@@ -955,6 +956,9 @@ enum Command {
         /// Keep the auto-created temporary root after a successful run.
         #[arg(long)]
         keep_root: bool,
+        /// Optional JSON evidence report to attach to a release or deployment ticket.
+        #[arg(long)]
+        evidence_out: Option<PathBuf>,
         /// Emit the full smoke report as JSON.
         #[arg(long)]
         json: bool,
@@ -1399,8 +1403,9 @@ fn run() -> Result<(), AgentKError> {
             root,
             force,
             keep_root,
+            evidence_out,
             json,
-        } => release_candidate_smoke(root, force, keep_root, json),
+        } => release_candidate_smoke(root, force, keep_root, evidence_out, json),
         Command::ReleaseHomebrewFormula {
             source_url,
             sha256,
@@ -8589,6 +8594,7 @@ struct ReleaseCandidateSmokeReport {
     package_archive: PathBuf,
     package_archive_checksum: PathBuf,
     package_release_manifest: PathBuf,
+    evidence_report: Option<PathBuf>,
     installed_package: PathBuf,
     package_archive_sha256: String,
     trace_path: PathBuf,
@@ -8616,15 +8622,21 @@ struct ReleaseCandidateSmokeArtifact {
     name: String,
     path: PathBuf,
     present: bool,
+    bytes: Option<u64>,
+    sha256: Option<String>,
 }
 
 fn release_candidate_smoke(
     root: Option<PathBuf>,
     force: bool,
     keep_root: bool,
+    evidence_out: Option<PathBuf>,
     json: bool,
 ) -> Result<(), AgentKError> {
-    let report = run_release_candidate_smoke(root, force, keep_root)?;
+    let report = run_release_candidate_smoke(root, force, keep_root, evidence_out)?;
+    if let Some(path) = &report.evidence_report {
+        write_release_candidate_smoke_evidence(&report, path, force)?;
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -8641,6 +8653,9 @@ fn release_candidate_smoke(
     println!("archive   {}", report.package_archive.display());
     println!("checksum  {}", report.package_archive_checksum.display());
     println!("handoff   {}", report.package_release_manifest.display());
+    if let Some(path) = &report.evidence_report {
+        println!("evidence  {}", path.display());
+    }
     println!("installed {}", report.installed_package.display());
     println!("archive-sha {}", report.package_archive_sha256);
     println!("trace     {}", report.trace_path.display());
@@ -8667,6 +8682,9 @@ fn release_candidate_smoke(
             artifact.name,
             artifact.path.display()
         );
+        if let (Some(bytes), Some(sha256)) = (artifact.bytes, artifact.sha256.as_deref()) {
+            println!("       bytes {:<14} sha256 {}", bytes, sha256);
+        }
     }
 
     if !report.passed {
@@ -8725,9 +8743,28 @@ fn run_release_candidate_smoke(
     root: Option<PathBuf>,
     force: bool,
     keep_root: bool,
+    evidence_out: Option<PathBuf>,
 ) -> Result<ReleaseCandidateSmokeReport, AgentKError> {
     let explicit_root = root.is_some();
     let root = root.unwrap_or_else(release_candidate_smoke_temp_root);
+    let kept_root = explicit_root || keep_root;
+    if let Some(path) = &evidence_out {
+        if path.exists() && !force {
+            return Err(AgentKError::FileExists(path.clone()));
+        }
+        if path.is_dir() {
+            return Err(AgentKError::InvalidMcpRequest(format!(
+                "release candidate smoke evidence path is a directory: {}",
+                path.display()
+            )));
+        }
+        if path.starts_with(&root) && !kept_root {
+            return Err(AgentKError::InvalidMcpRequest(
+                "release candidate smoke evidence must be outside a temporary root unless --keep-root or explicit --root is used"
+                    .to_string(),
+            ));
+        }
+    }
     if root.exists() {
         if !root.is_dir() {
             return Err(AgentKError::InvalidMcpRequest(format!(
@@ -9080,97 +9117,97 @@ fn run_release_candidate_smoke(
         &mut artifacts,
         "manifest",
         installed_package.join("manifest.json"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "package lock",
         installed_package.join("package.lock.json"),
-    );
-    release_candidate_smoke_artifact(&mut artifacts, "package archive", package_archive.clone());
+    )?;
+    release_candidate_smoke_artifact(&mut artifacts, "package archive", package_archive.clone())?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "package archive checksum",
         package_archive_report.checksum.clone(),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "release manifest",
         package_release_manifest.clone(),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "install receipt",
         install_receipt_path.clone(),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "claude client",
         installed_package.join("clients/claude-desktop.mcp.json"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "codex cursor client",
         installed_package.join("clients/codex-cursor-command.txt"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "http sse handoff",
         installed_package.join("clients/http-sse-handoff.md"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "team audit dashboard handoff",
         installed_package.join("clients/team-audit-dashboard-handoff.md"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "operator handoff json",
         operator_handoff_json,
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "operator handoff markdown",
         operator_handoff_markdown,
-    );
-    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor json", doctor_json);
-    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor markdown", doctor_markdown);
-    release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone());
-    release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone());
+    )?;
+    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor json", doctor_json)?;
+    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor markdown", doctor_markdown)?;
+    release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
+    release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "store readme",
         store_export_root.join("README.md"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "postgres load",
         store_export_root.join("postgres/load.sql"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "team approvals",
         team_store_root.join("current/approvals.json"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "slack payloads",
         slack_payload_root.join("payloads.jsonl"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "github payloads",
         github_payload_root.join("payloads.jsonl"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "email payloads",
         email_payload_root.join("payloads.jsonl"),
-    );
+    )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
         "docker compose",
         installed_package.join("deploy/docker/compose.yml"),
-    );
+    )?;
 
     if let Some(missing) = artifacts.iter().find(|artifact| !artifact.present) {
         return Err(AgentKError::InvalidMcpRequest(format!(
@@ -9180,7 +9217,6 @@ fn run_release_candidate_smoke(
         )));
     }
 
-    let kept_root = explicit_root || keep_root;
     if !kept_root {
         fs::remove_dir_all(&root)?;
     }
@@ -9191,6 +9227,7 @@ fn run_release_candidate_smoke(
         package_archive,
         package_archive_checksum: package_archive_report.checksum,
         package_release_manifest,
+        evidence_report: evidence_out,
         installed_package,
         package_archive_sha256: package_archive_report.sha256,
         trace_path,
@@ -9262,13 +9299,63 @@ fn release_candidate_smoke_artifact(
     artifacts: &mut Vec<ReleaseCandidateSmokeArtifact>,
     name: &str,
     path: PathBuf,
-) {
-    let present = path.exists();
+) -> Result<(), AgentKError> {
+    let metadata = fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let (present, bytes, sha256) = match metadata {
+        Some(metadata) => (
+            true,
+            Some(metadata.len()),
+            Some(release_candidate_smoke_file_sha256(&path)?),
+        ),
+        None => (false, None, None),
+    };
     artifacts.push(ReleaseCandidateSmokeArtifact {
         name: name.to_string(),
         path,
         present,
+        bytes,
+        sha256,
     });
+    Ok(())
+}
+
+fn release_candidate_smoke_file_sha256(path: &Path) -> Result<String, AgentKError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn write_release_candidate_smoke_evidence(
+    report: &ReleaseCandidateSmokeReport,
+    path: &Path,
+    force: bool,
+) -> Result<(), AgentKError> {
+    if path.exists() && !force {
+        return Err(AgentKError::FileExists(path.to_path_buf()));
+    }
+    if path.is_dir() {
+        return Err(AgentKError::InvalidMcpRequest(format!(
+            "release candidate smoke evidence path is a directory: {}",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(report)?)?;
+    Ok(())
 }
 
 fn release_candidate_smoke_temp_root() -> PathBuf {
@@ -13748,6 +13835,8 @@ done
             "release-candidate-smoke",
             "--root",
             "agentk-rc-smoke",
+            "--evidence-out",
+            "dist/release-candidate-smoke.json",
             "--force",
             "--keep-root",
         ])
@@ -13756,12 +13845,17 @@ done
             root,
             force,
             keep_root,
+            evidence_out,
             ..
         }) = release_candidate_smoke.command
         else {
             panic!("expected release-candidate-smoke command");
         };
         assert_eq!(root, Some(PathBuf::from("agentk-rc-smoke")));
+        assert_eq!(
+            evidence_out,
+            Some(PathBuf::from("dist/release-candidate-smoke.json"))
+        );
         assert!(force);
         assert!(keep_root);
 
@@ -14152,12 +14246,84 @@ done
         let root = test_temp_path("agentk-rc-smoke-existing", "dir");
         fs::create_dir_all(&root).expect("root should create");
 
-        let error = run_release_candidate_smoke(Some(root.clone()), false, true)
+        let error = run_release_candidate_smoke(Some(root.clone()), false, true, None)
             .expect_err("existing root should require force")
             .to_string();
         assert!(error.contains("already exists"));
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn release_candidate_smoke_artifacts_record_file_size_and_hash() {
+        let path = test_temp_path("agentk-rc-smoke-artifact", "txt");
+        fs::write(&path, b"agentk\n").expect("artifact should write");
+
+        let mut artifacts = Vec::new();
+        release_candidate_smoke_artifact(&mut artifacts, "sample", path.clone())
+            .expect("artifact should hash");
+
+        assert_eq!(artifacts.len(), 1);
+        assert!(artifacts[0].present);
+        assert_eq!(artifacts[0].bytes, Some(7));
+        assert_eq!(
+            artifacts[0].sha256,
+            Some(release_candidate_smoke_file_sha256(&path).expect("hash should compute"))
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn release_candidate_smoke_evidence_requires_force_to_overwrite() {
+        let out = test_temp_path("agentk-rc-smoke-evidence", "json");
+        let report = ReleaseCandidateSmokeReport {
+            root: PathBuf::from("root"),
+            package: PathBuf::from("root/dist/agentk-sidecar"),
+            package_archive: PathBuf::from("root/dist/agentk-sidecar.tar"),
+            package_archive_checksum: PathBuf::from("root/dist/agentk-sidecar.tar.sha256"),
+            package_release_manifest: PathBuf::from(
+                "root/dist/agentk-sidecar-release-manifest.json",
+            ),
+            evidence_report: Some(out.clone()),
+            installed_package: PathBuf::from("root/installed/agentk-sidecar"),
+            package_archive_sha256:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            trace_path: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl",
+            ),
+            dashboard_path: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/dashboard.html",
+            ),
+            store_export_root: PathBuf::from("root/installed/agentk-sidecar/sidecar/.agentk/store"),
+            team_store_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/team-store",
+            ),
+            slack_payload_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/slack",
+            ),
+            github_payload_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/github",
+            ),
+            kept_root: true,
+            passed: true,
+            steps: Vec::new(),
+            artifacts: Vec::new(),
+        };
+
+        write_release_candidate_smoke_evidence(&report, &out, false)
+            .expect("first evidence write should pass");
+        let error = write_release_candidate_smoke_evidence(&report, &out, false)
+            .expect_err("second evidence write should require force")
+            .to_string();
+        assert!(error.contains("already exists"));
+        write_release_candidate_smoke_evidence(&report, &out, true)
+            .expect("force should overwrite evidence");
+        let content = fs::read_to_string(&out).expect("evidence should read");
+        assert!(content.contains("package_archive_sha256"));
+        assert!(content.contains("evidence_report"));
+
+        let _ = fs::remove_file(out);
     }
 
     #[test]

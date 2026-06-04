@@ -228,7 +228,11 @@ release blockers, and verification gates.
 Run the packaged sidecar release-candidate smoke:
 
 ```sh
-cargo run --locked -- release-candidate-smoke
+cargo run --locked -- release-candidate-smoke \
+  --root dist/release-candidate-smoke \
+  --force \
+  --keep-root \
+  --evidence-out dist/release-candidate-smoke.json
 ```
 
 Run the strict pre-push audit with a configured signing key file:
@@ -790,15 +794,15 @@ dist/agentk-sidecar/bin/agentk-store-email-send --dry-run
 
 Maintainers can run `cargo run --locked -- release-status` to summarize the
 v0.2 alpha shipped surfaces, accepted limits, final blockers, and verification
-gates. Run `cargo run --locked -- release-candidate-smoke` to recreate the
-package, `dist/agentk-sidecar.tar`, and
-`dist/agentk-sidecar.tar.sha256`, write
-`dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
-packaged HTTP and team handoff checks, safe-agent demo, dashboard, sidecar
-check, store export/check/sync, operator handoff artifact,
-release-manifest check, sidecar doctor release-manifest binding,
-Slack/GitHub/email payload exporters, and Postgres dry-run push launchers, then
-verify the install receipt and other artifacts before a release branch or tag.
+gates. Run
+`cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json`
+to recreate the package, archive, checksum, and release manifest in a
+repo-local smoke root, execute the packaged HTTP and team handoff checks,
+safe-agent demo, dashboard, sidecar check, store export/check/sync, operator
+handoff artifact, release-manifest check, sidecar doctor release-manifest
+binding, Slack/GitHub/email payload exporters, and Postgres dry-run push
+launchers, then write one JSON evidence report with SHA-256 and byte counts for
+the required handoff artifacts before a release branch or tag.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
 
