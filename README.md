@@ -239,7 +239,10 @@ This creates `release-status.json`, `release-candidate-smoke.json`,
 ticket summary includes explicit objective checks for the MCP gateway,
 approval/audit dashboard, multi-user permissions, Claude/Codex/Cursor sidecar
 onboarding, and safe-agent demo evidence so reviewers can see product coverage
-without opening the full smoke report.
+without opening the full smoke report. It also includes accepted alpha limits
+as explicit deferred-scope checks, so the same handoff distinguishes local/team
+sidecar readiness from hosted SaaS, live IdP, production secret retrieval, and
+public internet gateway claims.
 
 Or run the packaged sidecar release-candidate gates individually:
 
@@ -911,7 +914,8 @@ gates. Run `cargo run --locked -- release-ticket --out dist/release-ticket --for
 to create one offline reviewer handoff directory containing release status,
 release-candidate smoke evidence, evidence-check results, finalization evidence,
 and a summary ticket JSON with explicit product-objective coverage checks,
-without tagging, pushing, uploading, or publishing.
+accepted alpha limits, and deferred-scope checks, without tagging, pushing,
+uploading, or publishing.
 The individual steps remain available: run
 `cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json`
 to recreate the package, archive, checksum, and release manifest in a

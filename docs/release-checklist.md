@@ -136,9 +136,11 @@ writes release status, smoke evidence, evidence-check results, finalization
 evidence, and a summary ticket JSON under `dist/release-ticket/`; the ticket
 summary includes explicit product-objective checks for the MCP gateway,
 approval/audit dashboard, multi-user permissions, Claude/Codex/Cursor sidecar,
-and safe-agent demo. It does not tag, push, upload, or publish. The remaining
-commands keep the individual gates visible for manual review and final
-publication.
+and safe-agent demo, plus accepted-limit checks that keep hosted SaaS, live
+IdP, production secret retrieval, public internet gateway, and similar
+deferred-scope claims out of the alpha handoff. It does not tag, push, upload,
+or publish. The remaining commands keep the individual gates visible for manual
+review and final publication.
 
 For manual reviewer handoff, also keep the explicit package commands available
 in the release notes or deployment ticket:
