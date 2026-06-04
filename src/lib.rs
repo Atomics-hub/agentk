@@ -13584,14 +13584,25 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "release publication preflight",
-            "release-publication-check validates strict finalization, signed tag evidence, package archive hash, and final release notes before GitHub publication",
+            "release-publication-check validates strict finalization, signed tag evidence, package archive hash, final release notes, and owner-scoped publication steps before GitHub publication",
             &[
                 ("src/main.rs", "ReleasePublicationCheck"),
+                ("src/main.rs", "publication_steps"),
+                ("src/main.rs", "GitHub release owner"),
                 ("README.md", "release-publication-check"),
+                ("README.md", "owner-scoped publication steps"),
                 ("docs/release-checklist.md", "release-publication-check"),
+                (
+                    "docs/release-checklist.md",
+                    "owner-scoped publication steps",
+                ),
                 (
                     "docs/v0.2-alpha-release-notes.md",
                     "release-publication-check",
+                ),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "owner-scoped publication steps",
                 ),
             ],
             &[
