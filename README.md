@@ -572,6 +572,12 @@ SHA-256 hashes, then writes
 `sidecar/.agentk/support-bundle/support-bundle.json` and
 `sidecar/.agentk/support-bundle/support-bundle.md` without uploading anything
 to a hosted service.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json` before a
+service-manager, Docker, or reverse-proxy deployment review. It validates the
+packaged service templates and supervisor env examples, then writes
+`sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
+`sidecar/.agentk/deploy-handoff/deploy-handoff.md` with SHA-256 hashes for
+deployment tickets.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -822,6 +828,7 @@ AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
   installed/agentk-sidecar/bin/agentk-sidecar-doctor --json
 AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
   installed/agentk-sidecar/bin/agentk-sidecar-support-bundle --json
+installed/agentk-sidecar/bin/agentk-sidecar-deploy-handoff --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
@@ -849,9 +856,9 @@ The individual steps remain available: run
 to recreate the package, archive, checksum, and release manifest in a
 repo-local smoke root, execute the packaged HTTP and team handoff checks,
 safe-agent demo, dashboard, sidecar check, store export/check/sync, operator
-handoff artifact, support bundle JSON/Markdown, release-manifest check,
-sidecar doctor release-manifest binding, Slack/GitHub/email payload exporters,
-and Postgres dry-run push
+handoff artifact, support bundle JSON/Markdown, deploy handoff JSON/Markdown,
+release-manifest check, sidecar doctor release-manifest binding,
+Slack/GitHub/email payload exporters, and Postgres dry-run push
 launchers, then write one JSON evidence report with SHA-256 and byte counts for
 the required handoff artifacts before a release branch or tag. Then run
 `cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke`

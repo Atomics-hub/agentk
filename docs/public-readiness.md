@@ -41,10 +41,10 @@ keep the same checks in CI and protect the default branch.
       dist/release-candidate-smoke.json --json` passes and writes package,
       archive, install receipt, verified release manifest, package-check JSON,
       HTTP/team handoff check JSON, onboarding guide, demo trace, dashboard,
-      durable store, operator handoff, notification payload, systemd/launchd
-      services, Dockerfile/Compose templates, deploy README, dummy env examples,
-      and a JSON evidence report with SHA-256/byte counts for required handoff
-      files.
+      durable store, operator handoff, deploy handoff, notification payload,
+      systemd/launchd services, Dockerfile/Compose templates, deploy README,
+      dummy env examples, and a JSON evidence report with SHA-256/byte counts
+      for required handoff files.
 - [ ] `cargo run --locked -- release-evidence-check --evidence
       dist/release-candidate-smoke.json --root dist/release-candidate-smoke
       --json` passes before the evidence report is attached to a release or
@@ -81,6 +81,11 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/support-bundle/support-bundle.md` with refreshed
       operator handoff, doctor output, and hashed package/dashboard/store/
       trace/notification evidence for support archive.
+- [ ] `cargo run --locked -- sidecar-package-deploy-handoff --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
+      `sidecar/.agentk/deploy-handoff/deploy-handoff.md` with service-template
+      and env-example hashes for deployment-ticket review.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest
@@ -158,6 +163,7 @@ cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --j
 cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
+cargo run --locked -- sidecar-package-deploy-handoff --root installed/agentk-sidecar --json
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>
