@@ -4,10 +4,12 @@ AgentK should become a polished installable team product without losing its
 wedge: an agent action firewall and flight recorder for MCP/tool-call
 governance. The gateway is a delivery surface, not the product thesis.
 
-The current v0.1 release proves the security shape locally: a poisoned MCP
-server can try to trigger secret exfiltration and unsafe repository patching,
-baseline passthrough lets the fake dangerous markers execute, and AgentK blocks
-the transitions with policy, provenance, and replayable evidence.
+The current v0.2 alpha release candidate keeps that security proof and packages
+it as an installable local/team MCP sidecar. A team can generate or install the
+sidecar, put it in front of Claude, Codex, Cursor, or another MCP client, run a
+safe GitHub/Postgres/Slack/filesystem-shaped demo, and review approvals,
+permissions, dashboard evidence, deploy handoff, support bundle, notification
+payloads, and release-ticket artifacts without using a hosted control plane.
 
 ## Product Shape
 
@@ -40,7 +42,8 @@ Implemented today:
   pending approvals, blocked-rule counts, and allowed side-effect summaries;
 - `approvals`, `approve`, and `deny`, which provide an append-only local review
   surface over signed trace events without silently replaying blocked actions;
-- local release audit and signed v0.1 release evidence;
+- local release audit, release-candidate smoke evidence, and v0.2 alpha
+  release-ticket handoff evidence;
 - `sidecar-init`, which generates a starter team sidecar bundle with policy,
   secret-reference, MCP client, and safe-agent demo files;
 - secret-reference manifests that validate local env refs plus production-shaped
@@ -104,6 +107,12 @@ Implemented today:
   SHA-256, release-manifest path, and final release-note evidence fields before
   a maintainer creates the GitHub release page without tagging, pushing,
   uploading, or publishing.
+- `release-ticket`, which writes the offline reviewer bundle for the current
+  v0.2 alpha release candidate, including release status, accepted-limit
+  checks, smoke evidence, release finalization, product-objective checks, and a
+  top-level artifact inventory for package, quickstart, dashboard, client,
+  permissions, deploy, support, demo, store, notification, service-template,
+  and Homebrew handoff files.
 
 Still missing for a team product:
 
@@ -116,8 +125,8 @@ Still missing for a team product:
 - published binary distribution channels such as a maintained Homebrew tap or
   package-manager formulas;
 - long-running production operations hardening beyond the current local
-  sidecar, service templates, env examples, and release-gated HTTP/TCP
-  transports.
+  sidecar, service templates, env examples, and release-gated stdio/TCP/
+  Streamable HTTP transports.
 
 ## Milestones
 
