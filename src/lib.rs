@@ -10572,16 +10572,19 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         alpha_release_source_surface(
             root,
             "local Homebrew formula handoff",
-            "formula generation and formula/archive verification are present without publishing a tap",
+            "formula generation, archive verification, and tap checkout handoff checks are present without publishing a tap",
             &[
                 ("src/main.rs", "ReleaseHomebrewFormula"),
                 ("src/main.rs", "ReleaseHomebrewFormulaCheck"),
+                ("src/main.rs", "ReleaseHomebrewTapHandoffCheck"),
                 ("src/lib.rs", "write_homebrew_formula"),
                 ("src/lib.rs", "check_homebrew_formula"),
+                ("src/lib.rs", "check_homebrew_tap_handoff"),
             ],
             &[
                 "agentk release-homebrew-formula --source-url <release-tarball-url> --sha256 <sha256>",
                 "agentk release-homebrew-formula-check --formula dist/homebrew/agentk.rb --source-archive <release-tarball>",
+                "agentk release-homebrew-tap-handoff-check --tap-root <tap-checkout>",
             ],
         ),
     ]
@@ -10727,22 +10730,33 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         ),
         alpha_release_source_surface(
             root,
-            "Homebrew formula handoff checker",
-            "release checklist and notes include local formula generation plus formula/archive verification before tap review",
+            "Homebrew tap handoff checker",
+            "release checklist and notes include local formula generation, formula/archive verification, and tap checkout preflight before tap review",
             &[
                 ("src/main.rs", "ReleaseHomebrewFormulaCheck"),
+                ("src/main.rs", "ReleaseHomebrewTapHandoffCheck"),
                 ("README.md", "release-homebrew-formula-check"),
+                ("README.md", "release-homebrew-tap-handoff-check"),
                 (
                     "docs/release-checklist.md",
                     "release-homebrew-formula-check",
                 ),
                 (
+                    "docs/release-checklist.md",
+                    "release-homebrew-tap-handoff-check",
+                ),
+                (
                     "docs/v0.2-alpha-release-notes.md",
                     "release-homebrew-formula-check",
+                ),
+                (
+                    "docs/v0.2-alpha-release-notes.md",
+                    "release-homebrew-tap-handoff-check",
                 ),
             ],
             &[
                 "cargo run --locked -- release-homebrew-formula-check --formula dist/homebrew/agentk.rb --source-archive <release-tarball>",
+                "cargo run --locked -- release-homebrew-tap-handoff-check --tap-root <tap-checkout>",
             ],
         ),
         alpha_release_source_surface(
@@ -16468,6 +16482,19 @@ pub struct HomebrewFormulaCheckReport {
     pub checks: Vec<ReadinessCheck>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct HomebrewTapHandoffCheckReport {
+    pub tap_root: PathBuf,
+    pub formula: PathBuf,
+    pub tap_formula: PathBuf,
+    pub tap_formula_path: String,
+    pub expected_tap: Option<String>,
+    pub passed: bool,
+    pub dirty_paths: Vec<String>,
+    pub formula_check: HomebrewFormulaCheckReport,
+    pub checks: Vec<ReadinessCheck>,
+}
+
 #[derive(Debug, Default)]
 struct ParsedHomebrewFormula {
     class_name: Option<String>,
@@ -17704,6 +17731,85 @@ pub fn check_homebrew_formula(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn check_homebrew_tap_handoff(
+    formula: impl AsRef<Path>,
+    tap_root: impl AsRef<Path>,
+    tap_formula_path: &str,
+    source_archive: Option<&Path>,
+    expected_source_url: Option<&str>,
+    expected_sha256: Option<&str>,
+    expected_version: Option<&str>,
+    expected_homepage: Option<&str>,
+    expected_class_name: Option<&str>,
+    expected_tap: Option<&str>,
+) -> Result<HomebrewTapHandoffCheckReport, AgentKError> {
+    let formula = formula.as_ref();
+    let tap_root = tap_root.as_ref();
+    let formula_check = check_homebrew_formula(
+        formula,
+        source_archive,
+        expected_source_url,
+        expected_sha256,
+        expected_version,
+        expected_homepage,
+        expected_class_name,
+    )?;
+    let mut checks = vec![if formula_check.passed {
+        sidecar_check(
+            "Homebrew tap formula check",
+            ReadinessStatus::Pass,
+            "reviewed formula passed formula/archive verification",
+        )
+    } else {
+        sidecar_check(
+            "Homebrew tap formula check",
+            ReadinessStatus::Fail,
+            "reviewed formula failed formula/archive verification",
+        )
+    }];
+
+    checks.push(check_homebrew_tap_root(tap_root));
+    let tap_formula_path_check = check_homebrew_tap_formula_path(tap_formula_path);
+    let tap_formula_relative = match validate_homebrew_tap_formula_path(tap_formula_path) {
+        Ok(path) => path,
+        Err(_) => PathBuf::from(tap_formula_path),
+    };
+    checks.push(tap_formula_path_check);
+    checks.push(check_homebrew_tap_formula_name(
+        &tap_formula_relative,
+        formula_check.formula_name.as_deref(),
+    ));
+    if let Some(expected_tap) = expected_tap {
+        checks.push(check_homebrew_tap_name(expected_tap));
+    }
+
+    let tap_formula = tap_root.join(&tap_formula_relative);
+    checks.push(check_homebrew_tap_formula_bytes(formula, &tap_formula));
+    let (git_status_check, dirty_paths) =
+        check_homebrew_tap_git_status(tap_root, &tap_formula_relative);
+    checks.push(git_status_check);
+
+    let passed = checks
+        .iter()
+        .chain(formula_check.checks.iter())
+        .all(|check| check.status != ReadinessStatus::Fail);
+    let tap_formula_path = sidecar_package_relative_string(&tap_formula_relative)
+        .unwrap_or_else(|_| tap_formula_path.to_string());
+
+    Ok(HomebrewTapHandoffCheckReport {
+        tap_root: tap_root.to_path_buf(),
+        formula: formula.to_path_buf(),
+        tap_formula,
+        tap_formula_path,
+        expected_tap: expected_tap.map(str::to_string),
+        passed,
+        dirty_paths,
+        formula_check,
+        checks,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn homebrew_formula_check_report(
     formula: &Path,
     source_archive: Option<&Path>,
@@ -17741,6 +17847,239 @@ fn homebrew_formula_check_report(
         sha256: parsed.sha256,
         checks,
     }
+}
+
+fn check_homebrew_tap_root(tap_root: &Path) -> ReadinessCheck {
+    match fs::metadata(tap_root) {
+        Ok(metadata) if metadata.is_dir() => sidecar_check(
+            "Homebrew tap root",
+            ReadinessStatus::Pass,
+            "tap root is a local directory",
+        ),
+        Ok(_) => sidecar_check(
+            "Homebrew tap root",
+            ReadinessStatus::Fail,
+            "tap root must be a directory",
+        ),
+        Err(error) => sidecar_check(
+            "Homebrew tap root",
+            ReadinessStatus::Fail,
+            format!("tap root could not be inspected: {error}"),
+        ),
+    }
+}
+
+fn check_homebrew_tap_formula_path(value: &str) -> ReadinessCheck {
+    match validate_homebrew_tap_formula_path(value) {
+        Ok(_) => sidecar_check(
+            "Homebrew tap formula path",
+            ReadinessStatus::Pass,
+            "tap formula path is a relative Formula/*.rb path",
+        ),
+        Err(error) => sidecar_check(
+            "Homebrew tap formula path",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    }
+}
+
+fn validate_homebrew_tap_formula_path(value: &str) -> Result<PathBuf, AgentKError> {
+    validate_sidecar_relative_path(value).map_err(AgentKError::InvalidMcpRequest)?;
+    let path = Path::new(value);
+    let mut components = path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew tap formula path must be under Formula/".to_string(),
+        ));
+    };
+    if first != "Formula" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew tap formula path must be under Formula/".to_string(),
+        ));
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew tap formula path must end in a UTF-8 Ruby file".to_string(),
+        ));
+    };
+    if !file_name.ends_with(".rb") || file_name == ".rb" {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew tap formula path must end in .rb".to_string(),
+        ));
+    }
+    let relative = sidecar_package_relative_string(path)?;
+    Ok(PathBuf::from(relative))
+}
+
+fn check_homebrew_tap_formula_name(
+    tap_formula_relative: &Path,
+    formula_name: Option<&str>,
+) -> ReadinessCheck {
+    let Some(formula_name) = formula_name else {
+        return sidecar_check(
+            "Homebrew tap formula filename",
+            ReadinessStatus::Fail,
+            "formula name could not be derived from the Ruby class",
+        );
+    };
+    let expected = format!("Formula/{formula_name}.rb");
+    match sidecar_package_relative_string(tap_formula_relative) {
+        Ok(relative) if relative == expected => sidecar_check(
+            "Homebrew tap formula filename",
+            ReadinessStatus::Pass,
+            "tap formula filename matches the formula class name",
+        ),
+        Ok(_) => sidecar_check(
+            "Homebrew tap formula filename",
+            ReadinessStatus::Fail,
+            format!("tap formula path must be {expected}"),
+        ),
+        Err(error) => sidecar_check(
+            "Homebrew tap formula filename",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    }
+}
+
+fn check_homebrew_tap_name(value: &str) -> ReadinessCheck {
+    match validate_homebrew_tap_name(value) {
+        Ok(()) => sidecar_check(
+            "Homebrew tap name",
+            ReadinessStatus::Pass,
+            "expected tap name is safe for maintainer handoff",
+        ),
+        Err(error) => sidecar_check(
+            "Homebrew tap name",
+            ReadinessStatus::Fail,
+            error.to_string(),
+        ),
+    }
+}
+
+fn validate_homebrew_tap_name(value: &str) -> Result<(), AgentKError> {
+    let mut parts = value.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repo = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || owner.is_empty()
+        || repo.is_empty()
+        || !owner.bytes().all(homebrew_tap_name_byte)
+        || !repo.bytes().all(homebrew_tap_name_byte)
+    {
+        return Err(AgentKError::InvalidMcpRequest(
+            "Homebrew tap name must be owner/repo with safe ASCII characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn homebrew_tap_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+fn check_homebrew_tap_formula_bytes(formula: &Path, tap_formula: &Path) -> ReadinessCheck {
+    match (fs::read(formula), fs::read(tap_formula)) {
+        (Ok(source), Ok(tap)) if source == tap => sidecar_check(
+            "Homebrew tap formula bytes",
+            ReadinessStatus::Pass,
+            "tap formula matches the reviewed local formula exactly",
+        ),
+        (Ok(_), Ok(_)) => sidecar_check(
+            "Homebrew tap formula bytes",
+            ReadinessStatus::Fail,
+            "tap formula does not match the reviewed local formula",
+        ),
+        (Err(error), _) => sidecar_check(
+            "Homebrew tap formula bytes",
+            ReadinessStatus::Fail,
+            format!("reviewed formula could not be read: {error}"),
+        ),
+        (_, Err(error)) => sidecar_check(
+            "Homebrew tap formula bytes",
+            ReadinessStatus::Fail,
+            format!("tap formula could not be read: {error}"),
+        ),
+    }
+}
+
+fn check_homebrew_tap_git_status(
+    tap_root: &Path,
+    tap_formula_relative: &Path,
+) -> (ReadinessCheck, Vec<String>) {
+    let expected = sidecar_package_relative_string(tap_formula_relative).ok();
+    match Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--untracked-files=all")
+        .current_dir(tap_root)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let dirty_paths = homebrew_tap_dirty_paths(&stdout);
+            let unrelated = dirty_paths
+                .iter()
+                .filter(|path| Some(path.as_str()) != expected.as_deref())
+                .cloned()
+                .collect::<Vec<_>>();
+            if unrelated.is_empty() {
+                (
+                    sidecar_check(
+                        "Homebrew tap git status",
+                        ReadinessStatus::Pass,
+                        "tap checkout is clean or only the AgentK formula is dirty",
+                    ),
+                    dirty_paths,
+                )
+            } else {
+                (
+                    sidecar_check(
+                        "Homebrew tap git status",
+                        ReadinessStatus::Fail,
+                        format!(
+                            "tap checkout has unrelated dirty paths: {}",
+                            unrelated.join(", ")
+                        ),
+                    ),
+                    dirty_paths,
+                )
+            }
+        }
+        Ok(output) => (
+            sidecar_check(
+                "Homebrew tap git status",
+                ReadinessStatus::Fail,
+                format!("git status exited with {}", output.status),
+            ),
+            Vec::new(),
+        ),
+        Err(error) => (
+            sidecar_check(
+                "Homebrew tap git status",
+                ReadinessStatus::Fail,
+                format!("could not run git status in tap checkout: {error}"),
+            ),
+            Vec::new(),
+        ),
+    }
+}
+
+fn homebrew_tap_dirty_paths(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let path = line[3..]
+                .rsplit_once(" -> ")
+                .map_or(&line[3..], |(_, to)| to);
+            let path = path.trim_matches('"').to_string();
+            if path.is_empty() { None } else { Some(path) }
+        })
+        .collect()
 }
 
 fn parse_homebrew_formula(content: &str) -> ParsedHomebrewFormula {
@@ -26841,6 +27180,101 @@ can_deny = ["*"]
     }
 
     #[test]
+    fn homebrew_tap_handoff_check_blocks_unrelated_tap_changes() {
+        let archive = temp_path("agentk-homebrew-tap-source", "tar.gz");
+        let formula = temp_path("agentk-homebrew-tap-formula", "rb");
+        let tap_root = temp_path("agentk-homebrew-tap", "dir");
+        fs::write(&archive, b"agentk source release archive").expect("source archive should write");
+        fs::create_dir_all(tap_root.join("Formula")).expect("tap formula dir should write");
+        let write_report = write_homebrew_formula(
+            "https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz",
+            None,
+            Some(&archive),
+            &formula,
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+            false,
+        )
+        .expect("formula should write");
+        fs::copy(&formula, tap_root.join("Formula/agentk.rb"))
+            .expect("tap formula should be copied");
+        let git_init = Command::new("git")
+            .arg("init")
+            .current_dir(&tap_root)
+            .output()
+            .expect("git init should run");
+        assert!(git_init.status.success());
+
+        let report = check_homebrew_tap_handoff(
+            &formula,
+            &tap_root,
+            "Formula/agentk.rb",
+            Some(&archive),
+            Some("https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"),
+            Some(&write_report.sha256),
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+            Some("atomics-hub/agentk"),
+        )
+        .expect("tap handoff check should run");
+        assert!(report.passed);
+        assert_eq!(report.tap_formula_path, "Formula/agentk.rb");
+        assert_eq!(report.dirty_paths, vec!["Formula/agentk.rb".to_string()]);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "Homebrew tap git status" && check.status == ReadinessStatus::Pass
+        }));
+
+        fs::write(tap_root.join("README.md"), "unreviewed tap change")
+            .expect("unrelated dirty file should write");
+        let dirty_report = check_homebrew_tap_handoff(
+            &formula,
+            &tap_root,
+            "Formula/agentk.rb",
+            Some(&archive),
+            Some("https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"),
+            Some(&write_report.sha256),
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+            Some("atomics-hub/agentk"),
+        )
+        .expect("dirty tap handoff check should run");
+        assert!(!dirty_report.passed);
+        assert!(dirty_report.dirty_paths.contains(&"README.md".to_string()));
+        assert!(dirty_report.checks.iter().any(|check| {
+            check.name == "Homebrew tap git status"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("unrelated dirty paths")
+        }));
+
+        let traversal_report = check_homebrew_tap_handoff(
+            &formula,
+            &tap_root,
+            "../Formula/agentk.rb",
+            Some(&archive),
+            Some("https://github.com/agentk/agentk/archive/refs/tags/v0.1.0.tar.gz"),
+            Some(&write_report.sha256),
+            Some("0.1.0"),
+            Some("https://github.com/agentk/agentk"),
+            Some("Agentk"),
+            None,
+        )
+        .expect("path traversal check should report");
+        assert!(!traversal_report.passed);
+        assert!(traversal_report.checks.iter().any(|check| {
+            check.name == "Homebrew tap formula path"
+                && check.status == ReadinessStatus::Fail
+                && check.detail.contains("parent-directory")
+        }));
+
+        fs::remove_dir_all(tap_root).ok();
+        fs::remove_file(archive).ok();
+        fs::remove_file(formula).ok();
+    }
+
+    #[test]
     fn sidecar_package_check_blocks_missing_or_unsafe_manifest_artifacts() {
         let root = temp_path("agentk-sidecar-package-check-root", "dir");
         let out = temp_path("agentk-sidecar-package-check-out", "dir");
@@ -33059,7 +33493,7 @@ reviewer = "tom"
             root.join("src/main.rs"),
             "ReleaseCandidateSmoke sidecar-serve-tcp sidecar-serve-http DashboardServe \
              /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo \
-             ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck",
+             ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck ReleaseHomebrewTapHandoffCheck",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -33067,12 +33501,13 @@ reviewer = "tom"
             "sidecar-package-release-manifest package.lock.json bin/agentk-sidecar-http \
              team_identity_report_from_path token_env export_github_notification_payloads \
              export_email_notification_payloads run_safe_agent_demo agentk-safe-agent-demo \
-             release-candidate-smoke write_homebrew_formula check_homebrew_formula",
+             release-candidate-smoke write_homebrew_formula check_homebrew_formula \
+             check_homebrew_tap_handoff",
         )
         .expect("lib fixture should be writable");
         fs::write(
             root.join("docs/release-checklist.md"),
-            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check release-homebrew-formula-check",
+            "sidecar-package-install sidecar-package-release-manifest sidecar-package-release-manifest-check release-homebrew-formula-check release-homebrew-tap-handoff-check",
         )
         .expect("release checklist fixture should be writable");
         fs::write(

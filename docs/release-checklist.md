@@ -169,10 +169,21 @@ cargo run --locked -- release-homebrew-formula-check \
   --sha256 <source-tarball-sha256> \
   --version X.Y.Z \
   --homepage https://github.com/OWNER/REPO
+cargo run --locked -- release-homebrew-tap-handoff-check \
+  --formula dist/homebrew/agentk.rb \
+  --tap-root ../homebrew-agentk \
+  --tap-formula-path Formula/agentk.rb \
+  --source-archive dist/agentk-vX.Y.Z.tar.gz \
+  --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz \
+  --sha256 <source-tarball-sha256> \
+  --version X.Y.Z \
+  --homepage https://github.com/OWNER/REPO \
+  --tap OWNER/agentk
 ```
 
-Review the generated Ruby formula before committing it to any tap. These
-commands do not publish a tap.
+Review the generated Ruby formula before committing it to any tap. The tap
+handoff check verifies only the local checkout and allows a clean checkout or
+the AgentK formula as the only dirty path. These commands do not publish a tap.
 
 Then run the explicit command set used by reviewers:
 
@@ -186,6 +197,7 @@ cargo run --locked -- release-evidence-check --evidence dist/release-candidate-s
 cargo run --locked -- release-finalize --release v0.2-alpha --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke --notes docs/v0.2-alpha-release-notes.md --out dist/release-finalization.json --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
+cargo run --locked -- release-homebrew-tap-handoff-check --formula dist/homebrew/agentk.rb --tap-root ../homebrew-agentk --tap-formula-path Formula/agentk.rb --source-archive dist/agentk-vX.Y.Z.tar.gz --source-url https://github.com/OWNER/REPO/archive/refs/tags/vX.Y.Z.tar.gz --sha256 <source-tarball-sha256> --version X.Y.Z --homepage https://github.com/OWNER/REPO --tap OWNER/agentk --json
 cargo run -- trusted-signers-check --manifest examples/trusted-signers.toml
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <release-public-key>
 git diff --check
