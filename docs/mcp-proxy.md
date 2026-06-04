@@ -269,6 +269,15 @@ keep required variables and dummy `CHANGE_ME` credentials. The packaged runtime
 launchers run that package self-check before launching, serving, writing demo
 traces, rendering dashboards, or updating store artifacts, so copied or edited
 packages fail closed before teams rely on them.
+After unpacking, copying, or updating a package, run
+`<package>/bin/agentk-sidecar-doctor --json` to write
+`<package>/sidecar/.agentk/doctor/sidecar-doctor.json` and
+`<package>/sidecar/.agentk/doctor/sidecar-doctor.md`. The report verifies
+launchers, dummy env templates, bounded HTTP/SSE handoff readiness,
+dashboard/store readiness, install receipt provenance, operator handoff
+artifacts, evidence retention, and safe-agent demo integrity with concrete
+remediation steps. It is a local/team sidecar alpha support artifact, not a
+hosted SaaS readiness check.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

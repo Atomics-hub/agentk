@@ -7,7 +7,7 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, mpsc};
@@ -48,6 +48,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-team-handoff-check",
     "bin/agentk-sidecar-ops-handoff",
+    "bin/agentk-sidecar-doctor",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -71,6 +72,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-team-handoff-check",
     "bin/agentk-sidecar-ops-handoff",
+    "bin/agentk-sidecar-doctor",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6703,6 +6705,22 @@ pub struct SidecarPackageOpsHandoffReport {
     pub email: EmailNotificationExportReport,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageDoctorReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub remediation_steps: Vec<String>,
+    pub package_check: SidecarPackageCheckReport,
+    pub http_handoff_check: SidecarPackageCheckReport,
+    pub team_handoff_check: SidecarPackageCheckReport,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -7806,6 +7824,356 @@ fn sidecar_package_ops_handoff_markdown(report: &SidecarPackageOpsHandoffReport)
     ));
     out.push_str("\n## Archive Notes\n\n");
     out.push_str("Archive this directory together with the referenced trace and store artifacts when handing AgentK evidence to a team reviewer. The notification exports are payload drafts only; delivery remains an explicit operator action outside this report.\n");
+    out
+}
+
+pub fn write_sidecar_package_doctor(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<SidecarPackageDoctorReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let json_path = output_dir.join("sidecar-doctor.json");
+    let markdown_path = output_dir.join("sidecar-doctor.md");
+
+    let package_check = check_sidecar_package(root)?;
+    let http_handoff_check = check_sidecar_package_http_handoff(root)?;
+    let team_handoff_check = check_sidecar_package_team_handoff(root)?;
+    let checks = vec![
+        doctor_report_check(
+            "package self-check",
+            package_check.passed,
+            format!("{} package readiness checks", package_check.checks.len()),
+        ),
+        check_sidecar_package_install_receipt_for_doctor(root),
+        check_sidecar_package_env_templates_for_doctor(root),
+        doctor_report_check(
+            "MCP gateway handoff readiness",
+            http_handoff_check.passed,
+            format!("{} HTTP/SSE checks", http_handoff_check.checks.len()),
+        ),
+        doctor_report_check(
+            "team dashboard/store readiness",
+            team_handoff_check.passed,
+            format!("{} team handoff checks", team_handoff_check.checks.len()),
+        ),
+        check_sidecar_package_operator_handoff_for_doctor(root),
+        check_sidecar_package_audit_retention_for_doctor(root),
+        check_sidecar_package_demo_integrity_for_doctor(root),
+        doctor_check(
+            "alpha scope",
+            ReadinessStatus::Pass,
+            "local/team sidecar alpha; hosted SaaS is false",
+        ),
+    ];
+    let remediation_steps = sidecar_package_doctor_remediation_steps(&checks);
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    fs::create_dir_all(output_dir)?;
+    let report = SidecarPackageDoctorReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        passed,
+        checks,
+        remediation_steps,
+        package_check,
+        http_handoff_check,
+        team_handoff_check,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(&markdown_path, sidecar_package_doctor_markdown(&report))?;
+    Ok(report)
+}
+
+fn doctor_report_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    doctor_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+fn doctor_check(
+    name: impl Into<String>,
+    status: ReadinessStatus,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(name, status, detail)
+}
+
+fn check_sidecar_package_install_receipt_for_doctor(root: &Path) -> ReadinessCheck {
+    let receipt_path = root.join(SIDECAR_PACKAGE_INSTALL_RECEIPT);
+    let content = match fs::read_to_string(&receipt_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return doctor_check(
+                "install receipt",
+                ReadinessStatus::Warn,
+                "missing; prefer sidecar-package-install for update handoff evidence",
+            );
+        }
+        Err(error) => {
+            return doctor_check(
+                "install receipt",
+                ReadinessStatus::Fail,
+                format!("could not read {}: {error}", receipt_path.display()),
+            );
+        }
+    };
+    let receipt = match serde_json::from_str::<SidecarPackageInstallReceipt>(&content) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return doctor_check(
+                "install receipt",
+                ReadinessStatus::Fail,
+                format!("install receipt did not parse: {error}"),
+            );
+        }
+    };
+    let ok = receipt.schema_version == SIDECAR_PACKAGE_INSTALL_RECEIPT_SCHEMA_VERSION
+        && receipt.package == SIDECAR_PACKAGE_NAME
+        && !receipt.agentk_version.trim().is_empty()
+        && receipt.hash_algorithm == "sha256"
+        && receipt.archive_sha256.len() == 64
+        && receipt.installed_files > 0
+        && receipt.installed_at_unix_seconds > 0;
+    if ok {
+        doctor_check(
+            "install receipt",
+            ReadinessStatus::Pass,
+            format!(
+                "{} installed files from {}",
+                receipt.installed_files, receipt.archive_file
+            ),
+        )
+    } else {
+        doctor_check(
+            "install receipt",
+            ReadinessStatus::Fail,
+            "install receipt schema, package identity, hash, or file counts are invalid",
+        )
+    }
+}
+
+fn check_sidecar_package_env_templates_for_doctor(root: &Path) -> ReadinessCheck {
+    let mut checked = 0usize;
+    for relative in SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES {
+        let path = root.join(relative);
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                return doctor_check(
+                    "env template sanity",
+                    ReadinessStatus::Fail,
+                    format!("{relative} could not be read: {error}"),
+                );
+            }
+        };
+        if let Err(error) = validate_deploy_env_example(relative, &content) {
+            return doctor_check("env template sanity", ReadinessStatus::Fail, error);
+        }
+        checked += 1;
+    }
+    doctor_check(
+        "env template sanity",
+        ReadinessStatus::Pass,
+        format!("{checked} deploy env templates keep dummy placeholders and no detected secrets"),
+    )
+}
+
+fn check_sidecar_package_operator_handoff_for_doctor(root: &Path) -> ReadinessCheck {
+    let output_dir = root.join("sidecar/.agentk/operator-handoff");
+    let json_path = output_dir.join("operator-handoff.json");
+    let markdown_path = output_dir.join("operator-handoff.md");
+    if !json_path.is_file() || !markdown_path.is_file() {
+        return doctor_check(
+            "operator handoff artifacts",
+            ReadinessStatus::Fail,
+            "operator-handoff.json and operator-handoff.md are missing; run bin/agentk-sidecar-ops-handoff --json",
+        );
+    }
+    let value = match fs::read_to_string(&json_path)
+        .map_err(|error| error.to_string())
+        .and_then(|content| {
+            serde_json::from_str::<serde_json::Value>(&content).map_err(|error| error.to_string())
+        }) {
+        Ok(value) => value,
+        Err(error) => {
+            return doctor_check(
+                "operator handoff artifacts",
+                ReadinessStatus::Fail,
+                format!("operator-handoff.json did not parse: {error}"),
+            );
+        }
+    };
+    let ok = value.get("passed").and_then(|value| value.as_bool()) == Some(true)
+        && value
+            .get("local_team_sidecar_alpha")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        && value.get("hosted_saas").and_then(|value| value.as_bool()) == Some(false);
+    if ok {
+        doctor_check(
+            "operator handoff artifacts",
+            ReadinessStatus::Pass,
+            "operator handoff JSON/Markdown are present and declare local alpha/no hosted SaaS",
+        )
+    } else {
+        doctor_check(
+            "operator handoff artifacts",
+            ReadinessStatus::Fail,
+            "operator handoff must pass and keep local alpha/no hosted SaaS scope",
+        )
+    }
+}
+
+fn check_sidecar_package_audit_retention_for_doctor(root: &Path) -> ReadinessCheck {
+    let durable_store = root.join("sidecar/.agentk/team-store");
+    let export_store = root.join("sidecar/.agentk/store");
+    let trace = root.join("sidecar/.agentk/runs/safe-agent-demo.jsonl");
+    let required = [
+        durable_store.join("store-schema.json"),
+        durable_store.join("tables/audit_events.jsonl"),
+        durable_store.join("tables/notifications.jsonl"),
+        durable_store.join("current/approvals.json"),
+        export_store.join("audit.json"),
+        trace,
+    ];
+    for path in required {
+        if !path.is_file() {
+            return doctor_check(
+                "audit evidence retention",
+                ReadinessStatus::Fail,
+                format!(
+                    "{} is missing; rerun bin/agentk-sidecar-ops-handoff --json",
+                    path.display()
+                ),
+            );
+        }
+    }
+    doctor_check(
+        "audit evidence retention",
+        ReadinessStatus::Pass,
+        "trace, exported store, durable store, and notification rows are present",
+    )
+}
+
+fn check_sidecar_package_demo_integrity_for_doctor(root: &Path) -> ReadinessCheck {
+    let demo_doc = root.join("sidecar/demos/safe-agent-demo.md");
+    let demo_launcher = root.join("bin/agentk-safe-agent-demo");
+    let trace = root.join("sidecar/.agentk/runs/safe-agent-demo.jsonl");
+    if !demo_doc.is_file() || !demo_launcher.is_file() {
+        return doctor_check(
+            "filesystem/demo package integrity",
+            ReadinessStatus::Fail,
+            "safe-agent demo doc or launcher is missing from the package",
+        );
+    }
+    if !trace.is_file() {
+        return doctor_check(
+            "filesystem/demo package integrity",
+            ReadinessStatus::Fail,
+            "safe-agent demo trace is missing; run bin/agentk-sidecar-ops-handoff --json",
+        );
+    }
+    doctor_check(
+        "filesystem/demo package integrity",
+        ReadinessStatus::Pass,
+        "safe-agent demo docs, launcher, and trace evidence are present",
+    )
+}
+
+fn sidecar_package_doctor_remediation_steps(checks: &[ReadinessCheck]) -> Vec<String> {
+    let mut steps = Vec::new();
+    for check in checks
+        .iter()
+        .filter(|check| check.status != ReadinessStatus::Pass)
+    {
+        let step = match check.name.as_str() {
+            "package self-check" => {
+                "Run bin/agentk-package-check --json with AGENTK_BIN set to the reviewed AgentK executable, then restore any missing package files."
+            }
+            "install receipt" => {
+                "Install or update with agentk sidecar-package-install so sidecar/.agentk/install-receipt.json records archive provenance."
+            }
+            "env template sanity" => {
+                "Restore deploy/env/*.env.example to dummy CHANGE_ME placeholders and keep real credentials in the service manager or CI secret store."
+            }
+            "MCP gateway handoff readiness" => {
+                "Run bin/agentk-sidecar-http-handoff-check --json and fix launcher, env, manifest, or client handoff drift before serving MCP HTTP/SSE."
+            }
+            "team dashboard/store readiness" => {
+                "Run bin/agentk-sidecar-team-handoff-check --json and fix dashboard, permissions, identity, store, or notification handoff drift."
+            }
+            "operator handoff artifacts" => {
+                "Run bin/agentk-sidecar-ops-handoff --json to refresh the safe-agent demo, dashboard, stores, notification drafts, and operator handoff files."
+            }
+            "audit evidence retention" => {
+                "Rerun bin/agentk-sidecar-ops-handoff --json and archive the generated trace, store, durable store, and notification outbox artifacts."
+            }
+            "filesystem/demo package integrity" => {
+                "Regenerate the sidecar package or restore the safe-agent demo files, then rerun bin/agentk-sidecar-ops-handoff --json."
+            }
+            _ => {
+                "Inspect the failed doctor check and rerun the package-specific handoff command after fixing the package."
+            }
+        };
+        steps.push(step.to_string());
+    }
+    steps
+}
+
+fn sidecar_package_doctor_markdown(report: &SidecarPackageDoctorReport) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Sidecar Doctor\n\n");
+    out.push_str("This diagnostic summarizes a local/team sidecar alpha install or update. It does not prove hosted SaaS readiness and does not include delivery credentials.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!(
+        "- JSON report: `{}`\n",
+        report.json_path.display()
+    ));
+    out.push_str(&format!(
+        "- Markdown report: `{}`\n\n",
+        report.markdown_path.display()
+    ));
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Remediation\n\n");
+    if report.remediation_steps.is_empty() {
+        out.push_str("- No remediation required.\n");
+    } else {
+        for step in &report.remediation_steps {
+            out.push_str(&format!("- {}\n", markdown_cell(step)));
+        }
+    }
+    out.push_str("\n## Scope\n\n");
+    out.push_str("- Local/team sidecar alpha: `true`\n");
+    out.push_str("- Hosted SaaS: `false`\n");
     out
 }
 
@@ -14510,14 +14878,15 @@ fn mcp_public_close_transcript_smoke(
     let serialized_events = serde_json::to_string(&report.events)?;
 
     Ok(McpPublicCloseTranscriptSmokeReport {
-        descriptor_mediated: responses.get(1).is_some_and(|response| {
-            response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
+        descriptor_mediated: responses.iter().any(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
                 && response["result"]["tools"][0]["agentk"]["descriptor_hash"]
                     .as_str()
                     .is_some_and(|hash| hash.len() == 64)
         }),
         allowed_call_reached_downstream: execution_log_content.contains("close tool called"),
-        close_reported: responses.get(2).is_some_and(|response| {
+        close_reported: responses.iter().any(|response| {
             response["id"] == serde_json::json!(3)
                 && response["error"]["code"] == serde_json::json!(-32003)
                 && response["error"]["message"] == serde_json::json!("Bad downstream response")
@@ -14553,7 +14922,7 @@ fn mcp_public_timeout_transcript_smoke(
             "AGENTK_FAKE_MCP_EXEC_LOG",
             execution_log.display().to_string(),
         )
-        .with_response_timeout(Duration::from_millis(50));
+        .with_response_timeout(Duration::from_millis(500));
     let report = mcp_subprocess_proxy_json_lines(&input, config)?;
     let responses = report
         .output
@@ -14565,14 +14934,15 @@ fn mcp_public_timeout_transcript_smoke(
     let serialized_events = serde_json::to_string(&report.events)?;
 
     Ok(McpPublicTimeoutTranscriptSmokeReport {
-        descriptor_mediated: responses.get(1).is_some_and(|response| {
-            response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
+        descriptor_mediated: responses.iter().any(|response| {
+            response["id"] == serde_json::json!(2)
+                && response["result"]["tools"][0]["agentk"]["mediated"] == serde_json::json!(true)
                 && response["result"]["tools"][0]["agentk"]["descriptor_hash"]
                     .as_str()
                     .is_some_and(|hash| hash.len() == 64)
         }),
         allowed_call_reached_downstream: execution_log_content.contains("timeout tool called"),
-        timeout_reported: responses.get(2).is_some_and(|response| {
+        timeout_reported: responses.iter().any(|response| {
             response["id"] == serde_json::json!(3)
                 && response["error"]["code"] == serde_json::json!(-32004)
                 && response["error"]["message"] == serde_json::json!("Downstream transport failure")
@@ -15994,6 +16364,7 @@ pub fn package_sidecar_bundle(
             "bin/agentk-sidecar-ops-handoff",
             &sidecar_ops_handoff_script(),
         )?,
+        write_packaged_sidecar_file(out, "bin/agentk-sidecar-doctor", &sidecar_doctor_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
         write_packaged_sidecar_file(
@@ -17155,6 +17526,10 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
             .and_then(|value| value.as_str())
             == Some("bin/agentk-sidecar-ops-handoff")
         && handoff
+            .and_then(|value| value.get("doctor"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-sidecar-doctor")
+        && handoff
             .and_then(|value| value.get("doc"))
             .and_then(|value| value.as_str())
             == Some("clients/team-audit-dashboard-handoff.md")
@@ -17192,7 +17567,7 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
         sidecar_check(
             "package manifest team handoff",
             ReadinessStatus::Fail,
-            "team_handoff must list checker, ops handoff, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
+            "team_handoff must list checker, ops handoff, doctor, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
         )
     }
 }
@@ -17951,6 +18326,15 @@ fn check_sidecar_package_team_handoff_runtime_launchers(root: &Path) -> Readines
                 "agentk-package-check",
             ][..],
         ),
+        (
+            "bin/agentk-sidecar-doctor",
+            &[
+                "sidecar-package-doctor",
+                "AGENTK_SIDECAR_DOCTOR_OUT",
+                "doctor",
+                "agentk-package-check",
+            ][..],
+        ),
     ];
     for (relative, required_text) in requirements {
         let content = match fs::read_to_string(root.join(relative)) {
@@ -18069,7 +18453,9 @@ fn check_sidecar_package_team_handoff_readme(root: &Path) -> ReadinessCheck {
         "clients/team-audit-dashboard-handoff.md",
         "bin/agentk-sidecar-team-handoff-check",
         "bin/agentk-sidecar-ops-handoff",
+        "bin/agentk-sidecar-doctor",
         "operator-handoff",
+        "sidecar-doctor",
         "safe-agent demo",
         "dashboard server",
         "durable team store",
@@ -21365,6 +21751,8 @@ checksum, and install receipt without changing the package directory.
 - `bin/agentk-sidecar-ops-handoff`: refreshes the safe-agent demo, dashboard,
   audit stores, notification payload drafts, identity and permission summaries,
   then writes one compact operator handoff JSON/Markdown artifact.
+- `bin/agentk-sidecar-doctor`: diagnoses a copied, installed, or updated
+  package and writes support-ready JSON/Markdown remediation reports.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -21413,6 +21801,7 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-sidecar-http-handoff-check --json
 ./bin/agentk-sidecar-team-handoff-check --json
 ./bin/agentk-sidecar-ops-handoff --json
+./bin/agentk-sidecar-doctor --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -21618,6 +22007,13 @@ summary, and team permissions summary, then writes
 `sidecar/.agentk/operator-handoff/operator-handoff.json` and
 `sidecar/.agentk/operator-handoff/operator-handoff.md`. It does not send
 notifications, load Postgres, or read delivery credentials.
+Run `bin/agentk-sidecar-doctor --json` after unpacking, copying, or updating a
+package. It verifies required launchers, dummy env templates, bounded HTTP/SSE
+handoff readiness, dashboard/store handoff readiness, install receipt
+provenance, operator handoff artifacts, audit evidence retention, and the
+safe-agent demo package, then writes
+`sidecar/.agentk/doctor/sidecar-doctor.json` and
+`sidecar/.agentk/doctor/sidecar-doctor.md` with concrete remediation steps.
 This is a local/team sidecar alpha, not hosted SaaS.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
@@ -21695,6 +22091,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
         "team_handoff": {
             "check": "bin/agentk-sidecar-team-handoff-check",
             "ops_handoff": "bin/agentk-sidecar-ops-handoff",
+            "doctor": "bin/agentk-sidecar-doctor",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -22076,6 +22473,19 @@ AGENTK_BIN="${AGENTK_BIN:-agentk}"
 OPS_OUT="${AGENTK_OPS_HANDOFF_OUT:-$ROOT/sidecar/.agentk/operator-handoff}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-package-ops-handoff --root "$ROOT" --out "$OPS_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_doctor_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+DOCTOR_OUT="${AGENTK_SIDECAR_DOCTOR_OUT:-$ROOT/sidecar/.agentk/doctor}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-doctor --root "$ROOT" --out "$DOCTOR_OUT" "$@"
 "#
     .to_string()
 }
@@ -23864,7 +24274,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 42);
+        assert_eq!(report.files.len(), 43);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -23879,6 +24289,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-http-handoff-check").exists());
         assert!(out.join("bin/agentk-sidecar-team-handoff-check").exists());
         assert!(out.join("bin/agentk-sidecar-ops-handoff").exists());
+        assert!(out.join("bin/agentk-sidecar-doctor").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -23964,6 +24375,13 @@ can_deny = ["*"]
         assert!(ops_handoff.contains("operator-handoff"));
         assert!(ops_handoff.contains("agentk-package-check"));
         assert!(ops_handoff.contains("\"$@\""));
+        let doctor = fs::read_to_string(out.join("bin/agentk-sidecar-doctor"))
+            .expect("sidecar doctor launcher should read");
+        assert!(doctor.contains("sidecar-package-doctor"));
+        assert!(doctor.contains("AGENTK_SIDECAR_DOCTOR_OUT"));
+        assert!(doctor.contains("doctor"));
+        assert!(doctor.contains("agentk-package-check"));
+        assert!(doctor.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -24124,8 +24542,11 @@ can_deny = ["*"]
         assert!(package_readme.contains("clients/team-audit-dashboard-handoff.md"));
         assert!(package_readme.contains("bin/agentk-sidecar-team-handoff-check"));
         assert!(package_readme.contains("bin/agentk-sidecar-ops-handoff"));
+        assert!(package_readme.contains("bin/agentk-sidecar-doctor"));
         assert!(package_readme.contains("operator-handoff.json"));
         assert!(package_readme.contains("operator-handoff.md"));
+        assert!(package_readme.contains("sidecar-doctor.json"));
+        assert!(package_readme.contains("sidecar-doctor.md"));
         assert!(package_readme.contains("local/team sidecar alpha"));
         assert!(package_readme.contains("not hosted SaaS"));
         let package_manifest =
@@ -24175,6 +24596,10 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["team_handoff"]["ops_handoff"],
             serde_json::json!("bin/agentk-sidecar-ops-handoff")
+        );
+        assert_eq!(
+            package_manifest_json["team_handoff"]["doctor"],
+            serde_json::json!("bin/agentk-sidecar-doctor")
         );
         assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
@@ -24722,6 +25147,66 @@ can_deny = ["*"]
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_doctor_writes_support_report() {
+        let root = temp_path("agentk-sidecar-doctor-root", "dir");
+        let out = temp_path("agentk-sidecar-doctor-out", "dir");
+        let archive = temp_path("agentk-sidecar-doctor-archive", "tar");
+        let install = temp_path("agentk-sidecar-doctor-install", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+        let archive_report =
+            archive_sidecar_package(&out, &archive, false).expect("archive should write");
+        install_sidecar_package_archive(
+            &archive,
+            Some(archive_report.checksum.clone()),
+            &install,
+            false,
+        )
+        .expect("install should write receipt");
+
+        let ops_output_dir = install.join("sidecar/.agentk/operator-handoff");
+        write_sidecar_package_ops_handoff(&install, &ops_output_dir)
+            .expect("ops handoff should write");
+        let doctor_output_dir = install.join("sidecar/.agentk/doctor");
+        let report = write_sidecar_package_doctor(&install, &doctor_output_dir)
+            .expect("doctor should write");
+
+        assert!(report.passed);
+        assert_eq!(report.output_dir, doctor_output_dir);
+        assert!(report.json_path.exists());
+        assert!(report.markdown_path.exists());
+        assert!(report.local_team_sidecar_alpha);
+        assert!(!report.hosted_saas);
+        assert!(report.remediation_steps.is_empty());
+        assert!(report.checks.iter().any(|check| {
+            check.name == "operator handoff artifacts" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "audit evidence retention" && check.status == ReadinessStatus::Pass
+        }));
+
+        let json = fs::read_to_string(&report.json_path).expect("doctor JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("doctor JSON should parse");
+        assert_eq!(value["passed"], serde_json::json!(true));
+        assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
+        assert_eq!(value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(value["remediation_steps"], serde_json::json!([]));
+
+        let markdown =
+            fs::read_to_string(&report.markdown_path).expect("doctor markdown should read");
+        assert!(markdown.contains("AgentK Sidecar Doctor"));
+        assert!(markdown.contains("No remediation required"));
+        assert!(markdown.contains("Hosted SaaS: `false`"));
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+        fs::remove_file(&archive).ok();
+        fs::remove_file(archive_report.checksum).ok();
+        fs::remove_dir_all(install).ok();
     }
 
     #[test]

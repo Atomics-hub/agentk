@@ -20,7 +20,8 @@ use agentk::{
     verify_jsonl, verify_signatures_jsonl, verify_signatures_jsonl_with_trusted_keys,
     verify_signing_key_rotation_manifest_file, verify_team_reviewer_token,
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
-    write_sidecar_package_ops_handoff, write_sidecar_package_release_manifest,
+    write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
+    write_sidecar_package_release_manifest,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -754,6 +755,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Diagnose a packaged sidecar install or update and write remediation reports.
+    SidecarPackageDoctor {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for sidecar-doctor.json and sidecar-doctor.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the doctor report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1289,6 +1302,9 @@ fn run() -> Result<(), AgentKError> {
         }
         Command::SidecarPackageOpsHandoff { root, out, json } => {
             sidecar_package_ops_handoff(root, out, json)
+        }
+        Command::SidecarPackageDoctor { root, out, json } => {
+            sidecar_package_doctor(root, out, json)
         }
         Command::SidecarPackageArchiveCheck {
             archive,
@@ -8032,6 +8048,52 @@ fn sidecar_package_ops_handoff(
     Ok(())
 }
 
+fn sidecar_package_doctor(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir = out.unwrap_or_else(|| root.join("sidecar").join(".agentk").join("doctor"));
+    let report = write_sidecar_package_doctor(&root, &output_dir)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar doctor");
+        println!("root      {}", report.root.display());
+        println!("out       {}", report.output_dir.display());
+        println!("json      {}", report.json_path.display());
+        println!("markdown  {}", report.markdown_path.display());
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+        if !report.remediation_steps.is_empty() {
+            println!("remediation");
+            for step in &report.remediation_steps {
+                println!("- {step}");
+            }
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package doctor found blocking issues".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -8591,6 +8653,9 @@ fn run_release_candidate_smoke(
     let operator_handoff_root = installed_package.join("sidecar/.agentk/operator-handoff");
     let operator_handoff_json = operator_handoff_root.join("operator-handoff.json");
     let operator_handoff_markdown = operator_handoff_root.join("operator-handoff.md");
+    let doctor_root = installed_package.join("sidecar/.agentk/doctor");
+    let doctor_json = doctor_root.join("sidecar-doctor.json");
+    let doctor_markdown = doctor_root.join("sidecar-doctor.md");
 
     init_sidecar_bundle(&bundle, false)?;
     package_sidecar_bundle(&bundle, &package, false)?;
@@ -8618,6 +8683,7 @@ fn run_release_candidate_smoke(
     let github_payloads = github_payload_root.display().to_string();
     let email_payloads = email_payload_root.display().to_string();
     let operator_handoff = operator_handoff_root.display().to_string();
+    let doctor = doctor_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -8707,6 +8773,16 @@ fn run_release_candidate_smoke(
         &[
             ("AGENTK_BIN", agentk_bin.as_str()),
             ("AGENTK_OPS_HANDOFF_OUT", operator_handoff.as_str()),
+        ],
+    )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "sidecar doctor",
+        &bin.join("agentk-sidecar-doctor"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_SIDECAR_DOCTOR_OUT", doctor.as_str()),
         ],
     )?;
     release_candidate_smoke_step(
@@ -8928,6 +9004,8 @@ fn run_release_candidate_smoke(
         "operator handoff markdown",
         operator_handoff_markdown,
     );
+    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor json", doctor_json);
+    release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor markdown", doctor_markdown);
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone());
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone());
     release_candidate_smoke_artifact(
@@ -12764,6 +12842,40 @@ done
             Some(PathBuf::from(
                 "dist/agentk-sidecar/sidecar/.agentk/operator-handoff"
             ))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_doctor_accepts_root_and_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-doctor-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_doctor_accepts_root_and_out_inner)
+            .expect("sidecar-package-doctor parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-doctor parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_doctor_accepts_root_and_out_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-doctor",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/doctor",
+            "--json",
+        ])
+        .expect("sidecar-package-doctor should parse");
+
+        let Some(Command::SidecarPackageDoctor { root, out, json }) = cli.command else {
+            panic!("expected sidecar-package-doctor command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from("dist/agentk-sidecar/sidecar/.agentk/doctor"))
         );
         assert!(json);
     }
