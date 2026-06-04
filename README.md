@@ -238,7 +238,8 @@ This creates `release-status.json`, `release-candidate-smoke.json`,
 `dist/release-ticket/` without tagging, pushing, uploading, or publishing. The
 ticket summary includes explicit objective checks for the MCP gateway, including
 loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
-reviewer-scoped team-store evidence, multi-user permissions, Claude/Codex/Cursor
+reviewer-scoped team-store evidence, multi-user permissions proof for reviewer
+roles, identity coverage, and unauthorized rejection, Claude/Codex/Cursor
 sidecar onboarding, and GitHub/Postgres/Slack/filesystem safe-agent demo
 evidence including blocked filesystem patch proof, so reviewers can see product
 coverage without opening the full smoke report. The product coverage summary

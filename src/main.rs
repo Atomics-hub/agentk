@@ -11621,28 +11621,180 @@ fn release_ticket_objective_checks(
     [
         release_ticket_production_mcp_gateway_check(smoke),
         release_ticket_approvals_audit_dashboard_check(smoke),
-        release_ticket_objective_check(
-            smoke,
-            "objective: multi-user permissions",
-            &["identity check", "permissions handoff"],
-            &[
-                "permissions handoff json",
-                "permissions handoff markdown",
-                "team audit dashboard handoff",
-            ],
-            "identity check, permissions handoff, and team audit handoff are release-ticket evidence",
-        ),
+        release_ticket_multi_user_permissions_check(smoke),
         release_ticket_objective_check(
             smoke,
             "objective: Claude/Codex/Cursor sidecar",
             &["client handoff", "package check"],
-            &["claude client", "codex cursor client", "client handoff json"],
+            &[
+                "claude client",
+                "codex cursor client",
+                "client handoff json",
+            ],
             "client snippets, package check, and client handoff are release-ticket evidence",
         ),
         release_ticket_safe_agent_demo_check(smoke),
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_multi_user_permissions_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let base_check = release_ticket_objective_check(
+        smoke,
+        "objective: multi-user permissions",
+        &["identity check", "permissions handoff"],
+        &[
+            "permissions handoff json",
+            "permissions handoff markdown",
+            "team audit dashboard handoff",
+        ],
+        "identity check, permissions handoff, and team audit handoff are release-ticket evidence",
+    );
+    if base_check.status != ReadinessStatus::Pass {
+        return base_check;
+    }
+
+    match release_ticket_multi_user_permissions_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "objective: multi-user permissions",
+            ReadinessStatus::Pass,
+            "multi-user permissions evidence proves reviewer roles, identity mapping coverage, reviewer-scoped reads, authorized approval recording, unauthorized reviewer rejection, and local non-hosted scope",
+        ),
+        Err(detail) => release_ticket_check_item(
+            "objective: multi-user permissions",
+            ReadinessStatus::Fail,
+            detail,
+        ),
+    }
+}
+
+fn release_ticket_multi_user_permissions_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let permissions_handoff = release_ticket_smoke_artifact(smoke, "permissions handoff json")
+        .ok_or_else(|| "permissions handoff json artifact is missing".to_string())?;
+    let bytes = fs::read(&permissions_handoff.path).map_err(|err| {
+        format!(
+            "permissions handoff json could not be read at {}: {err}",
+            permissions_handoff.path.display()
+        )
+    })?;
+    let report = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "permissions handoff json could not be parsed at {}: {err}",
+            permissions_handoff.path.display()
+        )
+    })?;
+    if report.get("passed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("permissions handoff json does not report passed".into());
+    }
+    if report
+        .get("local_team_sidecar_alpha")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+        || report.get("hosted_saas").and_then(|value| value.as_bool()) != Some(false)
+    {
+        return Err("permissions handoff json does not prove local/team non-hosted scope".into());
+    }
+    if report
+        .get("authorized_decision_recorded")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+        || report
+            .get("unauthorized_reviewer_rejected")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+    {
+        return Err(
+            "permissions handoff json does not prove authorized allow and unauthorized deny paths"
+                .into(),
+        );
+    }
+    let open = report
+        .get("open_approvals")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let scoped = report
+        .get("scoped_open_approvals")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    if open == 0 || scoped != open {
+        return Err(
+            "permissions handoff json does not prove reviewer-scoped approval reads".into(),
+        );
+    }
+
+    let permissions = report
+        .get("permissions")
+        .ok_or_else(|| "permissions handoff json is missing permissions summary".to_string())?;
+    if permissions
+        .get("users")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        == 0
+        || permissions
+            .get("roles")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            == 0
+        || permissions
+            .get("reviewers")
+            .and_then(|value| value.as_array())
+            .is_none_or(|reviewers| reviewers.is_empty())
+    {
+        return Err("permissions handoff json does not prove users, roles, and reviewers".into());
+    }
+    let identity = report
+        .get("identity")
+        .ok_or_else(|| "permissions handoff json is missing identity summary".to_string())?;
+    let permission_reviewers = identity
+        .get("permission_reviewers")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let covered_reviewers = identity
+        .get("covered_permission_reviewers")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    if permission_reviewers == 0 || covered_reviewers != permission_reviewers {
+        return Err(
+            "permissions handoff json does not prove identity coverage for permission reviewers"
+                .into(),
+        );
+    }
+
+    let checks = report
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "permissions handoff json is missing checks".to_string())?;
+    for (name, detail_fragment) in [
+        ("reviewer roles", "reviewers"),
+        ("identity mapping coverage", "mapped reviewers"),
+        ("reviewer-scoped read", "approvals visible"),
+        ("authorized approve path", "recorded an approval decision"),
+        (
+            "unauthorized reviewer rejection",
+            "rejected before appending",
+        ),
+        ("alpha scope", "live IdP auth are false"),
+    ] {
+        let passed = checks.iter().any(|check| {
+            check.get("name").and_then(|value| value.as_str()) == Some(name)
+                && check.get("status").and_then(|value| value.as_str()) == Some("pass")
+                && check
+                    .get("detail")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|detail| detail.contains(detail_fragment))
+        });
+        if !passed {
+            return Err(format!(
+                "permissions handoff json does not prove {name}: {detail_fragment}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn release_ticket_approvals_audit_dashboard_check(

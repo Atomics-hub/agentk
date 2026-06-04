@@ -136,7 +136,8 @@ writes release status, smoke evidence, evidence-check results, finalization
 evidence, and a summary ticket JSON under `dist/release-ticket/`; the ticket
 summary includes explicit product-objective checks for the MCP gateway including
 loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
-reviewer-scoped team-store evidence, multi-user permissions,
+reviewer-scoped team-store evidence, multi-user permissions proof for reviewer
+roles, identity coverage, reviewer-scoped reads, and unauthorized rejection,
 Claude/Codex/Cursor sidecar, and GitHub/Postgres/Slack/filesystem safe-agent
 demo including blocked filesystem patch proof, plus accepted-limit checks that
 keep hosted SaaS, live IdP, production secret retrieval, public internet
