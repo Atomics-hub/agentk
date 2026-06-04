@@ -11472,8 +11472,9 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .filter(|name| !release_ticket_smoke_artifact_present(&smoke, name))
         .copied()
         .collect::<Vec<_>>();
+    let objective_checks = release_ticket_objective_checks(&smoke);
 
-    let checks = vec![
+    let mut checks = vec![
         release_ticket_check_item(
             "release status",
             if status.ready_for_alpha_rc {
@@ -11544,6 +11545,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
             "release-ticket writes local evidence only; it does not tag, push, upload, or publish",
         ),
     ];
+    checks.extend(objective_checks);
     let ready = checks
         .iter()
         .all(|check| check.status != ReadinessStatus::Fail);
@@ -11571,6 +11573,121 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_objective_checks(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Vec<ReleaseTicketCheckItem> {
+    [
+        release_ticket_objective_check(
+            smoke,
+            "objective: production MCP gateway",
+            &["HTTP handoff check", "production preflight", "deploy handoff"],
+            &[
+                "http handoff check json",
+                "sidecar http env example",
+                "systemd sidecar service",
+                "docker compose",
+                "caddy reverse proxy",
+                "nginx reverse proxy",
+            ],
+            "MCP HTTP gateway handoff, deploy templates, env example, and reverse-proxy artifacts are release-ticket evidence",
+        ),
+        release_ticket_objective_check(
+            smoke,
+            "objective: approvals/audit dashboard",
+            &["dashboard", "dashboard handoff"],
+            &[
+                "dashboard",
+                "dashboard handoff json",
+                "dashboard handoff markdown",
+                "systemd dashboard service",
+                "dashboard env example",
+            ],
+            "dashboard render, dashboard handoff, service template, and env example are release-ticket evidence",
+        ),
+        release_ticket_objective_check(
+            smoke,
+            "objective: multi-user permissions",
+            &["identity check", "permissions handoff"],
+            &[
+                "permissions handoff json",
+                "permissions handoff markdown",
+                "team audit dashboard handoff",
+            ],
+            "identity check, permissions handoff, and team audit handoff are release-ticket evidence",
+        ),
+        release_ticket_objective_check(
+            smoke,
+            "objective: Claude/Codex/Cursor sidecar",
+            &["client handoff", "package check"],
+            &["claude client", "codex cursor client", "client handoff json"],
+            "client snippets, package check, and client handoff are release-ticket evidence",
+        ),
+        release_ticket_objective_check(
+            smoke,
+            "objective: safe-agent demo",
+            &["safe-agent demo", "demo handoff", "store sync"],
+            &[
+                "trace",
+                "demo handoff json",
+                "team approvals",
+                "slack payloads",
+                "github payloads",
+                "postgres load",
+            ],
+            "safe-agent demo trace, handoff, store, notification, and Postgres artifacts are release-ticket evidence",
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn release_ticket_objective_check(
+    smoke: &ReleaseCandidateSmokeReport,
+    name: &str,
+    steps: &[&str],
+    artifacts: &[&str],
+    pass_detail: &str,
+) -> ReleaseTicketCheckItem {
+    let missing_steps = steps
+        .iter()
+        .filter(|name| !release_ticket_smoke_step_passed(smoke, name))
+        .copied()
+        .collect::<Vec<_>>();
+    let missing_artifacts = artifacts
+        .iter()
+        .filter(|name| !release_ticket_smoke_artifact_present(smoke, name))
+        .copied()
+        .collect::<Vec<_>>();
+    let status = if missing_steps.is_empty() && missing_artifacts.is_empty() {
+        ReadinessStatus::Pass
+    } else {
+        ReadinessStatus::Fail
+    };
+    let detail = if status == ReadinessStatus::Pass {
+        pass_detail.to_string()
+    } else {
+        let mut missing = Vec::new();
+        if !missing_steps.is_empty() {
+            missing.push(format!("missing steps: {}", missing_steps.join(", ")));
+        }
+        if !missing_artifacts.is_empty() {
+            missing.push(format!(
+                "missing artifacts: {}",
+                missing_artifacts.join(", ")
+            ));
+        }
+        missing.join("; ")
+    };
+    release_ticket_check_item(name, status, detail)
+}
+
+fn release_ticket_smoke_step_passed(smoke: &ReleaseCandidateSmokeReport, name: &str) -> bool {
+    smoke
+        .steps
+        .iter()
+        .any(|step| step.name == name && step.passed)
 }
 
 fn release_ticket_smoke_artifact_present(smoke: &ReleaseCandidateSmokeReport, name: &str) -> bool {
