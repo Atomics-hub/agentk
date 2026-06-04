@@ -6228,6 +6228,53 @@ struct McpHttpGatewayMetrics {
     sse_invalid_resume_requests: usize,
     sse_evicted_resume_requests: usize,
     sse_events_returned: usize,
+    invalid_json_rpc_id_requests: usize,
+    invalid_framing_responses: usize,
+    header_too_large_responses: usize,
+    body_too_large_responses: usize,
+    trusted_proxy_header_requests: usize,
+    downstream_transport_error_responses: usize,
+    gateway_internal_error_responses: usize,
+    sessions_created: usize,
+    sessions_deleted: usize,
+    sessions_expired: usize,
+    session_not_found: usize,
+}
+
+#[derive(Serialize)]
+struct McpHttpReadinessBody<'a> {
+    ready: bool,
+    endpoint: &'a str,
+    protocol_version: &'static str,
+    active_sessions: usize,
+    max_active_sessions: usize,
+    session_idle_timeout_ms: u128,
+    expired_sessions_reaped: usize,
+    max_concurrent_requests: usize,
+    max_body_bytes: usize,
+    max_header_bytes: usize,
+    stream_timeout_ms: u128,
+    configured_allowed_origins: usize,
+    auth_required: bool,
+    trusted_proxy_headers: bool,
+    requests_total: usize,
+    post_requests: usize,
+    get_requests: usize,
+    delete_requests: usize,
+    options_requests: usize,
+    other_method_requests: usize,
+    client_error_responses: usize,
+    server_error_responses: usize,
+    auth_rejections: usize,
+    origin_rejections: usize,
+    method_rejections: usize,
+    preflight_rejections: usize,
+    sse_stream_requests: usize,
+    sse_resume_requests: usize,
+    sse_invalid_resume_requests: usize,
+    sse_evicted_resume_requests: usize,
+    sse_events_returned: usize,
+    invalid_json_rpc_id_requests: usize,
     invalid_framing_responses: usize,
     header_too_large_responses: usize,
     body_too_large_responses: usize,
@@ -6963,49 +7010,50 @@ fn mcp_http_operational_response(
         status: "200 OK",
         content_type: "application/json",
         headers: Vec::new(),
-        body: serde_json::to_vec(&serde_json::json!({
-            "ready": true,
-            "endpoint": state.endpoint.as_str(),
-            "protocol_version": MCP_PROTOCOL_VERSION,
-            "active_sessions": active_sessions,
-            "max_active_sessions": state.max_active_sessions,
-            "session_idle_timeout_ms": state.session_idle_timeout.as_millis(),
-            "expired_sessions_reaped": expired_sessions,
-            "max_concurrent_requests": state.max_concurrent_requests,
-            "max_body_bytes": state.max_body_bytes,
-            "max_header_bytes": state.max_header_bytes,
-            "stream_timeout_ms": state.stream_timeout.as_millis(),
-            "configured_allowed_origins": state.allow_origins.len(),
-            "auth_required": state.auth_token.is_some(),
-            "trusted_proxy_headers": state.trust_proxy_headers,
-            "requests_total": metrics.requests_total,
-            "post_requests": metrics.post_requests,
-            "get_requests": metrics.get_requests,
-            "delete_requests": metrics.delete_requests,
-            "options_requests": metrics.options_requests,
-            "other_method_requests": metrics.other_method_requests,
-            "client_error_responses": metrics.client_error_responses,
-            "server_error_responses": metrics.server_error_responses,
-            "auth_rejections": metrics.auth_rejections,
-            "origin_rejections": metrics.origin_rejections,
-            "method_rejections": metrics.method_rejections,
-            "preflight_rejections": metrics.preflight_rejections,
-            "sse_stream_requests": metrics.sse_stream_requests,
-            "sse_resume_requests": metrics.sse_resume_requests,
-            "sse_invalid_resume_requests": metrics.sse_invalid_resume_requests,
-            "sse_evicted_resume_requests": metrics.sse_evicted_resume_requests,
-            "sse_events_returned": metrics.sse_events_returned,
-            "invalid_framing_responses": metrics.invalid_framing_responses,
-            "header_too_large_responses": metrics.header_too_large_responses,
-            "body_too_large_responses": metrics.body_too_large_responses,
-            "trusted_proxy_header_requests": metrics.trusted_proxy_header_requests,
-            "downstream_transport_error_responses": metrics.downstream_transport_error_responses,
-            "gateway_internal_error_responses": metrics.gateway_internal_error_responses,
-            "sessions_created": metrics.sessions_created,
-            "sessions_deleted": metrics.sessions_deleted,
-            "sessions_expired": metrics.sessions_expired,
-            "session_not_found": metrics.session_not_found
-        }))?,
+        body: serde_json::to_vec(&McpHttpReadinessBody {
+            ready: true,
+            endpoint: state.endpoint.as_str(),
+            protocol_version: MCP_PROTOCOL_VERSION,
+            active_sessions,
+            max_active_sessions: state.max_active_sessions,
+            session_idle_timeout_ms: state.session_idle_timeout.as_millis(),
+            expired_sessions_reaped: expired_sessions,
+            max_concurrent_requests: state.max_concurrent_requests,
+            max_body_bytes: state.max_body_bytes,
+            max_header_bytes: state.max_header_bytes,
+            stream_timeout_ms: state.stream_timeout.as_millis(),
+            configured_allowed_origins: state.allow_origins.len(),
+            auth_required: state.auth_token.is_some(),
+            trusted_proxy_headers: state.trust_proxy_headers,
+            requests_total: metrics.requests_total,
+            post_requests: metrics.post_requests,
+            get_requests: metrics.get_requests,
+            delete_requests: metrics.delete_requests,
+            options_requests: metrics.options_requests,
+            other_method_requests: metrics.other_method_requests,
+            client_error_responses: metrics.client_error_responses,
+            server_error_responses: metrics.server_error_responses,
+            auth_rejections: metrics.auth_rejections,
+            origin_rejections: metrics.origin_rejections,
+            method_rejections: metrics.method_rejections,
+            preflight_rejections: metrics.preflight_rejections,
+            sse_stream_requests: metrics.sse_stream_requests,
+            sse_resume_requests: metrics.sse_resume_requests,
+            sse_invalid_resume_requests: metrics.sse_invalid_resume_requests,
+            sse_evicted_resume_requests: metrics.sse_evicted_resume_requests,
+            sse_events_returned: metrics.sse_events_returned,
+            invalid_json_rpc_id_requests: metrics.invalid_json_rpc_id_requests,
+            invalid_framing_responses: metrics.invalid_framing_responses,
+            header_too_large_responses: metrics.header_too_large_responses,
+            body_too_large_responses: metrics.body_too_large_responses,
+            trusted_proxy_header_requests: metrics.trusted_proxy_header_requests,
+            downstream_transport_error_responses: metrics.downstream_transport_error_responses,
+            gateway_internal_error_responses: metrics.gateway_internal_error_responses,
+            sessions_created: metrics.sessions_created,
+            sessions_deleted: metrics.sessions_deleted,
+            sessions_expired: metrics.sessions_expired,
+            session_not_found: metrics.session_not_found,
+        })?,
     })
 }
 
@@ -7103,6 +7151,9 @@ agentk_mcp_http_sse_evicted_resume_requests_total {sse_evicted_resume_requests}\
 # HELP agentk_mcp_http_sse_events_returned_total Buffered MCP SSE events returned to clients.\n\
 # TYPE agentk_mcp_http_sse_events_returned_total counter\n\
 agentk_mcp_http_sse_events_returned_total {sse_events_returned}\n\
+# HELP agentk_mcp_http_invalid_json_rpc_id_requests_total MCP HTTP POST requests rejected before downstream forwarding because JSON-RPC id was malformed.\n\
+# TYPE agentk_mcp_http_invalid_json_rpc_id_requests_total counter\n\
+agentk_mcp_http_invalid_json_rpc_id_requests_total {invalid_json_rpc_id_requests}\n\
 # HELP agentk_mcp_http_invalid_framing_responses_total Requests rejected before parsing due to invalid HTTP framing.\n\
 # TYPE agentk_mcp_http_invalid_framing_responses_total counter\n\
 agentk_mcp_http_invalid_framing_responses_total {invalid_framing_responses}\n\
@@ -7159,6 +7210,7 @@ agentk_mcp_http_session_not_found_total {session_not_found}\n",
         sse_invalid_resume_requests = metrics.sse_invalid_resume_requests,
         sse_evicted_resume_requests = metrics.sse_evicted_resume_requests,
         sse_events_returned = metrics.sse_events_returned,
+        invalid_json_rpc_id_requests = metrics.invalid_json_rpc_id_requests,
         invalid_framing_responses = metrics.invalid_framing_responses,
         header_too_large_responses = metrics.header_too_large_responses,
         body_too_large_responses = metrics.body_too_large_responses,
@@ -7579,7 +7631,7 @@ fn mcp_http_post_response(
             });
         }
     };
-    if let Some(response) = mcp_http_json_rpc_shape_error(&message, &request.body) {
+    if let Some(response) = mcp_http_json_rpc_shape_error(&message, &request.body, state)? {
         return Ok(response);
     }
     let method = message.get("method").and_then(|value| value.as_str());
@@ -7723,31 +7775,64 @@ fn mcp_http_post_response(
 fn mcp_http_json_rpc_shape_error(
     message: &serde_json::Value,
     body: &[u8],
-) -> Option<DashboardHttpResponse> {
+    state: &Arc<McpHttpGatewayState>,
+) -> Result<Option<DashboardHttpResponse>, AgentKError> {
     let Some(object) = message.as_object() else {
         let detail = if message.is_array() {
             "batch requests are not supported"
         } else {
             "message must be a JSON object"
         };
-        return Some(mcp_http_json_rpc_invalid_request_response(body, detail));
+        return Ok(Some(mcp_http_json_rpc_invalid_request_response(
+            body, detail,
+        )));
     };
 
     if object.get("jsonrpc") != Some(&serde_json::Value::String("2.0".to_string())) {
-        return Some(mcp_http_json_rpc_invalid_request_response(
+        return Ok(Some(mcp_http_json_rpc_invalid_request_response(
             body,
             "jsonrpc must be \"2.0\"",
-        ));
+        )));
+    }
+
+    if let Some(id) = object.get("id")
+        && let Err(detail) = mcp_http_json_rpc_request_id(id)
+    {
+        mcp_http_update_metrics(state, |metrics| {
+            metrics.invalid_json_rpc_id_requests += 1;
+        })?;
+        return Ok(Some(mcp_http_json_rpc_invalid_request_response(
+            body, &detail,
+        )));
     }
 
     if !object.get("method").is_some_and(|value| value.is_string()) {
-        return Some(mcp_http_json_rpc_invalid_request_response(
+        return Ok(Some(mcp_http_json_rpc_invalid_request_response(
             body,
             "method must be a string",
-        ));
+        )));
     }
 
-    None
+    Ok(None)
+}
+
+fn mcp_http_json_rpc_request_id(id: &serde_json::Value) -> Result<serde_json::Value, String> {
+    match id {
+        serde_json::Value::Null => Ok(serde_json::Value::Null),
+        serde_json::Value::String(value) if value.len() <= MCP_HTTP_JSON_RPC_MAX_ID_BYTES => {
+            Ok(id.clone())
+        }
+        serde_json::Value::String(_) => Err(format!(
+            "id string must be at most {MCP_HTTP_JSON_RPC_MAX_ID_BYTES} bytes"
+        )),
+        serde_json::Value::Number(number)
+            if number.as_i64().is_some() || number.as_u64().is_some() =>
+        {
+            Ok(id.clone())
+        }
+        serde_json::Value::Number(_) => Err("id number must be an integer".to_string()),
+        _ => Err("id must be a string, integer, or null".to_string()),
+    }
 }
 
 fn mcp_http_json_rpc_invalid_request_response(body: &[u8], detail: &str) -> DashboardHttpResponse {
@@ -13247,6 +13332,140 @@ done
         assert_eq!(metrics.sessions_created, 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mcp_http_response_rejects_invalid_json_rpc_ids_before_session_forwarding() {
+        let state = Arc::new(McpHttpGatewayState {
+            proxy: McpSubprocessProxyConfig::new("agent://test", "http-id-probe", "sh")
+                .with_args(["-c".to_string(), mcp_proxy_trace_out_probe_server()])
+                .with_max_client_messages(10),
+            endpoint: "/mcp".to_string(),
+            max_concurrent_requests: 8,
+            max_active_sessions: MCP_HTTP_DEFAULT_MAX_ACTIVE_SESSIONS,
+            session_idle_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_SESSION_IDLE_TIMEOUT_MS),
+            max_body_bytes: MCP_HTTP_DEFAULT_MAX_BODY_BYTES,
+            max_header_bytes: MCP_HTTP_DEFAULT_MAX_HEADER_BYTES,
+            stream_timeout: Duration::from_millis(MCP_HTTP_DEFAULT_STREAM_TIMEOUT_MS),
+            allow_origins: Vec::new(),
+            auth_token: None,
+            trust_proxy_headers: false,
+            trace_out: None,
+            session_report_out: None,
+            metrics: Mutex::new(McpHttpGatewayMetrics::default()),
+            sessions: Mutex::new(BTreeMap::new()),
+        });
+        let initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let initialize_response =
+            mcp_http_response(&initialize, &state).expect("initialize should create session");
+        assert_eq!(initialize_response.status, "200 OK");
+        let session_id = response_header(&initialize_response, "Mcp-Session-Id")
+            .expect("initialize should return session")
+            .to_string();
+        let long_id = format!(
+            "ID_SECRET_LONG_{}",
+            "x".repeat(MCP_HTTP_JSON_RPC_MAX_ID_BYTES)
+        );
+        let cases = [
+            (
+                r#"{"jsonrpc":"2.0","id":{"secret":"ID_SECRET_OBJECT"},"method":"tools/list","params":{}}"#.to_string(),
+                "id must be a string, integer, or null".to_string(),
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1.5,"method":"tools/list","params":{}}"#.to_string(),
+                "id number must be an integer".to_string(),
+            ),
+            (
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":"{long_id}","method":"tools/list","params":{{}}}}"#
+                ),
+                format!("id string must be at most {MCP_HTTP_JSON_RPC_MAX_ID_BYTES} bytes"),
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":true,"method":"tools/list","params":{}}"#.to_string(),
+                "id must be a string, integer, or null".to_string(),
+            ),
+        ];
+
+        for (body, detail) in &cases {
+            let request = dashboard_test_request_with_headers(
+                "POST",
+                "/mcp",
+                [
+                    ("Accept", "application/json, text/event-stream"),
+                    ("Content-Type", "application/json"),
+                    ("Mcp-Session-Id", session_id.as_str()),
+                    ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+                ],
+                body.as_str(),
+            );
+            let response =
+                mcp_http_response(&request, &state).expect("invalid id should fail closed");
+            assert_eq!(response.status, "400 Bad Request");
+            assert_eq!(response.content_type, "application/json");
+            let response_body = String::from_utf8_lossy(&response.body);
+            assert!(!response_body.contains("ID_SECRET"));
+            let response_json: serde_json::Value =
+                serde_json::from_slice(&response.body).expect("response should be JSON-RPC");
+            assert_eq!(response_json["id"], serde_json::Value::Null);
+            assert_eq!(response_json["error"]["code"], serde_json::json!(-32600));
+            assert_eq!(
+                response_json["error"]["message"],
+                serde_json::json!("Invalid Request")
+            );
+            assert_eq!(
+                response_json["error"]["data"]["detail"],
+                serde_json::json!(detail)
+            );
+        }
+
+        let bad_initialize = dashboard_test_request_with_headers(
+            "POST",
+            "/mcp",
+            [
+                ("Accept", "application/json, text/event-stream"),
+                ("Content-Type", "application/json"),
+                ("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION),
+            ],
+            r#"{"jsonrpc":"2.0","id":{"secret":"ID_SECRET_PRESESSION"},"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        let bad_initialize_response =
+            mcp_http_response(&bad_initialize, &state).expect("invalid initialize id should fail");
+        assert_eq!(bad_initialize_response.status, "400 Bad Request");
+        assert!(
+            !String::from_utf8_lossy(&bad_initialize_response.body)
+                .contains("ID_SECRET_PRESESSION")
+        );
+
+        let session = Arc::clone(
+            state
+                .sessions
+                .lock()
+                .expect("sessions should lock")
+                .get(&session_id)
+                .expect("session should still exist"),
+        );
+        let session = session.lock().expect("session should lock");
+        assert_eq!(session.proxy.session_report().client_messages_seen, 1);
+        assert_eq!(session.sse_events.len(), 1);
+        drop(session);
+
+        let metrics = mcp_http_metrics_snapshot(&state).expect("metrics should snapshot");
+        assert_eq!(metrics.requests_total, 6);
+        assert_eq!(metrics.post_requests, 6);
+        assert_eq!(metrics.client_error_responses, 5);
+        assert_eq!(metrics.invalid_json_rpc_id_requests, 5);
+        assert_eq!(metrics.sessions_created, 1);
+    }
+
     #[test]
     fn mcp_http_response_rejects_unexpected_request_bodies() {
         let state = Arc::new(McpHttpGatewayState {
@@ -14194,6 +14413,10 @@ done
         );
         assert_eq!(ready_json["sse_events_returned"], serde_json::json!(0));
         assert_eq!(
+            ready_json["invalid_json_rpc_id_requests"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
             ready_json["invalid_framing_responses"],
             serde_json::json!(0)
         );
@@ -14264,6 +14487,7 @@ done
         assert!(metrics_body.contains("agentk_mcp_http_sse_invalid_resume_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_evicted_resume_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_sse_events_returned_total 0\n"));
+        assert!(metrics_body.contains("agentk_mcp_http_invalid_json_rpc_id_requests_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_invalid_framing_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_header_too_large_responses_total 0\n"));
         assert!(metrics_body.contains("agentk_mcp_http_body_too_large_responses_total 0\n"));

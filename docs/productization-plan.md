@@ -31,6 +31,9 @@ Implemented today:
 - local subprocess stdio MCP proxy for tools, resources, prompts, lifecycle
   checks, redaction, no-passthrough behavior, response timeouts, and trace
   output plus redacted session summaries;
+- bounded local MCP Streamable HTTP adapter admission checks for malformed
+  JSON-RPC request shapes and malformed `id` values before downstream
+  forwarding, session lookup, message-budget use, or SSE buffer updates;
 - before/after MCP shim eval and killer demo;
 - hash-first trace inspection, replay, fork replay, and signature verification;
 - `audit`, which turns a trace into a small audit and approval inbox with

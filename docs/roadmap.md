@@ -122,6 +122,8 @@ Status: in progress.
 - [x] Add a one-command MCP killer demo runner for reviewable redacted traces.
 - [x] Add a before/after MCP shim eval scorecard comparing baseline passthrough with AgentK mediation.
 - [x] Add redacted subprocess MCP session summaries for gateway observability.
+- [x] Reject malformed Streamable HTTP JSON-RPC ids before downstream
+      forwarding with redacted readiness/metrics counters.
 - [ ] Build a complete production MCP proxy/server transport.
 - [x] Block tainted flows at tool-call boundaries.
 - [x] Add release-audit smoke coverage for MCP taint flow.

@@ -183,7 +183,11 @@ exact `application/json` media type; parameters such as `charset` are allowed.
 POST bodies must be single JSON-RPC 2.0 request or notification objects with a
 string `method`; batches, non-object JSON, response-shaped objects, and invalid
 JSON-RPC version fields are rejected before session lookup or downstream
-forwarding.
+forwarding. JSON-RPC `id` values, when present, must be null, an integer, or a
+string of at most 128 bytes; object, array, boolean, fractional-number, and
+oversized string ids return sanitized JSON-RPC `Invalid Request` responses
+before session lookup, downstream forwarding, session message-budget use, or SSE
+buffer updates.
 Request bodies are accepted only on MCP endpoint `POST`; unknown routes, CORS
 preflights, DELETEs, GET/SSE placeholders, and operational probes reject bodies
 before route fallback, auth, session, or probe handling.
@@ -220,8 +224,9 @@ trace/session reports using the same per-session file names as DELETE cleanup.
 The readiness and metrics probes expose only redacted numeric counters: parsed
 request totals by method, client/server error totals, auth/origin/method
 rejections, CORS preflight validation rejections, SSE stream/resume totals,
-invalid-framing/header-too-large/body-too-large stream rejections, downstream
-transport failures, AgentK internal gateway failures, and session
+invalid JSON-RPC id rejections, invalid-framing/header-too-large/body-too-large
+stream rejections, downstream transport failures, AgentK internal gateway
+failures, and session
 create/delete/expire/not-found totals.
 This is still a local adapter: it does not provide a hosted production control
 plane, TLS termination, hosted SSE streaming, or live external identity verification.
