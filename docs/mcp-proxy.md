@@ -308,7 +308,8 @@ a hosted SaaS readiness check.
 Run `<package>/bin/agentk-sidecar-support-bundle --json` when a reviewer or
 operator needs one support archive. It refreshes the operator handoff, runs the
 sidecar doctor, and writes support-bundle JSON/Markdown with hashed package,
-dashboard, store, trace, and notification evidence for local/team handoff.
+dashboard, store, trace, notification evidence, and ticket-attachment guidance
+for local/team handoff.
 Run `<package>/bin/agentk-sidecar-permissions-handoff --json` when a team wants
 the narrower authorization proof. It validates reviewer roles,
 reviewer-scoped reads, token coverage counts, identity mapping coverage,

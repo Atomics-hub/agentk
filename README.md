@@ -591,7 +591,9 @@ Run `dist/agentk-sidecar/bin/agentk-sidecar-support-bundle --json` when an
 operator needs one support artifact. It refreshes the operator handoff, runs
 the sidecar doctor, inventories package manifest/lock/release manifest,
 dashboard, store, trace, and notification evidence with byte counts and
-SHA-256 hashes, then writes
+SHA-256 hashes, adds ticket-attachment guidance for operator handoff, doctor,
+package, trace, store, approvals, notification drafts, and release manifest
+files, then writes
 `sidecar/.agentk/support-bundle/support-bundle.json` and
 `sidecar/.agentk/support-bundle/support-bundle.md` without uploading anything
 to a hosted service.
