@@ -9852,6 +9852,9 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "notifications env example",
 ];
 
+const RELEASE_TICKET_SMOKE_INVENTORY_ARTIFACTS: &[&str] =
+    RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS;
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ReleaseCandidateSmokeReport {
     root: PathBuf,
@@ -11612,6 +11615,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         release_ticket_artifact("smoke evidence", &smoke_evidence)?,
         release_ticket_artifact("finalization", &finalization)?,
     ];
+    artifacts.extend(release_ticket_smoke_inventory_artifacts(&smoke)?);
     artifacts.extend(homebrew_handoff.artifacts);
 
     let report = ReleaseTicketReport {
@@ -11827,6 +11831,42 @@ fn release_ticket_artifact(
         bytes: metadata.len(),
         sha256: release_candidate_smoke_file_sha256(path)?,
     })
+}
+
+fn release_ticket_smoke_inventory_artifacts(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<Vec<ReleaseTicketArtifact>, AgentKError> {
+    release_ticket_named_smoke_inventory_artifacts(smoke, RELEASE_TICKET_SMOKE_INVENTORY_ARTIFACTS)
+}
+
+fn release_ticket_named_smoke_inventory_artifacts(
+    smoke: &ReleaseCandidateSmokeReport,
+    names: &[&str],
+) -> Result<Vec<ReleaseTicketArtifact>, AgentKError> {
+    names
+        .iter()
+        .map(|name| {
+            let artifact = release_ticket_smoke_artifact(smoke, name).ok_or_else(|| {
+                AgentKError::InvalidMcpRequest(format!(
+                    "release ticket smoke artifact inventory is missing {name}"
+                ))
+            })?;
+            Ok(ReleaseTicketArtifact {
+                name: format!("smoke: {}", artifact.name),
+                path: artifact.path.clone(),
+                bytes: artifact.bytes.ok_or_else(|| {
+                    AgentKError::InvalidMcpRequest(format!(
+                        "release ticket smoke artifact inventory is missing byte count for {name}"
+                    ))
+                })?,
+                sha256: artifact.sha256.clone().ok_or_else(|| {
+                    AgentKError::InvalidMcpRequest(format!(
+                        "release ticket smoke artifact inventory is missing SHA-256 for {name}"
+                    ))
+                })?,
+            })
+        })
+        .collect()
 }
 
 fn release_ticket_served_dashboard_runtime_check(
@@ -21023,6 +21063,64 @@ done
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn release_ticket_smoke_inventory_lifts_named_artifacts() {
+        let path = test_temp_path("agentk-ticket-smoke-artifact", "json");
+        fs::write(&path, b"{\"ready\":true}\n").expect("artifact should write");
+        let sha256 = release_candidate_smoke_file_sha256(&path).expect("hash should compute");
+        let smoke = ReleaseCandidateSmokeReport {
+            root: PathBuf::from("root"),
+            package: PathBuf::from("root/dist/agentk-sidecar"),
+            package_archive: PathBuf::from("root/dist/agentk-sidecar.tar"),
+            package_archive_checksum: PathBuf::from("root/dist/agentk-sidecar.tar.sha256"),
+            package_release_manifest: PathBuf::from(
+                "root/dist/agentk-sidecar-release-manifest.json",
+            ),
+            evidence_report: None,
+            installed_package: PathBuf::from("root/installed/agentk-sidecar"),
+            package_archive_sha256:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            trace_path: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl",
+            ),
+            dashboard_path: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/dashboard.html",
+            ),
+            store_export_root: PathBuf::from("root/installed/agentk-sidecar/sidecar/.agentk/store"),
+            team_store_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/team-store",
+            ),
+            slack_payload_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/slack",
+            ),
+            github_payload_root: PathBuf::from(
+                "root/installed/agentk-sidecar/sidecar/.agentk/github",
+            ),
+            kept_root: true,
+            passed: true,
+            steps: Vec::new(),
+            artifacts: vec![ReleaseCandidateSmokeArtifact {
+                name: "quickstart json".to_string(),
+                path: path.clone(),
+                present: true,
+                bytes: Some(15),
+                sha256: Some(sha256.clone()),
+            }],
+        };
+
+        let artifacts =
+            release_ticket_named_smoke_inventory_artifacts(&smoke, &["quickstart json"])
+                .expect("named smoke artifact should lift into ticket inventory");
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "smoke: quickstart json");
+        assert_eq!(artifacts[0].path, path);
+        assert_eq!(artifacts[0].bytes, 15);
+        assert_eq!(artifacts[0].sha256, sha256);
+
+        let _ = fs::remove_file(artifacts[0].path.clone());
     }
 
     #[test]
