@@ -47,6 +47,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-http",
     "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-team-handoff-check",
+    "bin/agentk-sidecar-ops-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -69,6 +70,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-http",
     "bin/agentk-sidecar-http-handoff-check",
     "bin/agentk-sidecar-team-handoff-check",
+    "bin/agentk-sidecar-ops-handoff",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6666,6 +6668,41 @@ pub struct EmailNotificationExportReport {
     pub payloads: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageOpsHandoffReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub trace_path: PathBuf,
+    pub decisions_path: PathBuf,
+    pub permissions_path: PathBuf,
+    pub identity_path: PathBuf,
+    pub dashboard_path: PathBuf,
+    pub store_export_root: PathBuf,
+    pub team_store_root: PathBuf,
+    pub slack_payload_root: PathBuf,
+    pub github_payload_root: PathBuf,
+    pub email_payload_root: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub package_check: SidecarPackageCheckReport,
+    pub team_handoff_check: SidecarPackageCheckReport,
+    pub safe_agent_demo: SafeAgentDemoReport,
+    pub dashboard: ApprovalDashboardReport,
+    pub permissions: TeamPermissionsReport,
+    pub identity: TeamIdentityReport,
+    pub store_export: AuditStoreExportReport,
+    pub store_export_check: AuditStoreCheckReport,
+    pub store_sync: DurableAuditStoreSyncReport,
+    pub team_store_check: AuditStoreCheckReport,
+    pub slack: SlackNotificationExportReport,
+    pub github: GitHubNotificationExportReport,
+    pub email: EmailNotificationExportReport,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -7496,6 +7533,284 @@ pub fn export_email_notification_payloads(
             .count(),
         payloads: payloads.len(),
     })
+}
+
+pub fn write_sidecar_package_ops_handoff(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+) -> Result<SidecarPackageOpsHandoffReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let trace_path = root
+        .join("sidecar")
+        .join(".agentk")
+        .join("runs")
+        .join("safe-agent-demo.jsonl");
+    let decisions_path = root.join("sidecar").join(".agentk").join("approvals.jsonl");
+    let permissions_path = root.join("sidecar").join("team-permissions.toml");
+    let identity_path = root.join("sidecar").join("team-identity.toml");
+    let dashboard_path = root.join("sidecar").join(".agentk").join("dashboard.html");
+    let store_export_root = root.join("sidecar").join(".agentk").join("store");
+    let team_store_root = root.join("sidecar").join(".agentk").join("team-store");
+    let notification_root = root.join("sidecar").join(".agentk").join("notifications");
+    let slack_payload_root = notification_root.join("slack");
+    let github_payload_root = notification_root.join("github");
+    let email_payload_root = notification_root.join("email");
+    let json_path = output_dir.join("operator-handoff.json");
+    let markdown_path = output_dir.join("operator-handoff.md");
+
+    let package_check = check_sidecar_package(root)?;
+    let team_handoff_check = check_sidecar_package_team_handoff(root)?;
+    let safe_agent_demo = run_safe_agent_demo(&trace_path)?;
+    let dashboard = write_approval_dashboard_html(
+        &trace_path,
+        &decisions_path,
+        Some(&permissions_path),
+        &dashboard_path,
+    )?;
+    let permissions = team_permissions_report_from_path(&permissions_path)?;
+    let identity = team_identity_report_from_path(&identity_path, Some(&permissions_path))?;
+    let store_export = export_audit_store(
+        &trace_path,
+        &decisions_path,
+        Some(&permissions_path),
+        Some(&identity_path),
+        &store_export_root,
+    )?;
+    let store_export_check = check_audit_store(&store_export_root)?;
+    let store_sync = sync_durable_audit_store(
+        &trace_path,
+        &decisions_path,
+        Some(&permissions_path),
+        Some(&identity_path),
+        &team_store_root,
+    )?;
+    let team_store_check = check_audit_store(&team_store_root)?;
+    let slack = export_slack_notification_payloads(
+        &team_store_root,
+        &slack_payload_root,
+        Some("#agentk-approvals"),
+    )?;
+    let github = export_github_notification_payloads(
+        &team_store_root,
+        &github_payload_root,
+        Some("agentk/safe-agent-demo"),
+        &["agentk".to_string(), "approval".to_string()],
+    )?;
+    let email = export_email_notification_payloads(
+        &team_store_root,
+        &email_payload_root,
+        &["agentk-alerts@example.com".to_string()],
+    )?;
+
+    let checks = vec![
+        ops_handoff_check(
+            "package preflight",
+            package_check.passed,
+            format!("{} readiness checks", package_check.checks.len()),
+        ),
+        ops_handoff_check(
+            "team handoff preflight",
+            team_handoff_check.passed,
+            format!("{} readiness checks", team_handoff_check.checks.len()),
+        ),
+        ops_handoff_check(
+            "safe-agent demo",
+            safe_agent_demo.improved_checks == safe_agent_demo.total_checks,
+            format!(
+                "{}/{} checks improved, {} trace events",
+                safe_agent_demo.improved_checks,
+                safe_agent_demo.total_checks,
+                safe_agent_demo.agentk.trace_events
+            ),
+        ),
+        ops_handoff_check(
+            "dashboard artifact",
+            dashboard_path.is_file() && dashboard.signatures_ok,
+            format!(
+                "{} open approvals, {} evidence refs",
+                dashboard.open, dashboard.evidence_refs
+            ),
+        ),
+        ops_handoff_check(
+            "team permissions",
+            !permissions.reviewers.is_empty(),
+            format!(
+                "{} users, {} roles, {} reviewers",
+                permissions.users,
+                permissions.roles,
+                permissions.reviewers.len()
+            ),
+        ),
+        ops_handoff_check(
+            "team identity",
+            identity.permission_reviewers == identity.covered_permission_reviewers,
+            format!(
+                "{} providers, {} mappings",
+                identity.providers, identity.mappings
+            ),
+        ),
+        ops_handoff_check(
+            "store export",
+            store_export_check.passed && store_export.signatures_ok,
+            format!(
+                "{} files, {} events",
+                store_export.files.len(),
+                store_export.events_checked
+            ),
+        ),
+        ops_handoff_check(
+            "durable team store",
+            team_store_check.passed && store_sync.signatures_ok,
+            format!(
+                "{} files, {} notifications",
+                store_sync.files.len(),
+                store_sync.notifications
+            ),
+        ),
+        ops_handoff_check(
+            "notification payload exports",
+            slack.payloads == slack.notifications
+                && github.payloads == github.notifications
+                && email.payloads == email.notifications,
+            format!(
+                "slack {}, github {}, email {} payloads",
+                slack.payloads, github.payloads, email.payloads
+            ),
+        ),
+        ops_handoff_check(
+            "alpha scope",
+            true,
+            "local/team sidecar alpha; hosted SaaS is false",
+        ),
+    ];
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    fs::create_dir_all(output_dir)?;
+    let report = SidecarPackageOpsHandoffReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        trace_path,
+        decisions_path,
+        permissions_path,
+        identity_path,
+        dashboard_path,
+        store_export_root,
+        team_store_root,
+        slack_payload_root,
+        github_payload_root,
+        email_payload_root,
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        passed,
+        checks,
+        package_check,
+        team_handoff_check,
+        safe_agent_demo,
+        dashboard,
+        permissions,
+        identity,
+        store_export,
+        store_export_check,
+        store_sync,
+        team_store_check,
+        slack,
+        github,
+        email,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(
+        &markdown_path,
+        sidecar_package_ops_handoff_markdown(&report),
+    )?;
+    Ok(report)
+}
+
+fn ops_handoff_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+fn sidecar_package_ops_handoff_markdown(report: &SidecarPackageOpsHandoffReport) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Operator Handoff\n\n");
+    out.push_str("This artifact summarizes a local/team sidecar alpha handoff. It is not hosted SaaS and does not include delivery credentials.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!("- Trace: `{}`\n", report.trace_path.display()));
+    out.push_str(&format!(
+        "- Dashboard: `{}`\n",
+        report.dashboard_path.display()
+    ));
+    out.push_str(&format!(
+        "- Store export: `{}`\n",
+        report.store_export_root.display()
+    ));
+    out.push_str(&format!(
+        "- Durable team store: `{}`\n",
+        report.team_store_root.display()
+    ));
+    out.push_str(&format!(
+        "- Notification exports: Slack `{}`, GitHub `{}`, email `{}`\n\n",
+        report.slack_payload_root.display(),
+        report.github_payload_root.display(),
+        report.email_payload_root.display()
+    ));
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Team Summary\n\n");
+    out.push_str(&format!(
+        "- Reviewers: {} ({} token-protected)\n",
+        report.permissions.reviewers.len(),
+        report.permissions.token_protected_reviewers
+    ));
+    out.push_str(&format!(
+        "- Identity mappings: {} across {} providers\n",
+        report.identity.mappings, report.identity.providers
+    ));
+    out.push_str(&format!(
+        "- Dashboard approvals: {} open, {} approved, {} denied, {} stale\n",
+        report.dashboard.open,
+        report.dashboard.approved,
+        report.dashboard.denied,
+        report.dashboard.stale
+    ));
+    out.push_str(&format!(
+        "- Durable notifications: {} total\n",
+        report.store_sync.notifications
+    ));
+    out.push_str("\n## Archive Notes\n\n");
+    out.push_str("Archive this directory together with the referenced trace and store artifacts when handing AgentK evidence to a team reviewer. The notification exports are payload drafts only; delivery remains an explicit operator action outside this report.\n");
+    out
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 pub fn record_approval_decision_jsonl(
@@ -12654,7 +12969,7 @@ done
     let serialized_events = serde_json::to_string(&report.events)?;
 
     Ok(McpSubprocessProxyTimeoutSmokeReport {
-        timeout_reported: responses.get(1).is_some_and(|response| {
+        timeout_reported: responses.iter().any(|response| {
             response["id"] == serde_json::json!(2)
                 && response["error"]["code"] == serde_json::json!(-32004)
                 && response["error"]["message"] == serde_json::json!("Downstream transport failure")
@@ -14815,7 +15130,11 @@ fn command_audit_check(root: &Path, name: &str, program: &str, args: &[&str]) ->
         Ok(output) => release_audit_check(
             name,
             ReadinessStatus::Fail,
-            format!("command exited with {}", output.status),
+            format!(
+                "command exited with {}; {}",
+                output.status,
+                command_failure_summary(&output.stdout, &output.stderr)
+            ),
         ),
         Err(error) => release_audit_check(
             name,
@@ -14823,6 +15142,37 @@ fn command_audit_check(root: &Path, name: &str, program: &str, args: &[&str]) ->
             format!("could not run command: {error}"),
         ),
     }
+}
+
+fn command_failure_summary(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr_tail = command_output_tail(&stderr, 8);
+    let stdout_tail = command_output_tail(&stdout, 8);
+    match (stderr_tail.is_empty(), stdout_tail.is_empty()) {
+        (false, false) => format!("stderr: {stderr_tail}; stdout: {stdout_tail}"),
+        (false, true) => format!("stderr: {stderr_tail}"),
+        (true, false) => format!("stdout: {stdout_tail}"),
+        (true, true) => "no command output".to_string(),
+    }
+}
+
+fn command_output_tail(output: &str, max_lines: usize) -> String {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    let mut summary = lines.join(" | ");
+    const MAX_CHARS: usize = 1200;
+    if summary.len() > MAX_CHARS {
+        summary.truncate(MAX_CHARS);
+        summary.push_str("...");
+    }
+    summary
 }
 
 fn release_audit_check(
@@ -15638,6 +15988,11 @@ pub fn package_sidecar_bundle(
             out,
             "bin/agentk-sidecar-team-handoff-check",
             &sidecar_team_handoff_check_script(),
+        )?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-ops-handoff",
+            &sidecar_ops_handoff_script(),
         )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
@@ -16796,6 +17151,10 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
         .and_then(|value| value.as_str())
         == Some("bin/agentk-sidecar-team-handoff-check")
         && handoff
+            .and_then(|value| value.get("ops_handoff"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-sidecar-ops-handoff")
+        && handoff
             .and_then(|value| value.get("doc"))
             .and_then(|value| value.as_str())
             == Some("clients/team-audit-dashboard-handoff.md")
@@ -16833,7 +17192,7 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
         sidecar_check(
             "package manifest team handoff",
             ReadinessStatus::Fail,
-            "team_handoff must list checker, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
+            "team_handoff must list checker, ops handoff, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
         )
     }
 }
@@ -17583,6 +17942,15 @@ fn check_sidecar_package_team_handoff_runtime_launchers(root: &Path) -> Readines
                 "agentk-package-check",
             ][..],
         ),
+        (
+            "bin/agentk-sidecar-ops-handoff",
+            &[
+                "sidecar-package-ops-handoff",
+                "AGENTK_OPS_HANDOFF_OUT",
+                "operator-handoff",
+                "agentk-package-check",
+            ][..],
+        ),
     ];
     for (relative, required_text) in requirements {
         let content = match fs::read_to_string(root.join(relative)) {
@@ -17700,6 +18068,8 @@ fn check_sidecar_package_team_handoff_readme(root: &Path) -> ReadinessCheck {
     let requirements = [
         "clients/team-audit-dashboard-handoff.md",
         "bin/agentk-sidecar-team-handoff-check",
+        "bin/agentk-sidecar-ops-handoff",
+        "operator-handoff",
         "safe-agent demo",
         "dashboard server",
         "durable team store",
@@ -20992,6 +21362,9 @@ checksum, and install receipt without changing the package directory.
   HTTP/SSE handoff contract before team review or release evidence capture.
 - `bin/agentk-sidecar-team-handoff-check`: validates the packaged local/team
   approval, dashboard, and durable audit-store handoff contract.
+- `bin/agentk-sidecar-ops-handoff`: refreshes the safe-agent demo, dashboard,
+  audit stores, notification payload drafts, identity and permission summaries,
+  then writes one compact operator handoff JSON/Markdown artifact.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -21039,6 +21412,7 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-sidecar-http
 ./bin/agentk-sidecar-http-handoff-check --json
 ./bin/agentk-sidecar-team-handoff-check --json
+./bin/agentk-sidecar-ops-handoff --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -21237,6 +21611,13 @@ dashboard, dashboard server, reviewer-scoped team permissions, identity mapping
 summary, durable team store, and notification outbox into one local/team
 sidecar alpha proof. It is not hosted SaaS and does not claim a managed control
 plane.
+Run `bin/agentk-sidecar-ops-handoff --json` when an operator needs one
+archiveable proof bundle. It refreshes the demo trace, dashboard HTML, exported
+audit store, durable team store, Slack/GitHub/email payload drafts, identity
+summary, and team permissions summary, then writes
+`sidecar/.agentk/operator-handoff/operator-handoff.json` and
+`sidecar/.agentk/operator-handoff/operator-handoff.md`. It does not send
+notifications, load Postgres, or read delivery credentials.
 This is a local/team sidecar alpha, not hosted SaaS.
 
 `bin/agentk-store-export`, `bin/agentk-store-check`, and
@@ -21313,6 +21694,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
         },
         "team_handoff": {
             "check": "bin/agentk-sidecar-team-handoff-check",
+            "ops_handoff": "bin/agentk-sidecar-ops-handoff",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -21681,6 +22063,19 @@ ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
 AGENTK_BIN="${AGENTK_BIN:-agentk}"
 "$DIR/agentk-package-check" --json >/dev/null
 exec "$AGENTK_BIN" sidecar-package-team-handoff-check --root "$ROOT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_ops_handoff_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+OPS_OUT="${AGENTK_OPS_HANDOFF_OUT:-$ROOT/sidecar/.agentk/operator-handoff}"
+"$DIR/agentk-package-check" --json >/dev/null
+exec "$AGENTK_BIN" sidecar-package-ops-handoff --root "$ROOT" --out "$OPS_OUT" "$@"
 "#
     .to_string()
 }
@@ -23469,7 +23864,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 41);
+        assert_eq!(report.files.len(), 42);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -23483,6 +23878,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-http").exists());
         assert!(out.join("bin/agentk-sidecar-http-handoff-check").exists());
         assert!(out.join("bin/agentk-sidecar-team-handoff-check").exists());
+        assert!(out.join("bin/agentk-sidecar-ops-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -23561,6 +23957,13 @@ can_deny = ["*"]
         assert!(team_handoff_check.contains("sidecar-package-team-handoff-check"));
         assert!(team_handoff_check.contains("agentk-package-check"));
         assert!(team_handoff_check.contains("\"$@\""));
+        let ops_handoff = fs::read_to_string(out.join("bin/agentk-sidecar-ops-handoff"))
+            .expect("ops handoff launcher should read");
+        assert!(ops_handoff.contains("sidecar-package-ops-handoff"));
+        assert!(ops_handoff.contains("AGENTK_OPS_HANDOFF_OUT"));
+        assert!(ops_handoff.contains("operator-handoff"));
+        assert!(ops_handoff.contains("agentk-package-check"));
+        assert!(ops_handoff.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -23720,6 +24123,9 @@ can_deny = ["*"]
         assert!(package_readme.contains("not a hosted production"));
         assert!(package_readme.contains("clients/team-audit-dashboard-handoff.md"));
         assert!(package_readme.contains("bin/agentk-sidecar-team-handoff-check"));
+        assert!(package_readme.contains("bin/agentk-sidecar-ops-handoff"));
+        assert!(package_readme.contains("operator-handoff.json"));
+        assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("local/team sidecar alpha"));
         assert!(package_readme.contains("not hosted SaaS"));
         let package_manifest =
@@ -23765,6 +24171,10 @@ can_deny = ["*"]
         assert_eq!(
             package_manifest_json["team_handoff"]["check"],
             serde_json::json!("bin/agentk-sidecar-team-handoff-check")
+        );
+        assert_eq!(
+            package_manifest_json["team_handoff"]["ops_handoff"],
+            serde_json::json!("bin/agentk-sidecar-ops-handoff")
         );
         assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
@@ -24258,6 +24668,57 @@ can_deny = ["*"]
         let team_handoff_report =
             check_sidecar_package_team_handoff(&out).expect("team handoff check should run");
         assert!(team_handoff_report.passed);
+
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(out).ok();
+    }
+
+    #[test]
+    fn sidecar_package_ops_handoff_writes_archiveable_report() {
+        let root = temp_path("agentk-sidecar-ops-handoff-root", "dir");
+        let out = temp_path("agentk-sidecar-ops-handoff-out", "dir");
+        init_sidecar_bundle(&root, false).expect("bundle generation should succeed");
+        package_sidecar_bundle(&root, &out, false).expect("sidecar package should write");
+
+        let output_dir = out.join("sidecar/.agentk/operator-handoff");
+        let report =
+            write_sidecar_package_ops_handoff(&out, &output_dir).expect("ops handoff should write");
+
+        assert!(report.passed);
+        assert_eq!(report.output_dir, output_dir);
+        assert!(report.json_path.exists());
+        assert!(report.markdown_path.exists());
+        assert!(report.trace_path.exists());
+        assert!(report.dashboard_path.exists());
+        assert!(report.store_export_root.join("audit.json").exists());
+        assert!(
+            report
+                .team_store_root
+                .join("current/approvals.json")
+                .exists()
+        );
+        assert!(report.slack_payload_root.join("payloads.jsonl").exists());
+        assert!(report.github_payload_root.join("payloads.jsonl").exists());
+        assert!(report.email_payload_root.join("payloads.jsonl").exists());
+        assert!(report.local_team_sidecar_alpha);
+        assert!(!report.hosted_saas);
+        assert!(report.checks.iter().any(|check| {
+            check.name == "notification payload exports" && check.status == ReadinessStatus::Pass
+        }));
+
+        let json = fs::read_to_string(&report.json_path).expect("handoff JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("handoff JSON should parse");
+        assert_eq!(value["passed"], serde_json::json!(true));
+        assert_eq!(value["local_team_sidecar_alpha"], serde_json::json!(true));
+        assert_eq!(value["hosted_saas"], serde_json::json!(false));
+
+        let markdown =
+            fs::read_to_string(&report.markdown_path).expect("handoff markdown should read");
+        assert!(markdown.contains("AgentK Operator Handoff"));
+        assert!(markdown.contains("local/team sidecar alpha"));
+        assert!(markdown.contains("not hosted SaaS"));
+        assert!(markdown.contains("Notification exports"));
 
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(out).ok();
