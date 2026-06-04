@@ -13612,10 +13612,12 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
         alpha_release_source_surface(
             root,
             "offline release ticket bundle",
-            "release-ticket writes status, accepted-limit checks, smoke evidence, product-objective checks, evidence check, finalization reports, publication preflight evidence, and publication handoff checks into one reviewer handoff directory without publishing",
+            "release-ticket writes status, accepted-limit checks, smoke evidence, product-objective checks, evidence check, finalization reports, publication preflight evidence, GitHub release draft, and publication handoff checks into one reviewer handoff directory without publishing",
             &[
                 ("src/main.rs", "ReleaseTicket"),
                 ("src/main.rs", "release-publication-check.json"),
+                ("src/main.rs", "github-release-draft.md"),
+                ("src/main.rs", "GitHub release draft"),
                 ("src/main.rs", "publication preflight"),
                 ("src/main.rs", "publication handoff"),
                 (
