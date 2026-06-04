@@ -932,8 +932,9 @@ to create one offline reviewer handoff directory containing release status,
 release-candidate smoke evidence, evidence-check results, finalization evidence,
 and a summary ticket JSON with explicit product-objective coverage checks,
 install/package provenance checks, store/notification handoff checks,
-quickstart handoff checks, support/doctor handoff checks, accepted alpha limits,
-and deferred-scope checks, without tagging, pushing, uploading, or publishing.
+served dashboard runtime checks, quickstart handoff checks, support/doctor
+handoff checks, accepted alpha limits, and deferred-scope checks, without
+tagging, pushing, uploading, or publishing.
 The individual steps remain available: run
 `cargo run --locked -- release-candidate-smoke --root dist/release-candidate-smoke --force --keep-root --evidence-out dist/release-candidate-smoke.json`
 to recreate the package, archive, checksum, and release manifest in a
