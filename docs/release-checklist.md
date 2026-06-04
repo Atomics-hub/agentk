@@ -90,7 +90,7 @@ cargo run --locked -- release-candidate-smoke --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
-cargo run --locked -- sidecar-package-doctor --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 ```
 
 For manual reviewer handoff, also keep the explicit package commands available
@@ -126,6 +126,7 @@ cargo run --locked -- sidecar-package-ops-handoff \
   --json
 cargo run --locked -- sidecar-package-doctor \
   --root installed/agentk-sidecar \
+  --release-manifest dist/agentk-sidecar-release-manifest.json \
   --json
 ```
 

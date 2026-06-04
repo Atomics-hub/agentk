@@ -76,7 +76,8 @@ Implemented today:
 - a release-candidate smoke gate that recreates the package/archive, runs the
   packaged safe-agent demo, dashboard, sidecar check, store export/check/sync,
   one compact operator handoff report, one sidecar doctor support/remediation
-  report, Slack/GitHub/email payload exporters, and Postgres dry-run push flow.
+  report with release-manifest binding, Slack/GitHub/email payload exporters,
+  and Postgres dry-run push flow.
 - `release-homebrew-formula`, which writes a reviewed local Homebrew formula
   from a source release URL plus SHA-256 without publishing a tap.
 
@@ -307,6 +308,11 @@ The safest first productization slice is the local team sidecar path:
     team permissions, and identity summary, then write `operator-handoff.json`
     and `operator-handoff.md` for archiveable local/team release review. This
     is a handoff artifact, not a hosted control plane.
+    `sidecar-package-doctor` and the packaged `bin/agentk-sidecar-doctor`
+    launcher can also validate a `sidecar-package-release-manifest` handoff
+    when `--release-manifest` or `AGENTK_PACKAGE_RELEASE_MANIFEST` is provided,
+    binding the installed package manifest, package lock, archive checksum, and
+    install receipt hashes into the support report.
 14. The subprocess MCP gateway has an operator-configurable
     `max_client_messages` cap, exposed on `mcp-proxy-stdio` and generated
     sidecar bundles, so runaway clients cannot hold one proxy session forever.

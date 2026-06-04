@@ -275,9 +275,12 @@ After unpacking, copying, or updating a package, run
 `<package>/sidecar/.agentk/doctor/sidecar-doctor.md`. The report verifies
 launchers, dummy env templates, bounded HTTP/SSE handoff readiness,
 dashboard/store readiness, install receipt provenance, operator handoff
-artifacts, evidence retention, and safe-agent demo integrity with concrete
-remediation steps. It is a local/team sidecar alpha support artifact, not a
-hosted SaaS readiness check.
+artifacts, evidence retention, optional release-manifest binding, and
+safe-agent demo integrity with concrete remediation steps. Set
+`AGENTK_PACKAGE_RELEASE_MANIFEST` or pass `--release-manifest` to bind the
+support report to the package manifest, package lock, archive checksum, and
+install receipt hashes. It is a local/team sidecar alpha support artifact, not
+a hosted SaaS readiness check.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

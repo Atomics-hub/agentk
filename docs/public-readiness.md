@@ -53,11 +53,13 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/operator-handoff/operator-handoff.md` with the demo,
       dashboard, store, notifications, identity, and permissions summary for
       operator archive.
-- [ ] `cargo run --locked -- sidecar-package-doctor --root dist/agentk-sidecar
-      --json` writes `sidecar/.agentk/doctor/sidecar-doctor.json` and
+- [ ] `cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar
+      --release-manifest dist/agentk-sidecar-release-manifest.json --json`
+      writes `sidecar/.agentk/doctor/sidecar-doctor.json` and
       `sidecar/.agentk/doctor/sidecar-doctor.md` with launchers, env-template
       sanity, gateway handoff readiness, dashboard/store readiness, install
-      receipt provenance, evidence retention, and remediation steps.
+      receipt provenance, evidence retention, optional release-manifest binding,
+      and remediation steps.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] Errors do not leak sensitive syscall payloads by default.
@@ -127,7 +129,7 @@ cargo run --locked -- release-status --json
 cargo run --locked -- release-candidate-smoke --json
 cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
-cargo run --locked -- sidecar-package-doctor --root dist/agentk-sidecar --json
+cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>

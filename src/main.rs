@@ -763,6 +763,9 @@ enum Command {
         /// Output directory for sidecar-doctor.json and sidecar-doctor.md.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Optional release handoff manifest produced by sidecar-package-release-manifest.
+        #[arg(long)]
+        release_manifest: Option<PathBuf>,
         /// Emit the doctor report as JSON.
         #[arg(long)]
         json: bool,
@@ -1303,9 +1306,12 @@ fn run() -> Result<(), AgentKError> {
         Command::SidecarPackageOpsHandoff { root, out, json } => {
             sidecar_package_ops_handoff(root, out, json)
         }
-        Command::SidecarPackageDoctor { root, out, json } => {
-            sidecar_package_doctor(root, out, json)
-        }
+        Command::SidecarPackageDoctor {
+            root,
+            out,
+            release_manifest,
+            json,
+        } => sidecar_package_doctor(root, out, release_manifest, json),
         Command::SidecarPackageArchiveCheck {
             archive,
             checksum,
@@ -8051,10 +8057,11 @@ fn sidecar_package_ops_handoff(
 fn sidecar_package_doctor(
     root: PathBuf,
     out: Option<PathBuf>,
+    release_manifest: Option<PathBuf>,
     json: bool,
 ) -> Result<(), AgentKError> {
     let output_dir = out.unwrap_or_else(|| root.join("sidecar").join(".agentk").join("doctor"));
-    let report = write_sidecar_package_doctor(&root, &output_dir)?;
+    let report = write_sidecar_package_doctor(&root, &output_dir, release_manifest.as_deref())?;
     let failed = !report.passed;
 
     if json {
@@ -8065,6 +8072,9 @@ fn sidecar_package_doctor(
         println!("out       {}", report.output_dir.display());
         println!("json      {}", report.json_path.display());
         println!("markdown  {}", report.markdown_path.display());
+        if let Some(release_manifest) = &report.release_manifest_path {
+            println!("release   {}", release_manifest.display());
+        }
         println!(
             "verdict   {}",
             if report.passed { "ready" } else { "blocked" }
@@ -8783,6 +8793,7 @@ fn run_release_candidate_smoke(
         &[
             ("AGENTK_BIN", agentk_bin.as_str()),
             ("AGENTK_SIDECAR_DOCTOR_OUT", doctor.as_str()),
+            ("AGENTK_PACKAGE_RELEASE_MANIFEST", release_manifest.as_str()),
         ],
     )?;
     release_candidate_smoke_step(
@@ -12865,17 +12876,29 @@ done
             "dist/agentk-sidecar",
             "--out",
             "dist/agentk-sidecar/sidecar/.agentk/doctor",
+            "--release-manifest",
+            "dist/agentk-sidecar-release-manifest.json",
             "--json",
         ])
         .expect("sidecar-package-doctor should parse");
 
-        let Some(Command::SidecarPackageDoctor { root, out, json }) = cli.command else {
+        let Some(Command::SidecarPackageDoctor {
+            root,
+            out,
+            release_manifest,
+            json,
+        }) = cli.command
+        else {
             panic!("expected sidecar-package-doctor command");
         };
         assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
         assert_eq!(
             out,
             Some(PathBuf::from("dist/agentk-sidecar/sidecar/.agentk/doctor"))
+        );
+        assert_eq!(
+            release_manifest,
+            Some(PathBuf::from("dist/agentk-sidecar-release-manifest.json"))
         );
         assert!(json);
     }

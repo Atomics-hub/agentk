@@ -518,9 +518,13 @@ Run `dist/agentk-sidecar/bin/agentk-sidecar-doctor --json` after unpacking,
 copying, or updating a package. It verifies required launchers, dummy env
 templates, bounded HTTP/SSE handoff readiness, dashboard/store handoff
 readiness, install receipt provenance, operator handoff artifacts, audit
-evidence retention, and safe-agent demo integrity, then writes
+evidence retention, optional release-manifest binding, and safe-agent demo
+integrity, then writes
 `sidecar/.agentk/doctor/sidecar-doctor.json` and
 `sidecar/.agentk/doctor/sidecar-doctor.md` with concrete remediation steps.
+Set `AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json`
+or pass `--release-manifest` so the doctor can confirm the package manifest,
+package lock, archive checksum, and install receipt hashes still line up.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -762,7 +766,8 @@ agentk sidecar-package-release-manifest --package installed/agentk-sidecar --arc
 dist/agentk-sidecar/bin/agentk-sidecar-http-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json
-dist/agentk-sidecar/bin/agentk-sidecar-doctor --json
+AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
+  installed/agentk-sidecar/bin/agentk-sidecar-doctor --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
@@ -787,7 +792,8 @@ package, `dist/agentk-sidecar.tar`, and
 `dist/agentk-sidecar-release-manifest.json` in a temporary root, execute the
 packaged HTTP and team handoff checks, safe-agent demo, dashboard, sidecar
 check, store export/check/sync, operator handoff artifact,
-Slack/GitHub/email payload exporters, and Postgres dry-run push launchers, then
+sidecar doctor release-manifest binding, Slack/GitHub/email payload exporters,
+and Postgres dry-run push launchers, then
 verify the install receipt and other artifacts before a release branch or tag.
 For a Homebrew tap handoff, generate a reviewed formula from the final source
 tarball URL and SHA:
