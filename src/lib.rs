@@ -13215,6 +13215,10 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                     "src/main.rs",
                     "production MCP gateway evidence proves loopback defaults",
                 ),
+                (
+                    "src/main.rs",
+                    "approvals/audit dashboard evidence proves static dashboard readiness",
+                ),
                 ("src/main.rs", "objective: safe-agent demo"),
                 ("src/main.rs", "safe-agent demo filesystem evidence"),
                 ("src/main.rs", "accepted alpha limits"),

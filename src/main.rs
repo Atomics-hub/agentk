@@ -11620,19 +11620,7 @@ fn release_ticket_objective_checks(
 ) -> Vec<ReleaseTicketCheckItem> {
     [
         release_ticket_production_mcp_gateway_check(smoke),
-        release_ticket_objective_check(
-            smoke,
-            "objective: approvals/audit dashboard",
-            &["dashboard", "dashboard handoff"],
-            &[
-                "dashboard",
-                "dashboard handoff json",
-                "dashboard handoff markdown",
-                "systemd dashboard service",
-                "dashboard env example",
-            ],
-            "dashboard render, dashboard handoff, service template, and env example are release-ticket evidence",
-        ),
+        release_ticket_approvals_audit_dashboard_check(smoke),
         release_ticket_objective_check(
             smoke,
             "objective: multi-user permissions",
@@ -11655,6 +11643,140 @@ fn release_ticket_objective_checks(
     ]
     .into_iter()
     .collect()
+}
+
+fn release_ticket_approvals_audit_dashboard_check(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> ReleaseTicketCheckItem {
+    let base_check = release_ticket_objective_check(
+        smoke,
+        "objective: approvals/audit dashboard",
+        &["dashboard", "dashboard handoff"],
+        &[
+            "dashboard",
+            "dashboard handoff json",
+            "dashboard handoff markdown",
+            "team approvals",
+            "systemd dashboard service",
+            "dashboard env example",
+        ],
+        "dashboard render, dashboard handoff, service template, and env example are release-ticket evidence",
+    );
+    if base_check.status != ReadinessStatus::Pass {
+        return base_check;
+    }
+
+    match release_ticket_approvals_audit_dashboard_evidence(smoke) {
+        Ok(()) => release_ticket_check_item(
+            "objective: approvals/audit dashboard",
+            ReadinessStatus::Pass,
+            "approvals/audit dashboard evidence proves static dashboard readiness, reviewer-scoped team store, open approval inventory, dashboard env handoff, and local non-hosted scope",
+        ),
+        Err(detail) => release_ticket_check_item(
+            "objective: approvals/audit dashboard",
+            ReadinessStatus::Fail,
+            detail,
+        ),
+    }
+}
+
+fn release_ticket_approvals_audit_dashboard_evidence(
+    smoke: &ReleaseCandidateSmokeReport,
+) -> Result<(), String> {
+    let dashboard_handoff = release_ticket_smoke_artifact(smoke, "dashboard handoff json")
+        .ok_or_else(|| "dashboard handoff json artifact is missing".to_string())?;
+    let bytes = fs::read(&dashboard_handoff.path).map_err(|err| {
+        format!(
+            "dashboard handoff json could not be read at {}: {err}",
+            dashboard_handoff.path.display()
+        )
+    })?;
+    let report = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|err| {
+        format!(
+            "dashboard handoff json could not be parsed at {}: {err}",
+            dashboard_handoff.path.display()
+        )
+    })?;
+    if report.get("passed").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("dashboard handoff json does not report passed".into());
+    }
+    if report
+        .get("local_team_sidecar_alpha")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+        || report.get("hosted_saas").and_then(|value| value.as_bool()) != Some(false)
+    {
+        return Err("dashboard handoff json does not prove local/team non-hosted scope".into());
+    }
+
+    let checks = report
+        .get("checks")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "dashboard handoff json is missing checks".to_string())?;
+    for (name, detail_fragment) in [
+        ("team dashboard/store readiness", "team handoff checks"),
+        ("safe-agent demo trace", "checks improved"),
+        ("static dashboard artifact", "open approvals"),
+        ("durable team store", "notifications"),
+        ("package team handoff env", "dashboard env example"),
+        ("alpha scope", "hosted SaaS is false"),
+    ] {
+        let passed = checks.iter().any(|check| {
+            check.get("name").and_then(|value| value.as_str()) == Some(name)
+                && check.get("status").and_then(|value| value.as_str()) == Some("pass")
+                && check
+                    .get("detail")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|detail| detail.contains(detail_fragment))
+        });
+        if !passed {
+            return Err(format!(
+                "dashboard handoff json does not prove {name}: {detail_fragment}"
+            ));
+        }
+    }
+
+    let dashboard = report
+        .get("dashboard")
+        .ok_or_else(|| "dashboard handoff json is missing dashboard summary".to_string())?;
+    let open = dashboard
+        .get("open")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let evidence_refs = dashboard
+        .get("evidence_refs")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let reviewers = dashboard
+        .get("reviewers")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    if open == 0 || evidence_refs == 0 || reviewers == 0 {
+        return Err(
+            "dashboard handoff json does not prove open approvals, evidence refs, and reviewers"
+                .into(),
+        );
+    }
+    let store_sync = report
+        .get("store_sync")
+        .ok_or_else(|| "dashboard handoff json is missing store_sync".to_string())?;
+    if store_sync
+        .get("open")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default()
+        == 0
+        || store_sync
+            .get("notifications")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default()
+            == 0
+    {
+        return Err(
+            "dashboard handoff json does not prove durable team store approvals and notifications"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn release_ticket_production_mcp_gateway_check(
