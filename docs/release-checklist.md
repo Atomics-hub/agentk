@@ -157,9 +157,12 @@ hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
 similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,
 owner deployment steps, secret-reference manifests, non-local bind defaults, and no live secret
-retrieval. It checks Homebrew handoff evidence for local formula generation,
-source archive SHA verification, tap checkout byte match, dirty-path hygiene,
-and no tap publication, and records the release status, smoke evidence,
+retrieval. It checks publication handoff evidence for strict finalization,
+signed tag evidence, package archive hash, final release notes, owner-scoped
+publication steps, and `release-publication-check` coverage. It checks Homebrew
+handoff evidence for local formula generation, source archive SHA verification,
+tap checkout byte match, dirty-path hygiene, and no tap publication, and records
+the release status, smoke evidence,
 finalization, package, quickstart, dashboard, client, permissions, deploy,
 support, demo, store, notification, service-template, and Homebrew
 formula/check/tap handoff files in the ticket artifact inventory. It does not
