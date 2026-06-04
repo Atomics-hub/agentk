@@ -6788,8 +6788,17 @@ pub struct SidecarPackageDeployHandoffReport {
     pub hosted_saas: bool,
     pub passed: bool,
     pub checks: Vec<ReadinessCheck>,
+    pub deployment_steps: Vec<SidecarPackageDeployStep>,
     pub artifacts: Vec<SidecarPackageDeployHandoffArtifact>,
     pub package_check: SidecarPackageCheckReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageDeployStep {
+    pub owner: String,
+    pub action: String,
+    pub artifact: PathBuf,
+    pub risk: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8759,6 +8768,7 @@ pub fn write_sidecar_package_deploy_handoff(
     for relative in SIDECAR_PACKAGE_DEPLOY_ENV_EXAMPLES {
         sidecar_package_deploy_handoff_artifact(&mut artifacts, relative, root.join(relative))?;
     }
+    let deployment_steps = sidecar_package_deploy_steps(root);
     let required_artifacts_present = artifacts.iter().all(|artifact| artifact.present);
     let passed = required_artifacts_present
         && checks
@@ -8775,6 +8785,7 @@ pub fn write_sidecar_package_deploy_handoff(
         hosted_saas: false,
         passed,
         checks,
+        deployment_steps,
         artifacts,
         package_check,
     };
@@ -8808,6 +8819,55 @@ fn deploy_handoff_check(
     detail: impl Into<String>,
 ) -> ReadinessCheck {
     readiness_check(name, status, detail)
+}
+
+fn sidecar_package_deploy_steps(root: &Path) -> Vec<SidecarPackageDeployStep> {
+    vec![
+        sidecar_package_deploy_step(
+            "service manager owner",
+            "Review and install the systemd or launchd templates for the MCP HTTP sidecar and dashboard services.",
+            root.join("deploy/systemd/agentk-sidecar-http.service"),
+            "Keeps process lifecycle, restart policy, no-new-privileges, private tmp, and file mode hardening explicit.",
+        ),
+        sidecar_package_deploy_step(
+            "container owner",
+            "Review the Dockerfile and Compose service before image build or container deployment.",
+            root.join("deploy/docker/compose.yml"),
+            "Confirms non-root runtime, read-only filesystem, capability drops, and loopback-published defaults.",
+        ),
+        sidecar_package_deploy_step(
+            "proxy and TLS owner",
+            "Review Caddy or nginx reverse-proxy templates and terminate TLS/external auth in the deployment layer.",
+            root.join("deploy/proxy/Caddyfile"),
+            "Prevents accidentally treating the local sidecar as a hosted public control plane.",
+        ),
+        sidecar_package_deploy_step(
+            "secrets owner",
+            "Replace CHANGE_ME placeholders through supervisor-owned secret stores and keep credentials out of the package.",
+            root.join("deploy/env/notifications.env.example"),
+            "Preserves AgentK's reference-only secret handoff and avoids committing delivery credentials.",
+        ),
+        sidecar_package_deploy_step(
+            "rollback owner",
+            "Archive package manifest, package lock, install receipt, and support bundle before rollout.",
+            root.join(SIDECAR_PACKAGE_LOCK),
+            "Keeps a hash-bound rollback and support packet for deployment tickets.",
+        ),
+    ]
+}
+
+fn sidecar_package_deploy_step(
+    owner: &str,
+    action: &str,
+    artifact: PathBuf,
+    risk: &str,
+) -> SidecarPackageDeployStep {
+    SidecarPackageDeployStep {
+        owner: owner.to_string(),
+        action: action.to_string(),
+        artifact,
+        risk: risk.to_string(),
+    }
 }
 
 fn sidecar_package_deploy_handoff_artifact(
@@ -8855,6 +8915,18 @@ fn sidecar_package_deploy_handoff_markdown(report: &SidecarPackageDeployHandoffR
             check.status.as_str().to_ascii_lowercase(),
             check.name,
             check.detail
+        ));
+    }
+    out.push_str("\n## Deployment Steps\n\n");
+    out.push_str("| Owner | Action | Artifact | Risk Controlled |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
+    for step in &report.deployment_steps {
+        out.push_str(&format!(
+            "| {} | {} | `{}` | {} |\n",
+            markdown_cell(&step.owner),
+            markdown_cell(&step.action),
+            step.artifact.display(),
+            markdown_cell(&step.risk)
         ));
     }
     out.push_str("\n## Deploy Artifacts\n\n");
@@ -30361,9 +30433,41 @@ can_deny = ["*"]
         assert!(report.checks.iter().any(|check| {
             check.name == "package deploy env examples" && check.status == ReadinessStatus::Pass
         }));
+        assert_eq!(report.deployment_steps.len(), 5);
+        for owner in [
+            "service manager owner",
+            "container owner",
+            "proxy and TLS owner",
+            "secrets owner",
+            "rollback owner",
+        ] {
+            assert!(
+                report.deployment_steps.iter().any(|step| {
+                    step.owner == owner
+                        && step.artifact.is_file()
+                        && !step.action.trim().is_empty()
+                        && !step.risk.trim().is_empty()
+                }),
+                "missing deploy step for {owner}"
+            );
+        }
+        let json = fs::read_to_string(&report.json_path).expect("deploy handoff JSON should read");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("deploy handoff JSON should parse");
+        assert_eq!(
+            value["deployment_steps"]
+                .as_array()
+                .expect("deploy steps should be an array")
+                .len(),
+            5
+        );
         let markdown =
             fs::read_to_string(&report.markdown_path).expect("deploy handoff markdown should read");
         assert!(markdown.contains("AgentK Deploy Handoff"));
+        assert!(markdown.contains("## Deployment Steps"));
+        assert!(markdown.contains("service manager owner"));
+        assert!(markdown.contains("proxy and TLS owner"));
+        assert!(markdown.contains("rollback owner"));
         assert!(markdown.contains("sidecar-http.env.example"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
 
