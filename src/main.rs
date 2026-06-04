@@ -22,7 +22,7 @@ use agentk::{
     verify_signing_key_rotation_manifest_file, verify_team_reviewer_token,
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
     write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
-    write_sidecar_package_release_manifest,
+    write_sidecar_package_release_manifest, write_sidecar_package_support_bundle,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -779,6 +779,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write one packaged support bundle with handoff, doctor, and hashed evidence metadata.
+    SidecarPackageSupportBundle {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for support-bundle.json and support-bundle.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Optional release handoff manifest produced by sidecar-package-release-manifest.
+        #[arg(long)]
+        release_manifest: Option<PathBuf>,
+        /// Emit the support bundle report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1466,6 +1481,12 @@ fn run() -> Result<(), AgentKError> {
             release_manifest,
             json,
         } => sidecar_package_doctor(root, out, release_manifest, json),
+        Command::SidecarPackageSupportBundle {
+            root,
+            out,
+            release_manifest,
+            json,
+        } => sidecar_package_support_bundle(root, out, release_manifest, json),
         Command::SidecarPackageArchiveCheck {
             archive,
             checksum,
@@ -8814,6 +8835,59 @@ fn sidecar_package_doctor(
     Ok(())
 }
 
+fn sidecar_package_support_bundle(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    release_manifest: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir =
+        out.unwrap_or_else(|| root.join("sidecar").join(".agentk").join("support-bundle"));
+    let report =
+        write_sidecar_package_support_bundle(&root, &output_dir, release_manifest.as_deref())?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar support bundle");
+        println!("root      {}", report.root.display());
+        println!("out       {}", report.output_dir.display());
+        println!("json      {}", report.json_path.display());
+        println!("markdown  {}", report.markdown_path.display());
+        if let Some(release_manifest) = &report.release_manifest_path {
+            println!("release   {}", release_manifest.display());
+        }
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+        println!("artifacts {}", report.artifacts.len());
+        if !report.remediation_steps.is_empty() {
+            println!("remediation");
+            for step in &report.remediation_steps {
+                println!("- {step}");
+            }
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package support bundle found blocking issues".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -9270,6 +9344,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "operator handoff markdown",
     "sidecar doctor json",
     "sidecar doctor markdown",
+    "support bundle json",
+    "support bundle markdown",
     "trace",
     "dashboard",
     "store readme",
@@ -9747,6 +9823,9 @@ fn run_release_candidate_smoke(
     let doctor_root = installed_package.join("sidecar/.agentk/doctor");
     let doctor_json = doctor_root.join("sidecar-doctor.json");
     let doctor_markdown = doctor_root.join("sidecar-doctor.md");
+    let support_bundle_root = installed_package.join("sidecar/.agentk/support-bundle");
+    let support_bundle_json = support_bundle_root.join("support-bundle.json");
+    let support_bundle_markdown = support_bundle_root.join("support-bundle.md");
 
     init_sidecar_bundle(&bundle, false)?;
     package_sidecar_bundle(&bundle, &package, false)?;
@@ -9775,6 +9854,7 @@ fn run_release_candidate_smoke(
     let email_payloads = email_payload_root.display().to_string();
     let operator_handoff = operator_handoff_root.display().to_string();
     let doctor = doctor_root.display().to_string();
+    let support_bundle = support_bundle_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -10058,6 +10138,17 @@ fn run_release_candidate_smoke(
             ("AGENTK_STORE_EXPORT_ROOT", store_export.as_str()),
         ],
     )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "support bundle",
+        &bin.join("agentk-sidecar-support-bundle"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_SUPPORT_BUNDLE_OUT", support_bundle.as_str()),
+            ("AGENTK_PACKAGE_RELEASE_MANIFEST", release_manifest.as_str()),
+        ],
+    )?;
 
     let mut artifacts = Vec::new();
     release_candidate_smoke_artifact(
@@ -10118,6 +10209,12 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor json", doctor_json)?;
     release_candidate_smoke_artifact(&mut artifacts, "sidecar doctor markdown", doctor_markdown)?;
+    release_candidate_smoke_artifact(&mut artifacts, "support bundle json", support_bundle_json)?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "support bundle markdown",
+        support_bundle_markdown,
+    )?;
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
     release_candidate_smoke_artifact(
@@ -15977,6 +16074,54 @@ done
         assert_eq!(
             out,
             Some(PathBuf::from("dist/agentk-sidecar/sidecar/.agentk/doctor"))
+        );
+        assert_eq!(
+            release_manifest,
+            Some(PathBuf::from("dist/agentk-sidecar-release-manifest.json"))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_support_bundle_accepts_root_and_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-support-bundle-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_support_bundle_accepts_root_and_out_inner)
+            .expect("sidecar-package-support-bundle parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-support-bundle parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_support_bundle_accepts_root_and_out_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-support-bundle",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/support-bundle",
+            "--release-manifest",
+            "dist/agentk-sidecar-release-manifest.json",
+            "--json",
+        ])
+        .expect("sidecar-package-support-bundle should parse");
+
+        let Some(Command::SidecarPackageSupportBundle {
+            root,
+            out,
+            release_manifest,
+            json,
+        }) = cli.command
+        else {
+            panic!("expected sidecar-package-support-bundle command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from(
+                "dist/agentk-sidecar/sidecar/.agentk/support-bundle"
+            ))
         );
         assert_eq!(
             release_manifest,

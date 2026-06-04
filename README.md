@@ -550,6 +550,14 @@ integrity, then writes
 Set `AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json`
 or pass `--release-manifest` so the doctor can confirm the package manifest,
 package lock, archive checksum, and install receipt hashes still line up.
+Run `dist/agentk-sidecar/bin/agentk-sidecar-support-bundle --json` when an
+operator needs one support artifact. It refreshes the operator handoff, runs
+the sidecar doctor, inventories package manifest/lock/release manifest,
+dashboard, store, trace, and notification evidence with byte counts and
+SHA-256 hashes, then writes
+`sidecar/.agentk/support-bundle/support-bundle.json` and
+`sidecar/.agentk/support-bundle/support-bundle.md` without uploading anything
+to a hosted service.
 Set `AGENTK_BIN` to the reviewed AgentK executable path when `agentk` is not on
 the service account's `PATH`. The package includes
 `deploy/env/*.env.example` files for the HTTP gateway, dashboard, Postgres push,
@@ -797,6 +805,8 @@ dist/agentk-sidecar/bin/agentk-sidecar-team-handoff-check --json
 dist/agentk-sidecar/bin/agentk-sidecar-ops-handoff --json
 AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
   installed/agentk-sidecar/bin/agentk-sidecar-doctor --json
+AGENTK_PACKAGE_RELEASE_MANIFEST=dist/agentk-sidecar-release-manifest.json \
+  installed/agentk-sidecar/bin/agentk-sidecar-support-bundle --json
 dist/agentk-sidecar/bin/agentk-safe-agent-demo --json
 AGENTK_TRACE=dist/agentk-sidecar/sidecar/.agentk/runs/safe-agent-demo.jsonl \
   dist/agentk-sidecar/bin/agentk-dashboard --json
@@ -820,8 +830,9 @@ gates. Run
 to recreate the package, archive, checksum, and release manifest in a
 repo-local smoke root, execute the packaged HTTP and team handoff checks,
 safe-agent demo, dashboard, sidecar check, store export/check/sync, operator
-handoff artifact, release-manifest check, sidecar doctor release-manifest
-binding, Slack/GitHub/email payload exporters, and Postgres dry-run push
+handoff artifact, support bundle JSON/Markdown, release-manifest check,
+sidecar doctor release-manifest binding, Slack/GitHub/email payload exporters,
+and Postgres dry-run push
 launchers, then write one JSON evidence report with SHA-256 and byte counts for
 the required handoff artifacts before a release branch or tag. Then run
 `cargo run --locked -- release-evidence-check --evidence dist/release-candidate-smoke.json --root dist/release-candidate-smoke`
