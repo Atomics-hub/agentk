@@ -82,8 +82,9 @@ installs the package, writes and verifies the package release manifest, runs the
 packaged safe-agent demo, dashboard, sidecar checks, durable store
 sync/export/check, onboarding guide artifact, operator handoff artifact,
 sidecar doctor support report, support bundle artifact, Slack/GitHub/email
-notification payload exporters, dry-run delivery launchers, and Postgres
-dry-run push:
+notification payload exporters, systemd/launchd service templates,
+Dockerfile/Compose templates, deploy README, dummy env examples, dry-run
+delivery launchers, and Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json

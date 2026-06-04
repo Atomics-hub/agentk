@@ -9355,7 +9355,17 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "slack payloads",
     "github payloads",
     "email payloads",
+    "systemd sidecar service",
+    "systemd dashboard service",
+    "launchd sidecar plist",
+    "launchd dashboard plist",
+    "dockerfile",
     "docker compose",
+    "deploy readme",
+    "sidecar http env example",
+    "dashboard env example",
+    "store postgres env example",
+    "notifications env example",
 ];
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -10255,8 +10265,58 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
+        "systemd sidecar service",
+        installed_package.join("deploy/systemd/agentk-sidecar-http.service"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "systemd dashboard service",
+        installed_package.join("deploy/systemd/agentk-dashboard.service"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "launchd sidecar plist",
+        installed_package.join("deploy/launchd/com.agentk.sidecar-http.plist"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "launchd dashboard plist",
+        installed_package.join("deploy/launchd/com.agentk.dashboard.plist"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "dockerfile",
+        installed_package.join("deploy/docker/Dockerfile"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
         "docker compose",
         installed_package.join("deploy/docker/compose.yml"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "deploy readme",
+        installed_package.join("deploy/README.md"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "sidecar http env example",
+        installed_package.join("deploy/env/sidecar-http.env.example"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "dashboard env example",
+        installed_package.join("deploy/env/dashboard.env.example"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "store postgres env example",
+        installed_package.join("deploy/env/store-postgres.env.example"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "notifications env example",
+        installed_package.join("deploy/env/notifications.env.example"),
     )?;
 
     if let Some(missing) = artifacts.iter().find(|artifact| !artifact.present) {
