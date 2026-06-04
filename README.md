@@ -234,8 +234,8 @@ cargo run --locked -- release-ticket \
 ```
 
 This creates `release-status.json`, `release-candidate-smoke.json`,
-`release-finalization.json`, `release-publication-check.json`, and
-`release-ticket.json` under
+`release-finalization.json`, `release-publication-check.json`,
+`github-release-draft.md`, and `release-ticket.json` under
 `dist/release-ticket/` without tagging, pushing, uploading, or publishing. The
 ticket summary includes explicit objective checks for the MCP gateway, including
 loopback/auth/Last-Event-ID handoff proof, approval/audit dashboard proof with
@@ -261,7 +261,7 @@ defaults. It also checks the
 publication handoff evidence for strict finalization, signed tag evidence,
 package archive hash, final release notes, owner-scoped publication steps, and
 `release-publication-check` coverage, and records the publication preflight JSON
-as a ticket artifact. It includes accepted alpha limits as
+plus an offline GitHub release draft as ticket artifacts. It includes accepted alpha limits as
 explicit deferred-scope checks, so the same handoff distinguishes local/team
 sidecar readiness from hosted SaaS, live IdP, production secret retrieval, and
 public internet gateway claims.
@@ -948,7 +948,8 @@ release-candidate smoke evidence, evidence-check results, finalization evidence,
 and a summary ticket JSON with explicit product-objective coverage checks,
 install/package provenance checks, store/notification handoff checks,
 served dashboard runtime checks, quickstart owner-action handoff checks,
-support/doctor handoff checks, Homebrew handoff checks, top-level ticket artifact inventory
+support/doctor handoff checks, Homebrew handoff checks, an offline GitHub
+release draft, top-level ticket artifact inventory
 for the core package, smoke handoff, deploy, dashboard, client, support, demo,
 store, notification, and Homebrew files, accepted alpha limits, and
 deferred-scope checks, without tagging, pushing, uploading, or publishing.
