@@ -302,6 +302,10 @@ safe-agent demo integrity with concrete remediation steps. Set
 support report to the package manifest, package lock, archive checksum, and
 install receipt hashes. It is a local/team sidecar alpha support artifact, not
 a hosted SaaS readiness check.
+Run `<package>/bin/agentk-sidecar-support-bundle --json` when a reviewer or
+operator needs one support archive. It refreshes the operator handoff, runs the
+sidecar doctor, and writes support-bundle JSON/Markdown with hashed package,
+dashboard, store, trace, and notification evidence for local/team handoff.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

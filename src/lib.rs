@@ -49,6 +49,7 @@ const SIDECAR_PACKAGE_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-team-handoff-check",
     "bin/agentk-sidecar-ops-handoff",
     "bin/agentk-sidecar-doctor",
+    "bin/agentk-sidecar-support-bundle",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -73,6 +74,7 @@ const SIDECAR_PACKAGE_PREFLIGHT_LAUNCHERS: &[&str] = &[
     "bin/agentk-sidecar-team-handoff-check",
     "bin/agentk-sidecar-ops-handoff",
     "bin/agentk-sidecar-doctor",
+    "bin/agentk-sidecar-support-bundle",
     "bin/agentk-sidecar-check",
     "bin/agentk-dashboard",
     "bin/agentk-dashboard-server",
@@ -6722,6 +6724,35 @@ pub struct SidecarPackageDoctorReport {
     pub team_handoff_check: SidecarPackageCheckReport,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageSupportBundleReport {
+    pub root: PathBuf,
+    pub output_dir: PathBuf,
+    pub json_path: PathBuf,
+    pub markdown_path: PathBuf,
+    pub release_manifest_path: Option<PathBuf>,
+    pub operator_handoff_dir: PathBuf,
+    pub doctor_dir: PathBuf,
+    pub local_team_sidecar_alpha: bool,
+    pub hosted_saas: bool,
+    pub passed: bool,
+    pub checks: Vec<ReadinessCheck>,
+    pub remediation_steps: Vec<String>,
+    pub artifacts: Vec<SidecarPackageSupportBundleArtifact>,
+    pub package_check: SidecarPackageCheckReport,
+    pub operator_handoff: SidecarPackageOpsHandoffReport,
+    pub doctor: SidecarPackageDoctorReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SidecarPackageSupportBundleArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub present: bool,
+    pub bytes: Option<u64>,
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DurableNotificationRow {
     notification_id: String,
@@ -8310,6 +8341,308 @@ fn sidecar_package_doctor_markdown(report: &SidecarPackageDoctorReport) -> Strin
     out.push_str("\n## Scope\n\n");
     out.push_str("- Local/team sidecar alpha: `true`\n");
     out.push_str("- Hosted SaaS: `false`\n");
+    out
+}
+
+pub fn write_sidecar_package_support_bundle(
+    root: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+    release_manifest: Option<&Path>,
+) -> Result<SidecarPackageSupportBundleReport, AgentKError> {
+    let root = root.as_ref();
+    let output_dir = output_dir.as_ref();
+    let json_path = output_dir.join("support-bundle.json");
+    let markdown_path = output_dir.join("support-bundle.md");
+    let operator_handoff_dir = root.join("sidecar/.agentk/operator-handoff");
+    let doctor_dir = root.join("sidecar/.agentk/doctor");
+
+    let package_check = check_sidecar_package(root)?;
+    let operator_handoff = write_sidecar_package_ops_handoff(root, &operator_handoff_dir)?;
+    let doctor = write_sidecar_package_doctor(root, &doctor_dir, release_manifest)?;
+
+    let artifacts = sidecar_package_support_bundle_artifacts(
+        root,
+        release_manifest,
+        &operator_handoff,
+        &doctor,
+    )?;
+    let required_artifacts_present = artifacts
+        .iter()
+        .filter(|artifact| sidecar_package_support_bundle_artifact_required(&artifact.name))
+        .all(|artifact| artifact.present);
+    let mut checks = vec![
+        support_bundle_check(
+            "package preflight",
+            package_check.passed,
+            format!("{} package readiness checks", package_check.checks.len()),
+        ),
+        support_bundle_check(
+            "operator handoff refresh",
+            operator_handoff.passed,
+            format!(
+                "{} handoff checks, {} notifications",
+                operator_handoff.checks.len(),
+                operator_handoff.store_sync.notifications
+            ),
+        ),
+        support_bundle_check(
+            "sidecar doctor",
+            doctor.passed,
+            format!(
+                "{} doctor checks, {} remediation steps",
+                doctor.checks.len(),
+                doctor.remediation_steps.len()
+            ),
+        ),
+        support_bundle_check(
+            "support artifact inventory",
+            required_artifacts_present,
+            format!("{} support artifacts inspected", artifacts.len()),
+        ),
+        support_bundle_check(
+            "alpha scope",
+            true,
+            "local/team sidecar alpha; hosted SaaS is false",
+        ),
+    ];
+    if release_manifest.is_none() {
+        checks.push(readiness_check(
+            "release manifest binding",
+            ReadinessStatus::Warn,
+            "not provided; support bundle still captures local package evidence",
+        ));
+    }
+    let mut remediation_steps = doctor.remediation_steps.clone();
+    if !required_artifacts_present {
+        remediation_steps.push(
+            "Rerun bin/agentk-sidecar-support-bundle --json after restoring missing support artifacts."
+                .to_string(),
+        );
+    }
+    let passed = checks
+        .iter()
+        .all(|check| check.status != ReadinessStatus::Fail);
+
+    fs::create_dir_all(output_dir)?;
+    let report = SidecarPackageSupportBundleReport {
+        root: root.to_path_buf(),
+        output_dir: output_dir.to_path_buf(),
+        json_path: json_path.clone(),
+        markdown_path: markdown_path.clone(),
+        release_manifest_path: release_manifest.map(Path::to_path_buf),
+        operator_handoff_dir,
+        doctor_dir,
+        local_team_sidecar_alpha: true,
+        hosted_saas: false,
+        passed,
+        checks,
+        remediation_steps,
+        artifacts,
+        package_check,
+        operator_handoff,
+        doctor,
+    };
+    fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
+    fs::write(
+        &markdown_path,
+        sidecar_package_support_bundle_markdown(&report),
+    )?;
+    Ok(report)
+}
+
+fn support_bundle_check(
+    name: impl Into<String>,
+    passed: bool,
+    detail: impl Into<String>,
+) -> ReadinessCheck {
+    readiness_check(
+        name,
+        if passed {
+            ReadinessStatus::Pass
+        } else {
+            ReadinessStatus::Fail
+        },
+        detail,
+    )
+}
+
+fn sidecar_package_support_bundle_artifacts(
+    root: &Path,
+    release_manifest: Option<&Path>,
+    operator_handoff: &SidecarPackageOpsHandoffReport,
+    doctor: &SidecarPackageDoctorReport,
+) -> Result<Vec<SidecarPackageSupportBundleArtifact>, AgentKError> {
+    let mut artifacts = Vec::new();
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "package manifest",
+        root.join("manifest.json"),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "package lock",
+        root.join(SIDECAR_PACKAGE_LOCK),
+    )?;
+    if let Some(release_manifest) = release_manifest {
+        sidecar_package_support_bundle_artifact(
+            &mut artifacts,
+            "release manifest",
+            release_manifest.to_path_buf(),
+        )?;
+    }
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "operator handoff json",
+        operator_handoff.json_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "operator handoff markdown",
+        operator_handoff.markdown_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "sidecar doctor json",
+        doctor.json_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "sidecar doctor markdown",
+        doctor.markdown_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "safe-agent trace",
+        operator_handoff.trace_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "dashboard html",
+        operator_handoff.dashboard_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "store export audit",
+        operator_handoff.store_export_root.join("audit.json"),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "durable approvals",
+        operator_handoff
+            .team_store_root
+            .join("current/approvals.json"),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "slack payloads",
+        operator_handoff.slack_payload_root.join("payloads.jsonl"),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "github payloads",
+        operator_handoff.github_payload_root.join("payloads.jsonl"),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "email payloads",
+        operator_handoff.email_payload_root.join("payloads.jsonl"),
+    )?;
+    Ok(artifacts)
+}
+
+fn sidecar_package_support_bundle_artifact(
+    artifacts: &mut Vec<SidecarPackageSupportBundleArtifact>,
+    name: &str,
+    path: PathBuf,
+) -> Result<(), AgentKError> {
+    let metadata = fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let (present, bytes, sha256) = match metadata {
+        Some(metadata) => (
+            true,
+            Some(metadata.len()),
+            Some(sidecar_package_file_sha256(&path)?),
+        ),
+        None => (false, None, None),
+    };
+    artifacts.push(SidecarPackageSupportBundleArtifact {
+        name: name.to_string(),
+        path,
+        present,
+        bytes,
+        sha256,
+    });
+    Ok(())
+}
+
+fn sidecar_package_support_bundle_artifact_required(name: &str) -> bool {
+    name != "release manifest"
+}
+
+fn sidecar_package_support_bundle_markdown(report: &SidecarPackageSupportBundleReport) -> String {
+    let verdict = if report.passed { "ready" } else { "blocked" };
+    let mut out = String::new();
+    out.push_str("# AgentK Support Bundle\n\n");
+    out.push_str("This bundle is an archiveable local/team sidecar alpha support artifact. It combines the package preflight, operator handoff, sidecar doctor report, and hashed evidence inventory without delivery credentials or raw tool payloads.\n\n");
+    out.push_str(&format!("- Verdict: `{verdict}`\n"));
+    out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
+    out.push_str(&format!(
+        "- Support bundle: `{}`\n",
+        report.output_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Operator handoff: `{}`\n",
+        report.operator_handoff_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Sidecar doctor: `{}`\n",
+        report.doctor_dir.display()
+    ));
+    if let Some(release_manifest) = &report.release_manifest_path {
+        out.push_str(&format!(
+            "- Release manifest: `{}`\n",
+            release_manifest.display()
+        ));
+    }
+    out.push_str("- Local/team sidecar alpha: `true`\n");
+    out.push_str("- Hosted SaaS: `false`\n\n");
+    out.push_str("## Checks\n\n");
+    out.push_str("| Status | Check | Detail |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            check.status.as_str(),
+            markdown_cell(&check.name),
+            markdown_cell(&check.detail)
+        ));
+    }
+    out.push_str("\n## Artifacts\n\n");
+    out.push_str("| Present | Artifact | Bytes | SHA-256 |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
+    for artifact in &report.artifacts {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            artifact.present,
+            markdown_cell(&format!("{} ({})", artifact.name, artifact.path.display())),
+            artifact
+                .bytes
+                .map(|bytes| bytes.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            artifact.sha256.as_deref().unwrap_or("-")
+        ));
+    }
+    out.push_str("\n## Remediation\n\n");
+    if report.remediation_steps.is_empty() {
+        out.push_str("- No remediation required.\n");
+    } else {
+        for step in &report.remediation_steps {
+            out.push_str(&format!("- {}\n", markdown_cell(step)));
+        }
+    }
+    out.push_str("\n## Scope\n\n");
+    out.push_str("Attach this directory to a deployment ticket or support issue only after reviewing the local paths and redacted artifacts. Notification files are payload drafts; delivery remains a separate operator action.\n");
     out
 }
 
@@ -10567,6 +10900,20 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
             &[
                 "agentk sidecar-package-team-handoff-check --json",
                 "bin/agentk-sidecar-team-handoff-check --json",
+            ],
+        ),
+        alpha_release_source_surface(
+            root,
+            "support bundle package path",
+            "packaged support bundle binds operator handoff, sidecar doctor, and hashed evidence inventory",
+            &[
+                ("src/main.rs", "SidecarPackageSupportBundle"),
+                ("src/lib.rs", "write_sidecar_package_support_bundle"),
+                ("src/lib.rs", "bin/agentk-sidecar-support-bundle"),
+            ],
+            &[
+                "agentk sidecar-package-support-bundle --json",
+                "bin/agentk-sidecar-support-bundle --json",
             ],
         ),
         alpha_release_source_surface(
@@ -16665,6 +17012,11 @@ pub fn package_sidecar_bundle(
             &sidecar_ops_handoff_script(),
         )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-doctor", &sidecar_doctor_script())?,
+        write_packaged_sidecar_file(
+            out,
+            "bin/agentk-sidecar-support-bundle",
+            &sidecar_support_bundle_script(),
+        )?,
         write_packaged_sidecar_file(out, "bin/agentk-sidecar-check", &sidecar_check_script())?,
         write_packaged_sidecar_file(out, "bin/agentk-dashboard", &sidecar_dashboard_script())?,
         write_packaged_sidecar_file(
@@ -18903,6 +19255,10 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
             .and_then(|value| value.as_str())
             == Some("bin/agentk-sidecar-doctor")
         && handoff
+            .and_then(|value| value.get("support_bundle"))
+            .and_then(|value| value.as_str())
+            == Some("bin/agentk-sidecar-support-bundle")
+        && handoff
             .and_then(|value| value.get("doc"))
             .and_then(|value| value.as_str())
             == Some("clients/team-audit-dashboard-handoff.md")
@@ -18940,7 +19296,7 @@ fn check_sidecar_package_manifest_team_handoff(manifest: &serde_json::Value) -> 
         sidecar_check(
             "package manifest team handoff",
             ReadinessStatus::Fail,
-            "team_handoff must list checker, ops handoff, doctor, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
+            "team_handoff must list checker, ops handoff, doctor, support bundle, doc, demo, dashboard, store sync/check, local alpha, and no hosted SaaS",
         )
     }
 }
@@ -19713,6 +20069,16 @@ fn check_sidecar_package_team_handoff_runtime_launchers(root: &Path) -> Readines
                 "agentk-package-check",
             ][..],
         ),
+        (
+            "bin/agentk-sidecar-support-bundle",
+            &[
+                "sidecar-package-support-bundle",
+                "AGENTK_SUPPORT_BUNDLE_OUT",
+                "support-bundle",
+                "AGENTK_PACKAGE_RELEASE_MANIFEST",
+                "agentk-package-check",
+            ][..],
+        ),
     ];
     for (relative, required_text) in requirements {
         let content = match fs::read_to_string(root.join(relative)) {
@@ -19832,8 +20198,10 @@ fn check_sidecar_package_team_handoff_readme(root: &Path) -> ReadinessCheck {
         "bin/agentk-sidecar-team-handoff-check",
         "bin/agentk-sidecar-ops-handoff",
         "bin/agentk-sidecar-doctor",
+        "bin/agentk-sidecar-support-bundle",
         "operator-handoff",
         "sidecar-doctor",
+        "support-bundle",
         "safe-agent demo",
         "dashboard server",
         "durable team store",
@@ -23137,6 +23505,10 @@ install receipt still match the handoff.
   package and writes support-ready JSON/Markdown remediation reports. Set
   `AGENTK_PACKAGE_RELEASE_MANIFEST` or pass `--release-manifest` to bind the
   package manifest, package lock, archive checksum, and install receipt hashes.
+- `bin/agentk-sidecar-support-bundle`: refreshes the operator handoff, runs
+  the sidecar doctor, and writes one archiveable support-bundle JSON/Markdown
+  report with hashed package, dashboard, store, trace, and notification
+  artifact metadata.
 - `bin/agentk-sidecar-check`: validates the packaged sidecar bundle before
   launching or deploying it.
 - `bin/agentk-identity-check`: validates external identity mappings against
@@ -23186,6 +23558,7 @@ AGENTK_MCP_TCP_MAX_SESSIONS=4 AGENTK_MCP_TCP_MAX_CONCURRENT_SESSIONS=2 ./bin/age
 ./bin/agentk-sidecar-team-handoff-check --json
 ./bin/agentk-sidecar-ops-handoff --json
 AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/agentk-sidecar-doctor --json
+AGENTK_PACKAGE_RELEASE_MANIFEST=../agentk-sidecar-release-manifest.json ./bin/agentk-sidecar-support-bundle --json
 ./bin/agentk-sidecar-check
 ./bin/agentk-identity-check --json
 ./bin/agentk-dashboard
@@ -23217,6 +23590,18 @@ mapped reviewers exist in `sidecar/team-permissions.toml`, and prints only
 redacted provider, mapping, reviewer, and coverage counts. It validates the
 handoff shape for external IdP wiring; the local sidecar path does not contact
 the IdP or verify live OIDC tokens.
+
+`bin/agentk-sidecar-support-bundle` writes
+`sidecar/.agentk/support-bundle/support-bundle.json` and
+`sidecar/.agentk/support-bundle/support-bundle.md` by default.
+It reruns the package self-check, operator handoff, and sidecar doctor, then
+records byte counts and SHA-256s for the package manifest, package lock,
+operator handoff, doctor report, safe-agent trace, dashboard, store export,
+durable approvals, and Slack/GitHub/email payload drafts. Set
+`AGENTK_SUPPORT_BUNDLE_OUT` to choose another output directory and set
+`AGENTK_PACKAGE_RELEASE_MANIFEST` to bind the support bundle to package release
+manifest evidence. This is an archiveable local/team support artifact, not a
+hosted control-plane upload.
 
 `bin/agentk-safe-agent-demo` runs the credential-free GitHub/Postgres/Slack/
 filesystem workflow and writes
@@ -23487,6 +23872,7 @@ fn sidecar_package_manifest() -> Result<String, AgentKError> {
             "check": "bin/agentk-sidecar-team-handoff-check",
             "ops_handoff": "bin/agentk-sidecar-ops-handoff",
             "doctor": "bin/agentk-sidecar-doctor",
+            "support_bundle": "bin/agentk-sidecar-support-bundle",
             "doc": "clients/team-audit-dashboard-handoff.md",
             "demo": "bin/agentk-safe-agent-demo",
             "dashboard": "bin/agentk-dashboard-server",
@@ -23892,6 +24278,23 @@ if [ -n "$RELEASE_MANIFEST" ]; then
   exec "$AGENTK_BIN" sidecar-package-doctor --root "$ROOT" --out "$DOCTOR_OUT" --release-manifest "$RELEASE_MANIFEST" "$@"
 fi
 exec "$AGENTK_BIN" sidecar-package-doctor --root "$ROOT" --out "$DOCTOR_OUT" "$@"
+"#
+    .to_string()
+}
+
+fn sidecar_support_bundle_script() -> String {
+    r#"#!/bin/sh
+set -eu
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$DIR/.." && pwd)"
+AGENTK_BIN="${AGENTK_BIN:-agentk}"
+SUPPORT_OUT="${AGENTK_SUPPORT_BUNDLE_OUT:-$ROOT/sidecar/.agentk/support-bundle}"
+RELEASE_MANIFEST="${AGENTK_PACKAGE_RELEASE_MANIFEST:-}"
+"$DIR/agentk-package-check" --json >/dev/null
+if [ -n "$RELEASE_MANIFEST" ]; then
+  exec "$AGENTK_BIN" sidecar-package-support-bundle --root "$ROOT" --out "$SUPPORT_OUT" --release-manifest "$RELEASE_MANIFEST" "$@"
+fi
+exec "$AGENTK_BIN" sidecar-package-support-bundle --root "$ROOT" --out "$SUPPORT_OUT" "$@"
 "#
     .to_string()
 }
@@ -25692,7 +26095,7 @@ can_deny = ["*"]
 
         assert_eq!(report.root, root);
         assert_eq!(report.package, out);
-        assert_eq!(report.files.len(), 43);
+        assert_eq!(report.files.len(), 44);
         assert!(out.join("manifest.json").exists());
         assert!(out.join("package.lock.json").exists());
         assert!(out.join("sidecar/agentk-sidecar.toml").exists());
@@ -25708,6 +26111,7 @@ can_deny = ["*"]
         assert!(out.join("bin/agentk-sidecar-team-handoff-check").exists());
         assert!(out.join("bin/agentk-sidecar-ops-handoff").exists());
         assert!(out.join("bin/agentk-sidecar-doctor").exists());
+        assert!(out.join("bin/agentk-sidecar-support-bundle").exists());
         assert!(out.join("bin/agentk-sidecar-check").exists());
         assert!(out.join("bin/agentk-identity-check").exists());
         assert!(out.join("bin/agentk-dashboard").exists());
@@ -25802,6 +26206,15 @@ can_deny = ["*"]
         assert!(doctor.contains("doctor"));
         assert!(doctor.contains("agentk-package-check"));
         assert!(doctor.contains("\"$@\""));
+        let support_bundle = fs::read_to_string(out.join("bin/agentk-sidecar-support-bundle"))
+            .expect("support bundle launcher should read");
+        assert!(support_bundle.contains("sidecar-package-support-bundle"));
+        assert!(support_bundle.contains("AGENTK_SUPPORT_BUNDLE_OUT"));
+        assert!(support_bundle.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
+        assert!(support_bundle.contains("--release-manifest"));
+        assert!(support_bundle.contains("support-bundle"));
+        assert!(support_bundle.contains("agentk-package-check"));
+        assert!(support_bundle.contains("\"$@\""));
         let check_launcher = fs::read_to_string(out.join("bin/agentk-sidecar-check"))
             .expect("check launcher should read");
         assert!(check_launcher.contains("sidecar-check"));
@@ -25964,10 +26377,14 @@ can_deny = ["*"]
         assert!(package_readme.contains("bin/agentk-sidecar-team-handoff-check"));
         assert!(package_readme.contains("bin/agentk-sidecar-ops-handoff"));
         assert!(package_readme.contains("bin/agentk-sidecar-doctor"));
+        assert!(package_readme.contains("bin/agentk-sidecar-support-bundle"));
         assert!(package_readme.contains("operator-handoff.json"));
         assert!(package_readme.contains("operator-handoff.md"));
         assert!(package_readme.contains("sidecar-doctor.json"));
         assert!(package_readme.contains("sidecar-doctor.md"));
+        assert!(package_readme.contains("support-bundle.json"));
+        assert!(package_readme.contains("support-bundle.md"));
+        assert!(package_readme.contains("AGENTK_SUPPORT_BUNDLE_OUT"));
         assert!(package_readme.contains("AGENTK_PACKAGE_RELEASE_MANIFEST"));
         assert!(package_readme.contains("release-manifest binding"));
         assert!(package_readme.contains("local/team sidecar alpha"));
@@ -26025,6 +26442,10 @@ can_deny = ["*"]
             serde_json::json!("bin/agentk-sidecar-doctor")
         );
         assert_eq!(
+            package_manifest_json["team_handoff"]["support_bundle"],
+            serde_json::json!("bin/agentk-sidecar-support-bundle")
+        );
+        assert_eq!(
             package_manifest_json["team_handoff"]["doc"],
             serde_json::json!("clients/team-audit-dashboard-handoff.md")
         );
@@ -26077,6 +26498,13 @@ can_deny = ["*"]
                 .expect("launchers should be an array")
                 .iter()
                 .any(|launcher| launcher == "bin/agentk-safe-agent-demo")
+        );
+        assert!(
+            package_manifest_json["launchers"]
+                .as_array()
+                .expect("launchers should be an array")
+                .iter()
+                .any(|launcher| launcher == "bin/agentk-sidecar-support-bundle")
         );
         assert_eq!(
             package_manifest_json["identity"]["manifest"],
@@ -26645,6 +27073,49 @@ can_deny = ["*"]
         assert!(markdown.contains("No remediation required"));
         assert!(markdown.contains("Hosted SaaS: `false`"));
         assert!(markdown.contains("Release manifest"));
+
+        let support_output_dir = install.join("sidecar/.agentk/support-bundle");
+        let support_report = write_sidecar_package_support_bundle(
+            &install,
+            &support_output_dir,
+            Some(&release_manifest),
+        )
+        .expect("support bundle should write");
+        assert!(support_report.passed);
+        assert_eq!(support_report.output_dir, support_output_dir);
+        assert!(support_report.json_path.exists());
+        assert!(support_report.markdown_path.exists());
+        assert!(support_report.local_team_sidecar_alpha);
+        assert!(!support_report.hosted_saas);
+        assert_eq!(
+            support_report.release_manifest_path,
+            Some(release_manifest.clone())
+        );
+        assert!(support_report.remediation_steps.is_empty());
+        assert!(support_report.checks.iter().any(|check| {
+            check.name == "support artifact inventory" && check.status == ReadinessStatus::Pass
+        }));
+        assert!(support_report.artifacts.iter().any(|artifact| {
+            artifact.name == "release manifest" && artifact.present && artifact.sha256.is_some()
+        }));
+        assert!(support_report.artifacts.iter().any(|artifact| {
+            artifact.name == "safe-agent trace" && artifact.present && artifact.bytes.is_some()
+        }));
+        let support_json =
+            fs::read_to_string(&support_report.json_path).expect("support bundle JSON should read");
+        let support_value: serde_json::Value =
+            serde_json::from_str(&support_json).expect("support bundle JSON should parse");
+        assert_eq!(support_value["passed"], serde_json::json!(true));
+        assert_eq!(
+            support_value["local_team_sidecar_alpha"],
+            serde_json::json!(true)
+        );
+        assert_eq!(support_value["hosted_saas"], serde_json::json!(false));
+        let support_markdown = fs::read_to_string(&support_report.markdown_path)
+            .expect("support bundle markdown should read");
+        assert!(support_markdown.contains("AgentK Support Bundle"));
+        assert!(support_markdown.contains("Hosted SaaS: `false`"));
+        assert!(support_markdown.contains("No remediation required"));
 
         let stale_release_manifest =
             temp_path("agentk-sidecar-doctor-stale-release-manifest", "json");
@@ -33517,7 +33988,8 @@ reviewer = "tom"
             root.join("src/main.rs"),
             "ReleaseCandidateSmoke sidecar-serve-tcp sidecar-serve-http DashboardServe \
              /api/approve /api/deny IdentityCheck StoreEmailSend SafeAgentDemo \
-             ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck ReleaseHomebrewTapHandoffCheck",
+             SidecarPackageSupportBundle ReleaseHomebrewFormula ReleaseHomebrewFormulaCheck \
+             ReleaseHomebrewTapHandoffCheck",
         )
         .expect("main fixture should be writable");
         fs::write(
@@ -33525,6 +33997,7 @@ reviewer = "tom"
             "sidecar-package-release-manifest package.lock.json bin/agentk-sidecar-http \
              team_identity_report_from_path token_env export_github_notification_payloads \
              export_email_notification_payloads run_safe_agent_demo agentk-safe-agent-demo \
+             write_sidecar_package_support_bundle bin/agentk-sidecar-support-bundle \
              release-candidate-smoke write_homebrew_formula check_homebrew_formula \
              check_homebrew_tap_handoff",
         )

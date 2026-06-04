@@ -72,6 +72,13 @@ keep the same checks in CI and protect the default branch.
       sanity, gateway handoff readiness, dashboard/store readiness, install
       receipt provenance, evidence retention, optional release-manifest binding,
       and remediation steps.
+- [ ] `cargo run --locked -- sidecar-package-support-bundle --root
+      installed/agentk-sidecar --release-manifest
+      dist/agentk-sidecar-release-manifest.json --json` writes
+      `sidecar/.agentk/support-bundle/support-bundle.json` and
+      `sidecar/.agentk/support-bundle/support-bundle.md` with refreshed
+      operator handoff, doctor output, and hashed package/dashboard/store/
+      trace/notification evidence for support archive.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest
@@ -148,6 +155,7 @@ cargo run --locked -- sidecar-package-http-handoff-check --root dist/agentk-side
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
+cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run -- readiness
 cargo run -- signing-key
 cargo run -- verify-signatures .agentk/runs/latest.jsonl --trusted-public-key <hex-public-key>

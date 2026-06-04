@@ -81,8 +81,8 @@ directory. This recreates the package/archive, verifies the archive checksum,
 installs the package, writes and verifies the package release manifest, runs the
 packaged safe-agent demo, dashboard, sidecar checks, durable store
 sync/export/check, operator handoff artifact, sidecar doctor support report,
-Slack/GitHub/email notification payload exporters, dry-run delivery launchers,
-and Postgres dry-run push:
+support bundle artifact, Slack/GitHub/email notification payload exporters,
+dry-run delivery launchers, and Postgres dry-run push:
 
 ```sh
 cargo run --locked -- release-status --json
@@ -112,6 +112,7 @@ cargo run --locked -- sidecar-package-team-handoff-check --root dist/agentk-side
 cargo run --locked -- sidecar-package-ops-handoff --root dist/agentk-sidecar --json
 cargo run --locked -- sidecar-package-release-manifest-check --manifest dist/agentk-sidecar-release-manifest.json --json
 cargo run --locked -- sidecar-package-doctor --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
+cargo run --locked -- sidecar-package-support-bundle --root installed/agentk-sidecar --release-manifest dist/agentk-sidecar-release-manifest.json --json
 ```
 
 For manual reviewer handoff, also keep the explicit package commands available
@@ -151,6 +152,10 @@ cargo run --locked -- sidecar-package-ops-handoff \
   --root installed/agentk-sidecar \
   --json
 cargo run --locked -- sidecar-package-doctor \
+  --root installed/agentk-sidecar \
+  --release-manifest dist/agentk-sidecar-release-manifest.json \
+  --json
+cargo run --locked -- sidecar-package-support-bundle \
   --root installed/agentk-sidecar \
   --release-manifest dist/agentk-sidecar-release-manifest.json \
   --json
