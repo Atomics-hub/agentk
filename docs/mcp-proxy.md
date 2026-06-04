@@ -309,6 +309,11 @@ Run `<package>/bin/agentk-sidecar-support-bundle --json` when a reviewer or
 operator needs one support archive. It refreshes the operator handoff, runs the
 sidecar doctor, and writes support-bundle JSON/Markdown with hashed package,
 dashboard, store, trace, and notification evidence for local/team handoff.
+Run `<package>/bin/agentk-sidecar-demo-handoff --json` when the first team
+review should focus on the packaged no-credential demo. It refreshes the
+GitHub/Postgres/Slack/filesystem demo evidence through the operator handoff
+path and writes demo-handoff JSON/Markdown with hashed trace, dashboard, store,
+and notification payload artifacts.
 `<package>/bin/agentk-safe-agent-demo --json` runs the no-credential
 GitHub/Postgres/Slack/filesystem workflow from the package and writes
 `<package>/sidecar/.agentk/runs/safe-agent-demo.jsonl` for audit review. Its

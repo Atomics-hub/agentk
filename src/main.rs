@@ -21,9 +21,9 @@ use agentk::{
     verify_jsonl, verify_signatures_jsonl, verify_signatures_jsonl_with_trusted_keys,
     verify_signing_key_rotation_manifest_file, verify_team_reviewer_token,
     write_approval_dashboard_html, write_events_jsonl, write_homebrew_formula, write_latest_copy,
-    write_sidecar_package_deploy_handoff, write_sidecar_package_doctor,
-    write_sidecar_package_ops_handoff, write_sidecar_package_release_manifest,
-    write_sidecar_package_support_bundle,
+    write_sidecar_package_demo_handoff, write_sidecar_package_deploy_handoff,
+    write_sidecar_package_doctor, write_sidecar_package_ops_handoff,
+    write_sidecar_package_release_manifest, write_sidecar_package_support_bundle,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -807,6 +807,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write one packaged safe-agent demo onboarding handoff artifact.
+    SidecarPackageDemoHandoff {
+        /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
+        #[arg(long, default_value = "agentk-sidecar-package")]
+        root: PathBuf,
+        /// Output directory for demo-handoff.json and demo-handoff.md.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit the demo handoff report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify a packaged sidecar tar against its checksum file.
     SidecarPackageArchiveCheck {
         /// Tar archive written by sidecar-package --archive-out.
@@ -1526,6 +1538,9 @@ fn run() -> Result<(), AgentKError> {
         } => sidecar_package_support_bundle(root, out, release_manifest, json),
         Command::SidecarPackageDeployHandoff { root, out, json } => {
             sidecar_package_deploy_handoff(root, out, json)
+        }
+        Command::SidecarPackageDemoHandoff { root, out, json } => {
+            sidecar_package_demo_handoff(root, out, json)
         }
         Command::SidecarPackageArchiveCheck {
             archive,
@@ -8978,6 +8993,48 @@ fn sidecar_package_deploy_handoff(
     Ok(())
 }
 
+fn sidecar_package_demo_handoff(
+    root: PathBuf,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<(), AgentKError> {
+    let output_dir =
+        out.unwrap_or_else(|| root.join("sidecar").join(".agentk").join("demo-handoff"));
+    let report = write_sidecar_package_demo_handoff(&root, &output_dir)?;
+    let failed = !report.passed;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("AgentK sidecar demo handoff");
+        println!("root      {}", report.root.display());
+        println!("out       {}", report.output_dir.display());
+        println!("json      {}", report.json_path.display());
+        println!("markdown  {}", report.markdown_path.display());
+        println!("trace     {}", report.trace_path.display());
+        println!(
+            "verdict   {}",
+            if report.passed { "ready" } else { "blocked" }
+        );
+        for check in &report.checks {
+            println!(
+                "[{}] {:<32} {}",
+                check.status.as_str().to_ascii_uppercase(),
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    if failed {
+        return Err(AgentKError::InvalidMcpRequest(
+            "sidecar package demo handoff failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn sidecar_package_archive_check(
     archive: PathBuf,
     checksum: Option<PathBuf>,
@@ -9442,6 +9499,8 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "support bundle markdown",
     "deploy handoff json",
     "deploy handoff markdown",
+    "demo handoff json",
+    "demo handoff markdown",
     "trace",
     "dashboard",
     "store readme",
@@ -9963,6 +10022,9 @@ fn run_release_candidate_smoke(
     let deploy_handoff_root = installed_package.join("sidecar/.agentk/deploy-handoff");
     let deploy_handoff_json = deploy_handoff_root.join("deploy-handoff.json");
     let deploy_handoff_markdown = deploy_handoff_root.join("deploy-handoff.md");
+    let demo_handoff_root = installed_package.join("sidecar/.agentk/demo-handoff");
+    let demo_handoff_json = demo_handoff_root.join("demo-handoff.json");
+    let demo_handoff_markdown = demo_handoff_root.join("demo-handoff.md");
     let release_evidence_root = installed_package.join("sidecar/.agentk/release");
     let package_check_json = release_evidence_root.join("package-check.json");
     let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
@@ -9997,6 +10059,7 @@ fn run_release_candidate_smoke(
     let doctor = doctor_root.display().to_string();
     let support_bundle = support_bundle_root.display().to_string();
     let deploy_handoff = deploy_handoff_root.display().to_string();
+    let demo_handoff = demo_handoff_root.display().to_string();
     let common_env = [("AGENTK_BIN", agentk_bin.as_str())];
     let mut steps = Vec::new();
 
@@ -10338,6 +10401,16 @@ fn run_release_candidate_smoke(
             ("AGENTK_DEPLOY_HANDOFF_OUT", deploy_handoff.as_str()),
         ],
     )?;
+    release_candidate_smoke_step(
+        &mut steps,
+        "demo handoff",
+        &bin.join("agentk-sidecar-demo-handoff"),
+        &["--json"],
+        &[
+            ("AGENTK_BIN", agentk_bin.as_str()),
+            ("AGENTK_DEMO_HANDOFF_OUT", demo_handoff.as_str()),
+        ],
+    )?;
 
     let mut artifacts = Vec::new();
     release_candidate_smoke_artifact(
@@ -10425,6 +10498,12 @@ fn run_release_candidate_smoke(
         &mut artifacts,
         "deploy handoff markdown",
         deploy_handoff_markdown,
+    )?;
+    release_candidate_smoke_artifact(&mut artifacts, "demo handoff json", demo_handoff_json)?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "demo handoff markdown",
+        demo_handoff_markdown,
     )?;
     release_candidate_smoke_artifact(&mut artifacts, "trace", trace_path.clone())?;
     release_candidate_smoke_artifact(&mut artifacts, "dashboard", dashboard_path.clone())?;
@@ -16634,6 +16713,42 @@ done
             out,
             Some(PathBuf::from(
                 "dist/agentk-sidecar/sidecar/.agentk/deploy-handoff"
+            ))
+        );
+        assert!(json);
+    }
+
+    #[test]
+    fn sidecar_package_demo_handoff_accepts_root_and_out() {
+        std::thread::Builder::new()
+            .name("agentk-cli-package-demo-handoff-parser-smoke".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(sidecar_package_demo_handoff_accepts_root_and_out_inner)
+            .expect("sidecar-package-demo-handoff parser smoke thread should spawn")
+            .join()
+            .expect("sidecar-package-demo-handoff parser smoke thread should not panic");
+    }
+
+    fn sidecar_package_demo_handoff_accepts_root_and_out_inner() {
+        let cli = Cli::try_parse_from([
+            "agentk",
+            "sidecar-package-demo-handoff",
+            "--root",
+            "dist/agentk-sidecar",
+            "--out",
+            "dist/agentk-sidecar/sidecar/.agentk/demo-handoff",
+            "--json",
+        ])
+        .expect("sidecar-package-demo-handoff should parse");
+
+        let Some(Command::SidecarPackageDemoHandoff { root, out, json }) = cli.command else {
+            panic!("expected sidecar-package-demo-handoff command");
+        };
+        assert_eq!(root, PathBuf::from("dist/agentk-sidecar"));
+        assert_eq!(
+            out,
+            Some(PathBuf::from(
+                "dist/agentk-sidecar/sidecar/.agentk/demo-handoff"
             ))
         );
         assert!(json);
