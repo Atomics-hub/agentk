@@ -9928,6 +9928,7 @@ struct ReleaseTicketReport {
     finalization: PathBuf,
     ticket: PathBuf,
     checks: Vec<ReleaseTicketCheckItem>,
+    accepted_limit_checks: Vec<ReleaseTicketCheckItem>,
     status: agentk::AlphaReleaseStatusReport,
     smoke: ReleaseCandidateSmokeReport,
     evidence_check: ReleaseEvidenceCheckReport,
@@ -11473,6 +11474,11 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         .copied()
         .collect::<Vec<_>>();
     let objective_checks = release_ticket_objective_checks(&smoke);
+    let accepted_limit_checks = release_ticket_accepted_limit_checks(&status);
+    let accepted_limits_ready = !accepted_limit_checks.is_empty()
+        && accepted_limit_checks
+            .iter()
+            .all(|check| check.status == ReadinessStatus::Warn);
 
     let mut checks = vec![
         release_ticket_check_item(
@@ -11544,6 +11550,23 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
             ReadinessStatus::Pass,
             "release-ticket writes local evidence only; it does not tag, push, upload, or publish",
         ),
+        release_ticket_check_item(
+            "accepted alpha limits",
+            if accepted_limits_ready {
+                ReadinessStatus::Pass
+            } else {
+                ReadinessStatus::Fail
+            },
+            if accepted_limits_ready {
+                format!(
+                    "{} explicit deferred-scope limits are present in release-status",
+                    accepted_limit_checks.len()
+                )
+            } else {
+                "accepted alpha limits are missing or no longer marked as explicit warnings"
+                    .to_string()
+            },
+        ),
     ];
     checks.extend(objective_checks);
     let ready = checks
@@ -11562,6 +11585,7 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
         finalization,
         ticket: ticket.clone(),
         checks,
+        accepted_limit_checks,
         status,
         smoke,
         evidence_check,
@@ -11573,6 +11597,22 @@ fn run_release_ticket(options: ReleaseTicketOptions) -> Result<ReleaseTicketRepo
     )?;
 
     Ok(report)
+}
+
+fn release_ticket_accepted_limit_checks(
+    status: &agentk::AlphaReleaseStatusReport,
+) -> Vec<ReleaseTicketCheckItem> {
+    status
+        .accepted_limits
+        .iter()
+        .map(|limit| {
+            release_ticket_check_item(
+                format!("accepted limit: {}", limit.name),
+                limit.status,
+                limit.detail.clone(),
+            )
+        })
+        .collect()
 }
 
 fn release_ticket_objective_checks(
