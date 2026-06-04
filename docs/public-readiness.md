@@ -111,6 +111,11 @@ keep the same checks in CI and protect the default branch.
       `sidecar/.agentk/production-preflight/production-preflight.md` with env
       template, secret-reference, placeholder coverage, and non-local bind
       default evidence without reading live secrets.
+- [ ] `cargo run --locked -- sidecar-package-client-handoff --root
+      installed/agentk-sidecar --json` writes
+      `sidecar/.agentk/client-handoff/client-handoff.json` and
+      `sidecar/.agentk/client-handoff/client-handoff.md` with Claude Desktop,
+      Codex, Cursor, stdio, TCP, and Streamable HTTP setup evidence.
 - [ ] `agentk sidecar-package-release-manifest` output is attached to the
       release handoff or deployment ticket.
 - [ ] `agentk sidecar-package-release-manifest-check --manifest
