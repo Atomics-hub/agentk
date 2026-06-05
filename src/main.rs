@@ -13919,6 +13919,43 @@ fn release_ticket_claude_codex_cursor_sidecar_evidence(
     if report.get("passed").and_then(|value| value.as_bool()) != Some(true) {
         return Err("client handoff json does not report passed".into());
     }
+    let claude = release_ticket_json_artifact(smoke, "claude client")?;
+    release_ticket_require_nested_string(
+        &claude,
+        &["mcpServers", "agentk-team-sidecar", "command"],
+        "sh",
+        "claude client",
+    )?;
+    let claude_args = claude
+        .get("mcpServers")
+        .and_then(|servers| servers.get("agentk-team-sidecar"))
+        .and_then(|server| server.get("args"))
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "claude client is missing agentk-team-sidecar args".to_string())?;
+    if !claude_args
+        .iter()
+        .filter_map(|value| value.as_str())
+        .any(|arg| arg.contains("bin/agentk-sidecar"))
+    {
+        return Err("claude client does not invoke packaged bin/agentk-sidecar".into());
+    }
+
+    let codex_cursor = release_ticket_text_artifact(smoke, "codex cursor client")?;
+    for fragment in [
+        "command: sh",
+        "bin/agentk-sidecar",
+        "bin/agentk-package-check",
+        "bin/agentk-safe-agent-demo",
+        "bin/agentk-dashboard",
+        "bin/agentk-dashboard-server",
+        "bin/agentk-store-sync",
+    ] {
+        if !codex_cursor.contains(fragment) {
+            return Err(format!(
+                "codex cursor client does not document packaged command {fragment}"
+            ));
+        }
+    }
     if report
         .get("local_team_sidecar_alpha")
         .and_then(|value| value.as_bool())
