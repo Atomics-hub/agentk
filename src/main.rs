@@ -22030,6 +22030,60 @@ done
     }
 
     #[test]
+    fn release_ticket_delivery_dry_run_validator_requires_local_placeholder_proof() {
+        let report = serde_json::json!({
+            "dry_run": true,
+            "delivered": 0,
+            "failed": 0,
+            "attempts": [],
+            "webhook_url_env": "AGENTK_SLACK_WEBHOOK_URL",
+            "command": ["curl", "--config", "-"]
+        });
+        release_ticket_require_delivery_dry_run(
+            &report,
+            "slack send dry-run",
+            "AGENTK_SLACK_WEBHOOK_URL",
+            "curl",
+        )
+        .expect("placeholder-only dry-run report should pass");
+
+        let live_url = serde_json::json!({
+            "dry_run": true,
+            "delivered": 0,
+            "failed": 0,
+            "attempts": [],
+            "webhook_url": "https://hooks.slack.com/services/T000/B000/SECRET",
+            "webhook_url_env": "AGENTK_SLACK_WEBHOOK_URL",
+            "command": ["curl", "--config", "-"]
+        });
+        let live_url_error = release_ticket_require_delivery_dry_run(
+            &live_url,
+            "slack send dry-run",
+            "AGENTK_SLACK_WEBHOOK_URL",
+            "curl",
+        )
+        .expect_err("live webhook URLs should fail the release-ticket proof");
+        assert!(live_url_error.contains("exposes a live credential"));
+
+        let missing_command_fragment = serde_json::json!({
+            "dry_run": true,
+            "delivered": 0,
+            "failed": 0,
+            "attempts": [],
+            "webhook_url_env": "AGENTK_SLACK_WEBHOOK_URL",
+            "command": ["printf", "offline"]
+        });
+        let missing_command_error = release_ticket_require_delivery_dry_run(
+            &missing_command_fragment,
+            "slack send dry-run",
+            "AGENTK_SLACK_WEBHOOK_URL",
+            "curl",
+        )
+        .expect_err("dry-run report should prove the expected local bridge command");
+        assert!(missing_command_error.contains("command does not prove"));
+    }
+
+    #[test]
     fn release_candidate_smoke_evidence_requires_force_to_overwrite() {
         let out = test_temp_path("agentk-rc-smoke-evidence", "json");
         let report = ReleaseCandidateSmokeReport {
