@@ -783,7 +783,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Write one packaged support bundle with handoff, doctor, and hashed evidence metadata.
+    /// Write one packaged support bundle with operator, doctor, deploy, preflight, and hashed evidence metadata.
     SidecarPackageSupportBundle {
         /// Root directory containing manifest.json, clients/, sidecar/, deploy/, and bin/.
         #[arg(long, default_value = "agentk-sidecar-package")]
@@ -15595,6 +15595,7 @@ fn release_candidate_smoke_temp_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[cfg(unix)]
     fn mcp_proxy_trace_out_test_path(label: &str) -> PathBuf {
@@ -20058,6 +20059,16 @@ done
             Some(PathBuf::from("dist/agentk-sidecar-release-manifest.json"))
         );
         assert!(json);
+
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("help should render");
+        let help = String::from_utf8(help).expect("help should be UTF-8");
+        assert!(help.contains(
+            "Write one packaged support bundle with operator, doctor, deploy, preflight, and hashed evidence metadata"
+        ));
     }
 
     #[test]
