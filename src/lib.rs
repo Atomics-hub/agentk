@@ -10525,7 +10525,7 @@ fn sidecar_package_quickstart_next_actions(
         ),
         sidecar_package_quickstart_next_action(
             "support owner",
-            "Archive the support bundle for install provenance, doctor output, remediation state, and hashed evidence inventory.",
+            "Archive the support bundle for install provenance, doctor output, deploy/preflight evidence, remediation state, and hashed evidence inventory.",
             inputs.support_bundle.markdown_path.clone(),
             format!(
                 "{}/bin/agentk-sidecar-support-bundle --json",
@@ -31060,6 +31060,23 @@ can_deny = ["*"]
                             .as_str()
                             .unwrap_or_default()
                             .contains("agentk-sidecar-client-handoff")
+                )
+        );
+        assert!(
+            value["next_actions"]
+                .as_array()
+                .expect("quickstart next actions should be an array")
+                .iter()
+                .any(
+                    |action| action["owner"] == serde_json::json!("support owner")
+                        && action["action"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("deploy/preflight evidence")
+                        && action["command"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("agentk-sidecar-support-bundle")
                 )
         );
 
