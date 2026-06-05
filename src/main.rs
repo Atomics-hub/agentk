@@ -12324,7 +12324,7 @@ fn release_ticket_store_notification_handoff_check(
         Ok(()) => release_ticket_check_item(
             "store/notification handoff",
             ReadinessStatus::Pass,
-            "store/notification evidence proves durable approvals, Postgres load coverage, Slack/GitHub/email redacted payloads, and local env-held bridge configuration",
+            "store/notification evidence proves durable approvals, Postgres load coverage, Slack/GitHub/email redacted payloads, delivery dry-runs, Postgres push dry-run, and local env-held bridge configuration",
         ),
         Err(detail) => {
             release_ticket_check_item("store/notification handoff", ReadinessStatus::Fail, detail)
