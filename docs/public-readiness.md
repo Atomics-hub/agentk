@@ -99,8 +99,8 @@ inventory with paths, byte counts, and SHA-256 hashes for the reviewer handoff.
       dist/agentk-sidecar-release-manifest.json --json` writes
       `sidecar/.agentk/support-bundle/support-bundle.json` and
       `sidecar/.agentk/support-bundle/support-bundle.md` with refreshed
-      operator handoff, doctor output, and hashed package/dashboard/store/
-      trace/notification evidence for support archive.
+      operator handoff, doctor output, deploy/preflight evidence, and hashed
+      package/dashboard/store/trace/notification evidence for support archive.
 - [ ] `cargo run --locked -- sidecar-package-deploy-handoff --root
       installed/agentk-sidecar --json` writes
       `sidecar/.agentk/deploy-handoff/deploy-handoff.json` and
