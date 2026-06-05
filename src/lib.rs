@@ -13826,7 +13826,7 @@ fn alpha_release_verification_gates(root: &Path) -> Vec<AlphaReleaseStatusItem> 
                 ),
                 (
                     "src/main.rs",
-                    "Claude/Codex/Cursor sidecar evidence proves packaged Claude JSON",
+                    "Claude/Codex/Cursor sidecar evidence proves packaged Claude MCP JSON",
                 ),
                 (
                     "src/main.rs",
