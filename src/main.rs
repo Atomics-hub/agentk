@@ -9835,8 +9835,12 @@ const RELEASE_CANDIDATE_SMOKE_REQUIRED_ARTIFACTS: &[&str] = &[
     "postgres load",
     "team approvals",
     "slack payloads",
+    "slack send dry-run",
     "github payloads",
+    "github send dry-run",
     "email payloads",
+    "email send dry-run",
+    "postgres push dry-run",
     "systemd sidecar service",
     "systemd dashboard service",
     "launchd sidecar plist",
@@ -10410,6 +10414,10 @@ fn run_release_candidate_smoke(
     let package_check_json = release_evidence_root.join("package-check.json");
     let http_handoff_check_json = release_evidence_root.join("http-handoff-check.json");
     let team_handoff_check_json = release_evidence_root.join("team-handoff-check.json");
+    let slack_send_dry_run_json = release_evidence_root.join("slack-send-dry-run.json");
+    let github_send_dry_run_json = release_evidence_root.join("github-send-dry-run.json");
+    let email_send_dry_run_json = release_evidence_root.join("email-send-dry-run.json");
+    let postgres_push_dry_run_json = release_evidence_root.join("postgres-push-dry-run.json");
 
     init_sidecar_bundle(&bundle, false)?;
     package_sidecar_bundle(&bundle, &package, false)?;
@@ -10766,6 +10774,53 @@ fn run_release_candidate_smoke(
             ("AGENTK_STORE_EXPORT_ROOT", store_export.as_str()),
         ],
     )?;
+    fs::write(
+        &slack_send_dry_run_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&run_store_slack_send(
+                slack_payload_root.clone(),
+                "AGENTK_SLACK_WEBHOOK_URL".to_string(),
+                "curl".to_string(),
+                true,
+            )?)?
+        ),
+    )?;
+    fs::write(
+        &github_send_dry_run_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&run_store_github_send(
+                github_payload_root.clone(),
+                "GITHUB_TOKEN".to_string(),
+                "gh".to_string(),
+                true,
+            )?)?
+        ),
+    )?;
+    fs::write(
+        &email_send_dry_run_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&run_store_email_send(
+                email_payload_root.clone(),
+                "sendmail".to_string(),
+                true,
+            )?)?
+        ),
+    )?;
+    fs::write(
+        &postgres_push_dry_run_json,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&run_store_push(
+                store_export_root.clone(),
+                "DATABASE_URL".to_string(),
+                "psql".to_string(),
+                true,
+            )?)?
+        ),
+    )?;
     release_candidate_smoke_step(
         &mut steps,
         "support bundle",
@@ -11010,13 +11065,33 @@ fn run_release_candidate_smoke(
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
+        "slack send dry-run",
+        slack_send_dry_run_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
         "github payloads",
         github_payload_root.join("payloads.jsonl"),
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
+        "github send dry-run",
+        github_send_dry_run_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
         "email payloads",
         email_payload_root.join("payloads.jsonl"),
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "email send dry-run",
+        email_send_dry_run_json,
+    )?;
+    release_candidate_smoke_artifact(
+        &mut artifacts,
+        "postgres push dry-run",
+        postgres_push_dry_run_json,
     )?;
     release_candidate_smoke_artifact(
         &mut artifacts,
@@ -12221,8 +12296,12 @@ fn release_ticket_store_notification_handoff_check(
         "postgres load",
         "team approvals",
         "slack payloads",
+        "slack send dry-run",
         "github payloads",
+        "github send dry-run",
         "email payloads",
+        "email send dry-run",
+        "postgres push dry-run",
         "store postgres env example",
         "notifications env example",
     ]
@@ -12349,6 +12428,13 @@ fn release_ticket_store_notification_handoff_evidence(
             "slack payloads",
         )?;
     }
+    let slack_dry_run = release_ticket_json_artifact(smoke, "slack send dry-run")?;
+    release_ticket_require_delivery_dry_run(
+        &slack_dry_run,
+        "slack send dry-run",
+        "AGENTK_SLACK_WEBHOOK_URL",
+        "curl",
+    )?;
 
     let github = release_ticket_jsonl_artifact(smoke, "github payloads")?;
     release_ticket_require_jsonl_len_at_least(&github, "github payloads", 5)?;
@@ -12375,6 +12461,13 @@ fn release_ticket_store_notification_handoff_evidence(
             return Err("github payloads do not prove redacted payload disclaimer".to_string());
         }
     }
+    let github_dry_run = release_ticket_json_artifact(smoke, "github send dry-run")?;
+    release_ticket_require_delivery_dry_run(
+        &github_dry_run,
+        "github send dry-run",
+        "GITHUB_TOKEN",
+        "gh",
+    )?;
 
     let email = release_ticket_jsonl_artifact(smoke, "email payloads")?;
     release_ticket_require_jsonl_len_at_least(&email, "email payloads", 5)?;
@@ -12403,6 +12496,38 @@ fn release_ticket_store_notification_handoff_evidence(
             return Err("email payloads do not prove redacted payload disclaimer".to_string());
         }
     }
+    let email_dry_run = release_ticket_json_artifact(smoke, "email send dry-run")?;
+    release_ticket_require_delivery_dry_run(
+        &email_dry_run,
+        "email send dry-run",
+        "sendmail",
+        "sendmail",
+    )?;
+    let postgres_dry_run = release_ticket_json_artifact(smoke, "postgres push dry-run")?;
+    release_ticket_require_bool(&postgres_dry_run, "dry_run", true, "postgres push dry-run")?;
+    release_ticket_require_bool(
+        &postgres_dry_run,
+        "preflight_passed",
+        true,
+        "postgres push dry-run",
+    )?;
+    release_ticket_require_bool(&postgres_dry_run, "pushed", false, "postgres push dry-run")?;
+    release_ticket_require_string(
+        &postgres_dry_run,
+        "database_url_env",
+        "DATABASE_URL",
+        "postgres push dry-run",
+    )?;
+    release_ticket_require_command_fragment(
+        &postgres_dry_run,
+        "postgres push dry-run",
+        "$DATABASE_URL",
+    )?;
+    release_ticket_require_command_fragment(
+        &postgres_dry_run,
+        "postgres push dry-run",
+        "postgres/load.sql",
+    )?;
     Ok(())
 }
 
@@ -13501,6 +13626,53 @@ fn release_ticket_require_empty_array(
             values.len()
         )),
         None => Err(format!("{label} is missing array {field}")),
+    }
+}
+
+fn release_ticket_require_delivery_dry_run(
+    report: &serde_json::Value,
+    label: &str,
+    config_field: &str,
+    command_fragment: &str,
+) -> Result<(), String> {
+    release_ticket_require_bool(report, "dry_run", true, label)?;
+    release_ticket_require_u64(report, "delivered", 0, label)?;
+    release_ticket_require_u64(report, "failed", 0, label)?;
+    release_ticket_require_empty_array(report, "attempts", label)?;
+    let serialized = serde_json::to_string(report).map_err(|error| error.to_string())?;
+    if serialized.contains("https://hooks.slack.com")
+        || serialized.contains("ghp_")
+        || serialized.contains("postgres://")
+    {
+        return Err(format!("{label} exposes a live credential or database URL"));
+    }
+    if !serialized.contains(config_field) {
+        return Err(format!(
+            "{label} does not prove placeholder/config fragment {config_field}"
+        ));
+    }
+    release_ticket_require_command_fragment(report, label, command_fragment)
+}
+
+fn release_ticket_require_command_fragment(
+    report: &serde_json::Value,
+    label: &str,
+    fragment: &str,
+) -> Result<(), String> {
+    let command = report
+        .get("command")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("{label} is missing command"))?;
+    if command
+        .iter()
+        .filter_map(|value| value.as_str())
+        .any(|part| part.contains(fragment))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} command does not prove placeholder/config fragment {fragment}"
+        ))
     }
 }
 
