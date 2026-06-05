@@ -12633,13 +12633,25 @@ fn release_ticket_quickstart_handoff_evidence(
         &quickstart,
         "quickstart json",
         &[
-            ("client owner", "agentk-sidecar-client-handoff"),
-            ("dashboard owner", "agentk-sidecar-dashboard-handoff"),
-            ("permissions owner", "agentk-sidecar-permissions-handoff"),
-            ("deployment owner", "agentk-sidecar-deploy-handoff"),
-            ("security owner", "agentk-sidecar-production-preflight"),
-            ("support owner", "agentk-sidecar-support-bundle"),
-            ("demo reviewer", "agentk-sidecar-demo-handoff"),
+            ("client owner", "agentk-sidecar-client-handoff", None),
+            ("dashboard owner", "agentk-sidecar-dashboard-handoff", None),
+            (
+                "permissions owner",
+                "agentk-sidecar-permissions-handoff",
+                None,
+            ),
+            ("deployment owner", "agentk-sidecar-deploy-handoff", None),
+            (
+                "security owner",
+                "agentk-sidecar-production-preflight",
+                None,
+            ),
+            (
+                "support owner",
+                "agentk-sidecar-support-bundle",
+                Some("deploy/preflight evidence"),
+            ),
+            ("demo reviewer", "agentk-sidecar-demo-handoff", None),
         ],
     )?;
     release_ticket_require_checks(
@@ -13495,13 +13507,13 @@ fn release_ticket_require_empty_array(
 fn release_ticket_require_next_actions(
     report: &serde_json::Value,
     label: &str,
-    required: &[(&str, &str)],
+    required: &[(&str, &str, Option<&str>)],
 ) -> Result<(), String> {
     let actions = report
         .get("next_actions")
         .and_then(|value| value.as_array())
         .ok_or_else(|| format!("{label} is missing next_actions"))?;
-    for (owner, command_fragment) in required {
+    for (owner, command_fragment, action_fragment) in required {
         let found = actions.iter().any(|action| {
             action.get("owner").and_then(|value| value.as_str()) == Some(*owner)
                 && action
@@ -13511,7 +13523,10 @@ fn release_ticket_require_next_actions(
                 && action
                     .get("action")
                     .and_then(|value| value.as_str())
-                    .is_some_and(|text| !text.is_empty())
+                    .is_some_and(|text| {
+                        !text.is_empty()
+                            && action_fragment.is_none_or(|fragment| text.contains(fragment))
+                    })
                 && action
                     .get("command")
                     .and_then(|value| value.as_str())
