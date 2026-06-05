@@ -12741,7 +12741,7 @@ fn release_ticket_support_doctor_handoff_check(
         Ok(()) => release_ticket_check_item(
             "support/doctor handoff",
             ReadinessStatus::Pass,
-            "support evidence proves operator handoff refresh, sidecar doctor remediation, release-manifest binding, hashed support inventory, ticket attachments, and local non-hosted scope",
+            "support evidence proves operator handoff refresh, sidecar doctor remediation, deploy/preflight evidence, release-manifest binding, hashed support inventory, ticket attachments, and local non-hosted scope",
         ),
         Err(detail) => {
             release_ticket_check_item("support/doctor handoff", ReadinessStatus::Fail, detail)
@@ -12825,6 +12825,10 @@ fn release_ticket_support_doctor_handoff_evidence(
             "operator handoff json",
             "sidecar doctor",
             "sidecar doctor json",
+            "deploy handoff",
+            "deploy handoff json",
+            "production preflight",
+            "production preflight json",
             "package manifest",
             "package lock",
             "safe-agent trace",
@@ -12841,6 +12845,8 @@ fn release_ticket_support_doctor_handoff_evidence(
             ("package preflight", "package readiness checks"),
             ("operator handoff refresh", "handoff checks"),
             ("sidecar doctor", "0 remediation steps"),
+            ("deploy handoff", "supervisor probes"),
+            ("production preflight", "live secret retrieval false"),
             ("support artifact inventory", "support artifacts inspected"),
             ("alpha scope", "hosted SaaS is false"),
         ],
@@ -12856,6 +12862,10 @@ fn release_ticket_support_doctor_handoff_evidence(
             "operator handoff markdown",
             "sidecar doctor json",
             "sidecar doctor markdown",
+            "deploy handoff json",
+            "deploy handoff markdown",
+            "production preflight json",
+            "production preflight markdown",
             "safe-agent trace",
             "dashboard html",
             "store export audit",
@@ -12875,6 +12885,24 @@ fn release_ticket_support_doctor_handoff_evidence(
         &support,
         &["doctor", "passed"],
         true,
+        "support bundle json",
+    )?;
+    release_ticket_require_nested_bool(
+        &support,
+        &["deploy_handoff", "passed"],
+        true,
+        "support bundle json",
+    )?;
+    release_ticket_require_nested_bool(
+        &support,
+        &["production_preflight", "passed"],
+        true,
+        "support bundle json",
+    )?;
+    release_ticket_require_nested_bool(
+        &support,
+        &["production_preflight", "live_secret_retrieval"],
+        false,
         "support bundle json",
     )?;
     Ok(())

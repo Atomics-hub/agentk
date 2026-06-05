@@ -153,8 +153,9 @@ hardening, redacted probes, and permission-checked review APIs. It also checks
 quickstart handoff evidence for first-run package health,
 HTTP/team handoff, demo, deploy, support, permissions, preflight, client,
 dashboard, owner-specific next actions, and artifact inventory coverage. It checks support/doctor handoff
-evidence for operator refresh, no-remediation doctor output, release-manifest
-binding, hashed support inventory, and ticket-attachment guidance, plus accepted-limit checks that keep
+evidence for operator refresh, no-remediation doctor output, deploy/preflight
+evidence, release-manifest binding, hashed support inventory, and
+ticket-attachment guidance, plus accepted-limit checks that keep
 hosted SaaS, live IdP, production secret retrieval, public internet gateway, and
 similar deferred-scope claims out of the alpha handoff. The same ticket
 checks deploy/preflight handoff evidence for templates, placeholders,

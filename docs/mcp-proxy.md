@@ -307,7 +307,8 @@ install receipt hashes. It is a local/team sidecar alpha support artifact, not
 a hosted SaaS readiness check.
 Run `<package>/bin/agentk-sidecar-support-bundle --json` when a reviewer or
 operator needs one support archive. It refreshes the operator handoff, runs the
-sidecar doctor, and writes support-bundle JSON/Markdown with hashed package,
+sidecar doctor, deploy handoff, and production preflight, then writes
+support-bundle JSON/Markdown with hashed package, deployment, preflight,
 dashboard, store, trace, notification evidence, and ticket-attachment guidance
 for local/team handoff.
 Run `<package>/bin/agentk-sidecar-permissions-handoff --json` when a team wants
