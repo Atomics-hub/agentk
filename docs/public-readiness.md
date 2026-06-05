@@ -56,7 +56,7 @@ inventory with paths, byte counts, and SHA-256 hashes for the reviewer handoff.
       archive, install receipt, verified release manifest, package-check JSON,
       HTTP/team handoff check JSON, onboarding guide, demo trace, dashboard,
       durable store, operator handoff, deploy handoff, dashboard handoff,
-      notification payload,
+      notification payloads and bridge dry-run reports,
       systemd/launchd services, Dockerfile/Compose templates, Caddy/nginx
       reverse-proxy templates, deploy README, dummy env examples, and a JSON
       evidence report with SHA-256/byte counts for required handoff files.
