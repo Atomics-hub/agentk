@@ -13889,7 +13889,7 @@ fn release_ticket_claude_codex_cursor_sidecar_check(
         Ok(()) => release_ticket_check_item(
             "objective: Claude/Codex/Cursor sidecar",
             ReadinessStatus::Pass,
-            "Claude/Codex/Cursor sidecar evidence proves packaged Claude JSON, Codex/Cursor command, stdio/TCP/HTTP launchers, Streamable HTTP handoff, client artifact inventory, and local non-hosted scope",
+            "Claude/Codex/Cursor sidecar evidence proves packaged Claude MCP JSON, Codex/Cursor command file, stdio/TCP/HTTP launchers, Streamable HTTP handoff, client artifact inventory, and local non-hosted scope",
         ),
         Err(detail) => release_ticket_check_item(
             "objective: Claude/Codex/Cursor sidecar",
