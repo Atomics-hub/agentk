@@ -14404,10 +14404,13 @@ fn release_ticket_safe_agent_demo_check(
             "demo handoff markdown",
             "team approvals",
             "slack payloads",
+            "slack send dry-run",
             "github payloads",
+            "github send dry-run",
             "postgres load",
+            "postgres push dry-run",
         ],
-        "safe-agent demo filesystem evidence, trace, handoff, store, notification, and Postgres artifacts are release-ticket evidence",
+        "safe-agent demo filesystem evidence, trace, handoff, store, notification, local bridge dry-runs, and Postgres artifacts are release-ticket evidence",
     );
     if base_check.status != ReadinessStatus::Pass {
         return base_check;
@@ -14417,7 +14420,7 @@ fn release_ticket_safe_agent_demo_check(
         Ok(()) => release_ticket_check_item(
             "objective: safe-agent demo",
             ReadinessStatus::Pass,
-            "safe-agent demo proves GitHub/Postgres/Slack/filesystem evidence, including allowed filesystem read and blocked filesystem patch",
+            "safe-agent demo proves clean GitHub/Postgres/Slack/filesystem evidence, including local bridge dry-runs, allowed filesystem read, and blocked filesystem patch",
         ),
         Err(detail) => {
             release_ticket_check_item("objective: safe-agent demo", ReadinessStatus::Fail, detail)
@@ -14490,6 +14493,45 @@ fn release_ticket_safe_agent_demo_filesystem_evidence(
             "safe-agent demo scorecard does not prove filesystem patch blocking improved".into(),
         );
     }
+    let slack_dry_run = release_ticket_json_artifact(smoke, "slack send dry-run")?;
+    release_ticket_require_delivery_dry_run(
+        &slack_dry_run,
+        "slack send dry-run",
+        "AGENTK_SLACK_WEBHOOK_URL",
+        "curl",
+    )?;
+    let github_dry_run = release_ticket_json_artifact(smoke, "github send dry-run")?;
+    release_ticket_require_delivery_dry_run(
+        &github_dry_run,
+        "github send dry-run",
+        "GITHUB_TOKEN",
+        "gh",
+    )?;
+    let postgres_dry_run = release_ticket_json_artifact(smoke, "postgres push dry-run")?;
+    release_ticket_require_bool(&postgres_dry_run, "dry_run", true, "postgres push dry-run")?;
+    release_ticket_require_bool(
+        &postgres_dry_run,
+        "preflight_passed",
+        true,
+        "postgres push dry-run",
+    )?;
+    release_ticket_require_bool(&postgres_dry_run, "pushed", false, "postgres push dry-run")?;
+    release_ticket_require_string(
+        &postgres_dry_run,
+        "database_url_env",
+        "DATABASE_URL",
+        "postgres push dry-run",
+    )?;
+    release_ticket_require_command_fragment(
+        &postgres_dry_run,
+        "postgres push dry-run",
+        "$DATABASE_URL",
+    )?;
+    release_ticket_require_command_fragment(
+        &postgres_dry_run,
+        "postgres push dry-run",
+        "postgres/load.sql",
+    )?;
     Ok(())
 }
 
