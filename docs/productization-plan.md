@@ -352,8 +352,8 @@ The safest first productization slice is the local team sidecar path:
     install receipt hashes into the support report.
     `sidecar-package-support-bundle` and the packaged
     `bin/agentk-sidecar-support-bundle` launcher compose the operator handoff,
-    sidecar doctor, and hashed evidence inventory into one archiveable
-    support-bundle JSON/Markdown artifact.
+    sidecar doctor, deploy/preflight handoffs, and hashed evidence inventory
+    into one archiveable support-bundle JSON/Markdown artifact.
 14. The subprocess MCP gateway has an operator-configurable
     `max_client_messages` cap, exposed on `mcp-proxy-stdio` and generated
     sidecar bundles, so runaway clients cannot hold one proxy session forever.

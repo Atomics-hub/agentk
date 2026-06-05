@@ -254,7 +254,7 @@ checks quickstart handoff evidence for first-run package health, HTTP/team
 handoff, demo, deploy, support, permissions, preflight, client, dashboard, and
 artifact inventory coverage. It also
 checks support/doctor handoff evidence for operator refresh, no-remediation
-doctor output, release-manifest binding, and hashed support inventory. It also
+doctor output, deploy/preflight evidence, release-manifest binding, and hashed support inventory. It also
 checks deploy/preflight handoff evidence for templates, placeholders,
 secret-reference manifests, provider-shaped production refs, and non-local bind
 defaults. It also checks the
@@ -595,11 +595,12 @@ or pass `--release-manifest` so the doctor can confirm the package manifest,
 package lock, archive checksum, and install receipt hashes still line up.
 Run `dist/agentk-sidecar/bin/agentk-sidecar-support-bundle --json` when an
 operator needs one support artifact. It refreshes the operator handoff, runs
-the sidecar doctor, inventories package manifest/lock/release manifest,
-dashboard, store, trace, and notification evidence with byte counts and
-SHA-256 hashes, adds ticket-attachment guidance for operator handoff, doctor,
-package, trace, store, approvals, notification drafts, and release manifest
-files, then writes
+the sidecar doctor, refreshes deploy/preflight handoffs, inventories package
+manifest/lock/release manifest, deployment, preflight, dashboard, store, trace,
+and notification evidence with byte counts and SHA-256 hashes, adds
+ticket-attachment guidance for operator handoff, doctor, deploy handoff,
+production preflight, package, trace, store, approvals, notification drafts,
+and release manifest files, then writes
 `sidecar/.agentk/support-bundle/support-bundle.json` and
 `sidecar/.agentk/support-bundle/support-bundle.md` without uploading anything
 to a hosted service.
@@ -960,7 +961,7 @@ to recreate the package, archive, checksum, and release manifest in a
 repo-local smoke root, execute the packaged HTTP and team handoff checks,
 safe-agent demo, dashboard, sidecar check, store export/check/sync, operator
 handoff artifact, support bundle JSON/Markdown, deploy handoff JSON/Markdown,
-release-manifest check, sidecar doctor release-manifest binding,
+production preflight JSON/Markdown, release-manifest check, sidecar doctor release-manifest binding,
 Slack/GitHub/email payload exporters, and Postgres dry-run push
 launchers, then write one JSON evidence report with SHA-256 and byte counts for
 the required handoff artifacts before a release branch or tag. Then run

@@ -6794,6 +6794,8 @@ pub struct SidecarPackageSupportBundleReport {
     pub release_manifest_path: Option<PathBuf>,
     pub operator_handoff_dir: PathBuf,
     pub doctor_dir: PathBuf,
+    pub deploy_handoff_dir: PathBuf,
+    pub production_preflight_dir: PathBuf,
     pub local_team_sidecar_alpha: bool,
     pub hosted_saas: bool,
     pub passed: bool,
@@ -6804,6 +6806,8 @@ pub struct SidecarPackageSupportBundleReport {
     pub package_check: SidecarPackageCheckReport,
     pub operator_handoff: SidecarPackageOpsHandoffReport,
     pub doctor: SidecarPackageDoctorReport,
+    pub deploy_handoff: SidecarPackageDeployHandoffReport,
+    pub production_preflight: SidecarPackageProductionPreflightReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8675,22 +8679,31 @@ pub fn write_sidecar_package_support_bundle(
     let markdown_path = output_dir.join("support-bundle.md");
     let operator_handoff_dir = root.join("sidecar/.agentk/operator-handoff");
     let doctor_dir = root.join("sidecar/.agentk/doctor");
+    let deploy_handoff_dir = root.join("sidecar/.agentk/deploy-handoff");
+    let production_preflight_dir = root.join("sidecar/.agentk/production-preflight");
 
     let package_check = check_sidecar_package(root)?;
     let operator_handoff = write_sidecar_package_ops_handoff(root, &operator_handoff_dir)?;
     let doctor = write_sidecar_package_doctor(root, &doctor_dir, release_manifest)?;
+    let deploy_handoff = write_sidecar_package_deploy_handoff(root, &deploy_handoff_dir)?;
+    let production_preflight =
+        write_sidecar_package_production_preflight(root, &production_preflight_dir)?;
 
     let artifacts = sidecar_package_support_bundle_artifacts(
         root,
         release_manifest,
         &operator_handoff,
         &doctor,
+        &deploy_handoff,
+        &production_preflight,
     )?;
     let ticket_attachments = sidecar_package_support_bundle_ticket_attachments(
         root,
         release_manifest,
         &operator_handoff,
         &doctor,
+        &deploy_handoff,
+        &production_preflight,
     );
     let required_artifacts_present = artifacts
         .iter()
@@ -8718,6 +8731,27 @@ pub fn write_sidecar_package_support_bundle(
                 "{} doctor checks, {} remediation steps",
                 doctor.checks.len(),
                 doctor.remediation_steps.len()
+            ),
+        ),
+        support_bundle_check(
+            "deploy handoff",
+            deploy_handoff.passed,
+            format!(
+                "{} deploy checks, {} supervisor probes",
+                deploy_handoff.checks.len(),
+                deploy_handoff.supervisor_probes.len()
+            ),
+        ),
+        support_bundle_check(
+            "production preflight",
+            production_preflight.passed,
+            format!(
+                "{} preflight checks, {} production refs, live secret retrieval {}",
+                production_preflight.checks.len(),
+                production_preflight
+                    .production_secret_refs
+                    .production_provider_ref_count,
+                production_preflight.live_secret_retrieval
             ),
         ),
         support_bundle_check(
@@ -8758,6 +8792,8 @@ pub fn write_sidecar_package_support_bundle(
         release_manifest_path: release_manifest.map(Path::to_path_buf),
         operator_handoff_dir,
         doctor_dir,
+        deploy_handoff_dir,
+        production_preflight_dir,
         local_team_sidecar_alpha: true,
         hosted_saas: false,
         passed,
@@ -8768,6 +8804,8 @@ pub fn write_sidecar_package_support_bundle(
         package_check,
         operator_handoff,
         doctor,
+        deploy_handoff,
+        production_preflight,
     };
     fs::write(&json_path, serde_json::to_string_pretty(&report)?)?;
     fs::write(
@@ -10947,6 +10985,8 @@ fn sidecar_package_support_bundle_artifacts(
     release_manifest: Option<&Path>,
     operator_handoff: &SidecarPackageOpsHandoffReport,
     doctor: &SidecarPackageDoctorReport,
+    deploy_handoff: &SidecarPackageDeployHandoffReport,
+    production_preflight: &SidecarPackageProductionPreflightReport,
 ) -> Result<Vec<SidecarPackageSupportBundleArtifact>, AgentKError> {
     let mut artifacts = Vec::new();
     sidecar_package_support_bundle_artifact(
@@ -10985,6 +11025,26 @@ fn sidecar_package_support_bundle_artifacts(
         &mut artifacts,
         "sidecar doctor markdown",
         doctor.markdown_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "deploy handoff json",
+        deploy_handoff.json_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "deploy handoff markdown",
+        deploy_handoff.markdown_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "production preflight json",
+        production_preflight.json_path.clone(),
+    )?;
+    sidecar_package_support_bundle_artifact(
+        &mut artifacts,
+        "production preflight markdown",
+        production_preflight.markdown_path.clone(),
     )?;
     sidecar_package_support_bundle_artifact(
         &mut artifacts,
@@ -11061,6 +11121,8 @@ fn sidecar_package_support_bundle_ticket_attachments(
     release_manifest: Option<&Path>,
     operator_handoff: &SidecarPackageOpsHandoffReport,
     doctor: &SidecarPackageDoctorReport,
+    deploy_handoff: &SidecarPackageDeployHandoffReport,
+    production_preflight: &SidecarPackageProductionPreflightReport,
 ) -> Vec<SidecarPackageSupportBundleAttachment> {
     let mut attachments = vec![
         sidecar_package_support_bundle_attachment(
@@ -11082,6 +11144,26 @@ fn sidecar_package_support_bundle_ticket_attachments(
             "sidecar doctor json",
             doctor.json_path.clone(),
             "Machine-readable support diagnostic with package, gateway, dashboard, and release-manifest checks.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "deploy handoff",
+            deploy_handoff.markdown_path.clone(),
+            "Human-readable deployment handoff with service templates, owner steps, and supervisor probes.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "deploy handoff json",
+            deploy_handoff.json_path.clone(),
+            "Machine-readable deployment handoff with hashed deploy artifacts and supervisor probe evidence.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "production preflight",
+            production_preflight.markdown_path.clone(),
+            "Human-readable preflight for supervisor env templates, placeholder coverage, production-shaped refs, and no live secret retrieval.",
+        ),
+        sidecar_package_support_bundle_attachment(
+            "production preflight json",
+            production_preflight.json_path.clone(),
+            "Machine-readable preflight with redacted secret-reference provider inventory and local non-hosted scope.",
         ),
         sidecar_package_support_bundle_attachment(
             "package manifest",
@@ -11142,7 +11224,7 @@ fn sidecar_package_support_bundle_markdown(report: &SidecarPackageSupportBundleR
     let verdict = if report.passed { "ready" } else { "blocked" };
     let mut out = String::new();
     out.push_str("# AgentK Support Bundle\n\n");
-    out.push_str("This bundle is an archiveable local/team sidecar alpha support artifact. It combines the package preflight, operator handoff, sidecar doctor report, and hashed evidence inventory without delivery credentials or raw tool payloads.\n\n");
+    out.push_str("This bundle is an archiveable local/team sidecar alpha support artifact. It combines the package preflight, operator handoff, sidecar doctor report, deploy handoff, production preflight, and hashed evidence inventory without delivery credentials or raw tool payloads.\n\n");
     out.push_str(&format!("- Verdict: `{verdict}`\n"));
     out.push_str(&format!("- Package root: `{}`\n", report.root.display()));
     out.push_str(&format!(
@@ -11156,6 +11238,14 @@ fn sidecar_package_support_bundle_markdown(report: &SidecarPackageSupportBundleR
     out.push_str(&format!(
         "- Sidecar doctor: `{}`\n",
         report.doctor_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Deploy handoff: `{}`\n",
+        report.deploy_handoff_dir.display()
+    ));
+    out.push_str(&format!(
+        "- Production preflight: `{}`\n",
+        report.production_preflight_dir.display()
     ));
     if let Some(release_manifest) = &report.release_manifest_path {
         out.push_str(&format!(
@@ -13520,7 +13610,7 @@ fn alpha_release_shipped_surfaces(root: &Path) -> Vec<AlphaReleaseStatusItem> {
         alpha_release_source_surface(
             root,
             "support bundle package path",
-            "packaged support bundle binds operator handoff, sidecar doctor, and hashed evidence inventory",
+            "packaged support bundle binds operator handoff, sidecar doctor, deploy/preflight handoffs, and hashed evidence inventory",
             &[
                 ("src/main.rs", "SidecarPackageSupportBundle"),
                 ("src/lib.rs", "write_sidecar_package_support_bundle"),
@@ -26555,9 +26645,10 @@ install receipt still match the handoff.
   `AGENTK_PACKAGE_RELEASE_MANIFEST` or pass `--release-manifest` to bind the
   package manifest, package lock, archive checksum, and install receipt hashes.
 - `bin/agentk-sidecar-support-bundle`: refreshes the operator handoff, runs
-  the sidecar doctor, and writes one archiveable support-bundle JSON/Markdown
-  report with hashed package, dashboard, store, trace, and notification
-  artifact metadata.
+  the sidecar doctor, deploy handoff, and production preflight, then writes one
+  archiveable support-bundle JSON/Markdown report with hashed package,
+  deployment, preflight, dashboard, store, trace, and notification artifact
+  metadata.
 - `bin/agentk-sidecar-deploy-handoff`: validates service templates and
   supervisor env examples, then writes one archiveable deploy-handoff
   JSON/Markdown report with hashes for local deployment tickets.
@@ -26675,9 +26766,10 @@ the IdP or verify live OIDC tokens.
 `bin/agentk-sidecar-support-bundle` writes
 `sidecar/.agentk/support-bundle/support-bundle.json` and
 `sidecar/.agentk/support-bundle/support-bundle.md` by default.
-It reruns the package self-check, operator handoff, and sidecar doctor, then
-records byte counts and SHA-256s for the package manifest, package lock,
-operator handoff, doctor report, safe-agent trace, dashboard, store export,
+It reruns the package self-check, operator handoff, sidecar doctor, deploy
+handoff, and production preflight, then records byte counts and SHA-256s for
+the package manifest, package lock, operator handoff, doctor report, deploy
+handoff, production preflight, safe-agent trace, dashboard, store export,
 durable approvals, and Slack/GitHub/email payload drafts. Set
 `AGENTK_SUPPORT_BUNDLE_OUT` to choose another output directory and set
 `AGENTK_PACKAGE_RELEASE_MANIFEST` to bind the support bundle to package release
@@ -31375,10 +31467,26 @@ can_deny = ["*"]
         assert!(support_report.checks.iter().any(|check| {
             check.name == "support artifact inventory" && check.status == ReadinessStatus::Pass
         }));
+        assert!(support_report.checks.iter().any(|check| {
+            check.name == "deploy handoff"
+                && check.status == ReadinessStatus::Pass
+                && check.detail.contains("supervisor probes")
+        }));
+        assert!(support_report.checks.iter().any(|check| {
+            check.name == "production preflight"
+                && check.status == ReadinessStatus::Pass
+                && check.detail.contains("live secret retrieval false")
+        }));
+        assert!(support_report.deploy_handoff.passed);
+        assert_eq!(support_report.deploy_handoff.supervisor_probes.len(), 6);
+        assert!(support_report.production_preflight.passed);
+        assert!(!support_report.production_preflight.live_secret_retrieval);
         assert!(support_report.ticket_attachments.len() >= 10);
         for attachment in [
             "operator handoff",
             "sidecar doctor",
+            "deploy handoff",
+            "production preflight",
             "package manifest",
             "package lock",
             "safe-agent trace",
@@ -31403,6 +31511,20 @@ can_deny = ["*"]
         assert!(support_report.artifacts.iter().any(|artifact| {
             artifact.name == "safe-agent trace" && artifact.present && artifact.bytes.is_some()
         }));
+        for artifact in [
+            "deploy handoff json",
+            "deploy handoff markdown",
+            "production preflight json",
+            "production preflight markdown",
+        ] {
+            assert!(
+                support_report
+                    .artifacts
+                    .iter()
+                    .any(|item| item.name == artifact && item.present && item.sha256.is_some()),
+                "missing support artifact {artifact}"
+            );
+        }
         let support_json =
             fs::read_to_string(&support_report.json_path).expect("support bundle JSON should read");
         let support_value: serde_json::Value =
@@ -31413,6 +31535,17 @@ can_deny = ["*"]
             serde_json::json!(true)
         );
         assert_eq!(support_value["hosted_saas"], serde_json::json!(false));
+        assert_eq!(
+            support_value["deploy_handoff"]["supervisor_probes"]
+                .as_array()
+                .expect("nested deploy probes should be an array")
+                .len(),
+            6
+        );
+        assert_eq!(
+            support_value["production_preflight"]["live_secret_retrieval"],
+            serde_json::json!(false)
+        );
         assert!(
             support_value["ticket_attachments"]
                 .as_array()
@@ -31432,6 +31565,8 @@ can_deny = ["*"]
         assert!(support_markdown.contains("## Ticket Attachments"));
         assert!(support_markdown.contains("operator handoff"));
         assert!(support_markdown.contains("sidecar doctor"));
+        assert!(support_markdown.contains("deploy handoff"));
+        assert!(support_markdown.contains("production preflight"));
         assert!(support_markdown.contains("notification payload drafts"));
         assert!(support_markdown.contains("Hosted SaaS: `false`"));
         assert!(support_markdown.contains("No remediation required"));
