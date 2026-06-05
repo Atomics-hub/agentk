@@ -7,7 +7,8 @@ Current status: the repository is public and the v0.2 alpha release train is
 gated through `release-ticket`, `release-status`, and the GitHub Actions
 `audit` job. Treat the older checkbox lists below as reusable release hygiene,
 not as the sole source of truth for current alpha readiness. The current
-reviewer bundle is:
+closure decision is [`docs/v0.2-alpha-closure.md`](v0.2-alpha-closure.md), and
+the current reviewer bundle is:
 
 ```sh
 cargo run --locked -- release-ticket --out dist/release-ticket --force --json
